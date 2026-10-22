@@ -34,12 +34,12 @@ def test_apply_gives_every_llm_app_a_client_a_key_and_the_environment(world):  #
         env = cli.sandboxes[f"eco-{name}"]["env"]
         # exactly the names TrustDesk and PagerLens read (config.py, embedcfg.py)
         assert env["LLM_BASE_URL"] == "https://eco-llmgw.sandbox.example/v1" and env["LLM_API_KEY"] == key
-        assert env["LLM_CHAT_MODEL"] == "chat-default" and env["EMBEDDING_MODEL"] == "embed-default" and env["EMBEDDING_DIM"] == "768"
+        assert env["LLM_CHAT_MODEL"] == "chat-default" and env["EMBEDDING_MODEL"] == "embed-default" and env["EMBEDDING_DIM"] == "1536"
     assert not any("LLM_BASE_URL" in cli.sandboxes[f"eco-{k}"]["env"] for k in ("citypulse", "cpsim", "llmgw", "identity"))
     # the gateway is created with the operator key and the default alias names it seeds
     gwenv = cli.sandboxes["eco-llmgw"]["env"]
     assert gwenv["LLMGW_API_KEY"] == ctx.state.secret("llmgw", "LLMGW_API_KEY") and gwenv["LLMGW_DEFAULT_CHAT_ALIAS"] == "chat-default"
-    assert gwenv["LLMGW_DEFAULT_EMBED_ALIAS"] == "embed-default" and gwenv["LLMGW_DEFAULT_EMBED_DIM"] == "768"
+    assert gwenv["LLMGW_DEFAULT_EMBED_ALIAS"] == "embed-default" and gwenv["LLMGW_DEFAULT_EMBED_DIM"] == "1536"
     # each app's key works for its own chat call, and the operator key never reaches /v1
     for name in CONSUMERS:
         assert Gateway("https://eco-llmgw.sandbox.example", "x", gw.client(gw.operator_key)).chat_test(ctx.state.app(name)["llm_key"], "chat-default") == (True, "ok")
@@ -194,7 +194,7 @@ def test_the_plan_shows_the_wiring_without_any_key(world):  # noqa: F811
     text = "\n".join([s.title + "\n" + "\n".join(s.detail) for s in build(ctx)])
     assert "TrustDesk: LLM gateway client and key" in text and "ensure client 'trustdesk'" in text and "5,000,000 tokens/month, hard" in text
     assert "LLM_BASE_URL=" in text and "<llmgw url>/v1" in text and "LLM_API_KEY=***" in text and "LLMGW_API_KEY=***" in text
-    assert "LLM_CHAT_MODEL=chat-default" in text and "EMBEDDING_MODEL=embed-default" in text and "EMBEDDING_DIM=768" in text
+    assert "LLM_CHAT_MODEL=chat-default" in text and "EMBEDDING_MODEL=embed-default" in text and "EMBEDDING_DIM=1536" in text
     assert ctx.state.secret("llmgw", "LLMGW_API_KEY") not in text
     titles = [s.title for s in build(ctx)]
     assert titles.index("LLM gateway: database and sandbox") < titles.index("TrustDesk: LLM gateway client and key") < titles.index("TrustDesk: database and sandbox")
