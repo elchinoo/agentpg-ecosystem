@@ -16,6 +16,8 @@ looks like one and tells you to list it under `generate:`.
 Apps are built on [agentpg-kit](https://github.com/elchinoo/agentpg-kit): TrustDesk, PagerLens, CityPulse, CityPulse Simulator,
 PayBroker and the LLM gateway all read the same `<PREFIX>_OIDC_*` variables.
 
+**Full walkthrough for a first live deployment: [docs/DEPLOY.md](docs/DEPLOY.md).**
+
 ## Use
 
 ```bash
