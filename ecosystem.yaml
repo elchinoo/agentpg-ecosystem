@@ -1,0 +1,109 @@
+# The fleet in one file. `ecoctl plan` shows what it would create; `ecoctl apply --execute` creates it.
+# No secrets belong here: names under `generate:` get a random value that ecoctl keeps in .ecosystem/ (git-ignored).
+version: 1
+fleet: eco                       # prefix of every database and sandbox name (eco-trustdesk, eco-trustdesk-db, ...)
+agentpg:
+  registry: ghcr.io/elchinoo
+  tag: latest
+  size: small
+
+identity:
+  image: identity
+  generate: [IDENTITY_ENCRYPTION_KEY]
+  extensions: []
+
+apps:
+  trustdesk:
+    name: TrustDesk
+    description: Compliance workspace
+    extensions: [vector, pg_trgm]
+    generate: [TRUSTDESK_ENCRYPTION_KEY]
+    env: {AUTO_SEED: "true"}
+    roles:
+      - {name: admin, description: "Everything"}
+      - {name: approver, description: "Decide employee requests and read reports"}
+      - {name: viewer, description: "Read requests, advice and reports"}
+    exposes: [trustdesk.requests.write, trustdesk.kb.read, trustdesk.metrics]
+
+  pagerlens:
+    name: PagerLens
+    description: Observability and incident investigation
+    extensions: [vector, pg_trgm]
+    generate: [PAGERLENS_ENCRYPTION_KEY]
+    roles:
+      - {name: admin, description: "Everything"}
+      - {name: responder, description: "Investigate and handle incidents"}
+      - {name: viewer, description: "Read dashboards and incidents"}
+    exposes: [pagerlens.ingest, pagerlens.read, pagerlens.metrics]
+
+  citypulse:
+    name: CityPulse
+    description: Smart-city IoT sample
+    generate: []
+    roles:
+      - {name: admin, description: "Everything"}
+      - {name: operator, description: "Run the simulated city"}
+      - {name: viewer, description: "Read only"}
+    exposes: [citypulse.ingest, citypulse.read, citypulse.metrics]
+    calls:
+      pagerlens: [pagerlens.ingest]
+
+  cpsim:
+    name: CityPulse Simulator
+    description: Simulated sensors and companies that generate load
+    env_prefix: CPSIM
+    roles:
+      - {name: admin, description: "Everything"}
+      - {name: operator, description: "Run and edit simulations"}
+      - {name: viewer, description: "Read only"}
+    exposes: [cpsim.read, cpsim.metrics]
+    calls:
+      citypulse: [citypulse.ingest]
+      trustdesk: [trustdesk.requests.write]
+      pagerlens: [pagerlens.ingest]
+
+  paybroker:
+    name: PayBroker
+    description: Payment broker with a three-tier fraud engine
+    extensions: [vector]
+    generate: [PAYBROKER_ENCRYPTION_KEY]
+    roles:
+      - {name: admin, description: "Everything"}
+      - {name: risk_manager, description: "Cases, chargebacks and fraud rules"}
+      - {name: analyst, description: "Cases and chargebacks"}
+      - {name: operator, description: "Merchants, keys, webhooks and connectors"}
+      - {name: viewer, description: "Read only"}
+    exposes: [paybroker.read, paybroker.metrics]
+
+  llmgw:
+    name: LLM gateway
+    description: One place for model provider keys, budgets and usage
+    env_prefix: LLMGW
+    generate: [LLMGW_ENCRYPTION_KEY]
+    roles:
+      - {name: admin, description: "Everything"}
+      - {name: operator, description: "Clients, models and usage"}
+      - {name: viewer, description: "Read usage"}
+    exposes: [llmgw.use, llmgw.read, llmgw.metrics]
+
+  pagerlens-agent:                # runs next to what it watches, not on AgentPG: registered only
+    name: PagerLens agent
+    description: Collects metrics and logs and pushes them to PagerLens
+    env_prefix: PAGERLENS_AGENT
+    web: false
+    deploy: false
+    calls:
+      pagerlens: [pagerlens.ingest]
+    url_env: {pagerlens: PAGERLENS_URL}
+
+access:
+  groups:
+    ecosystem-admins:
+      description: Administrators of every app
+      grants: {"*": admin}
+    risk-team:
+      description: People who handle payment fraud
+      grants: {paybroker: risk_manager, pagerlens: viewer}
+    support:
+      description: Compliance approvers
+      grants: {trustdesk: approver}

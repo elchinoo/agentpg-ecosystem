@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+# secrets and ids written by `ecoctl apply`: never commit
+.ecosystem/
+.env
+.env.*
+!.env.example
