@@ -56,6 +56,7 @@ apps:
     image: citypulsesimulator          # the image is named after the repository
     description: Simulated sensors and companies that generate load
     env_prefix: CPSIM
+    generate: [CPSIM_ENCRYPTION_KEY]     # unlocks the credential store (Settings > Credentials) after a restart
     roles:
       - {name: admin, description: "Everything"}
       - {name: operator, description: "Run and edit simulations"}
