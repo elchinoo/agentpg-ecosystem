@@ -50,6 +50,7 @@ apps:
 
   cpsim:
     name: CityPulse Simulator
+    image: citypulsesimulator          # the image is named after the repository
     description: Simulated sensors and companies that generate load
     env_prefix: CPSIM
     roles:
@@ -77,6 +78,7 @@ apps:
 
   llmgw:
     name: LLM gateway
+    image: llm-gateway
     description: One place for model provider keys, budgets and usage
     env_prefix: LLMGW
     generate: [LLMGW_ENCRYPTION_KEY]
