@@ -24,7 +24,7 @@ packages = ["src/ecoctl"]
 testpaths = ["tests"]
 
 [tool.ruff]
-line-length = 170
+line-length = 200
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]

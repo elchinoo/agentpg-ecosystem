@@ -27,6 +27,7 @@ class Context:
     agentpg: AgentPG
     http: httpx.Client | None = None                        # injected in tests
     rotate: bool = False
+    only: set[str] | None = None                            # deploy just these apps (and what they call); None: all
     _identity: Identity | None = None
 
     def identity(self) -> Identity:
@@ -107,7 +108,8 @@ def _deploy(ctx: Context, app: App) -> str:
     if not entry.get("sandbox_id"):
         entry["sandbox_id"] = cli.sandbox_id(m.sandbox_name(app.key))
         if not entry["sandbox_id"]:
-            cli.run(AgentPG.create_sandbox(m.sandbox_name(app.key), m.image(app), entry["instance_id"], app.port, env, secret_names))
+            cli.run(AgentPG.create_sandbox(m.sandbox_name(app.key), m.image(app), entry["instance_id"], app.port, env, secret_names,
+                                           auto_pause=m.pause_enabled(app), plan=m.plan_for(app)))
             entry["sandbox_id"] = cli.sandbox_id(m.sandbox_name(app.key))
             entry["env_hash"] = _env_hash(env)
             outcome.append("created")
@@ -159,12 +161,16 @@ def build(ctx: Context) -> list[Step]:
                       [AgentPG.create_instance(m.instance_name("identity"), m.size).display(),
                        *[AgentPG.extension("<instance-id>", e).display() for e in ident.extensions],
                        AgentPG.create_sandbox(m.sandbox_name("identity"), m.image(ident), "<instance-id>", ident.port,
-                                              {**cmd_env, "IDENTITY_API_KEY": "<generated>"}, {"IDENTITY_API_KEY"}).display()],
+                                              {**cmd_env, "IDENTITY_API_KEY": "<generated>"}, {"IDENTITY_API_KEY"},
+                                              auto_pause=m.pause_enabled(ident), plan=m.plan_for(ident)).display()],
                       lambda c: _deploy(c, c.manifest.identity)))
     steps.append(Step("Identity provider: wait until it is ready and pin its issuer URL",
                       ["GET <identity>/readyz", "GET <identity>/.well-known/openid-configuration  (the first request fixes the issuer)"],
                       lambda c: _ready(c)))
+    selected = m.closure(ctx.only) if ctx.only else set(m.apps)
     for app in m.order():
+        if app.key not in selected:
+            continue
         detail = []
         if app.web:
             detail.append(f"identity: register web client '{app.key}' with roles {', '.join(r.name for r in app.roles) or '(none)'}")
@@ -190,12 +196,15 @@ def build(ctx: Context) -> list[Step]:
         deploy = [AgentPG.create_instance(m.instance_name(app.key), m.size).display(),
                   *[AgentPG.extension("<instance-id>", e).display() for e in app.extensions],
                   AgentPG.create_sandbox(m.sandbox_name(app.key), m.image(app), "<instance-id>", app.port, placeholders,
-                                         {k for k, v in placeholders.items() if v == "<generated>"}).display()]
+                                         {k for k, v in placeholders.items() if v == "<generated>"}, auto_pause=m.pause_enabled(app),
+                                         plan=m.plan_for(app)).display()]
         steps.append(Step(f"{app.name}: database and sandbox", deploy, (lambda a: lambda c: _deploy(c, a))(app)))
         if app.web:
             steps.append(Step(f"{app.name}: point its sign-in at the real URL", [f"identity: set redirect URI to <{app.key} url>/auth/callback and its launcher URL"],
                               (lambda a: lambda c: _finish_urls(c, a))(app)))
     for g in m.groups:
+        if not any(t in selected or (t == "*" and selected) for t in g.grants):
+            continue
         steps.append(Step(f"Access: group '{g.name}'", [f"{target}: {role}" for target, role in g.grants.items()], (lambda grp: lambda c: _group(c, grp))(g)))
     return steps
 
@@ -211,6 +220,9 @@ def _group(ctx: Context, g) -> str:
     ident.ensure_group(g.name, g.description)
     done = 0
     for target, role in g.grants.items():
-        for key in ([k for k, a in m.apps.items() if a.web and role in {r.name for r in a.roles}] if target == "*" else [target]):
+        chosen = m.closure(ctx.only) if ctx.only else set(m.apps)
+        for key in ([k for k, a in m.apps.items() if k in chosen and a.web and role in {r.name for r in a.roles}] if target == "*" else [target]):
+            if key not in chosen:
+                continue
             done += ident.ensure_grant(g.name, key, role)
     return f"{done} grant(s) added"

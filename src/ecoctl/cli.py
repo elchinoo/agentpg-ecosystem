@@ -20,7 +20,11 @@ def _print_plan(steps) -> None:
 
 
 def _ctx(args) -> Context:
-    return Context(load(args.file), State(Path(args.state)), AgentPG(), rotate=getattr(args, "rotate", False))
+    only = {a.strip() for a in args.only.split(",") if a.strip()} if getattr(args, "only", None) else None
+    ctx = Context(load(args.file), State(Path(args.state)), AgentPG(), rotate=getattr(args, "rotate", False), only=only)
+    if only:
+        ctx.manifest.closure(only)                      # unknown names fail now
+    return ctx
 
 
 def cmd_validate(args) -> int:
@@ -124,10 +128,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--state", default=str(DEFAULT_DIR), help="where ids and generated secrets are kept (default .ecosystem)")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("validate", help="check the manifest")
-    sub.add_parser("plan", help="show what apply would do (changes nothing)")
+    pl = sub.add_parser("plan", help="show what apply would do (changes nothing)")
+    pl.add_argument("--only", help="comma-separated apps to include (plus what they call); the identity provider is always included")
     ap = sub.add_parser("apply", help="show the plan; with --execute, run it")
     ap.add_argument("--execute", action="store_true", help="actually create and register (otherwise a dry run)")
     ap.add_argument("--yes", action="store_true", help="do not ask for confirmation")
+    ap.add_argument("--only", help="comma-separated apps to deploy (plus what they call); the identity provider is always included")
     ap.add_argument("--rotate", action="store_true", help="issue new client secrets for apps that already exist")
     sub.add_parser("status", help="health of every app and drift from the identity registry")
     en = sub.add_parser("env", help="print the environment an app is created with")

@@ -5,10 +5,13 @@ fleet: eco                       # prefix of every database and sandbox name (ec
 agentpg:
   registry: ghcr.io/elchinoo
   tag: latest
-  size: small
+  size: small                    # database size
+  auto_pause: true               # idle sandboxes pause themselves (resume with `agentpg sandbox resume <id>`)
+  # plan: small                  # compute plan of every sandbox (small|medium|large)
 
 identity:
   image: identity
+  auto_pause: false              # everything signs in through it: never let it sleep
   generate: [IDENTITY_ENCRYPTION_KEY]
   extensions: []
 

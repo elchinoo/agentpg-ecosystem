@@ -172,3 +172,27 @@ def test_env_for_an_app_before_anything_exists(tmp_path):
     ctx = Context(load(MANIFEST), State(tmp_path / "e"), AgentPG(run=FakeAgentPG()))
     env, secret_names = app_env(ctx, ctx.manifest.apps["trustdesk"])
     assert "TRUSTDESK_OIDC_ISSUER" not in env and "TRUSTDESK_ENCRYPTION_KEY" in secret_names and env["AUTO_SEED"] == "true"
+
+
+def test_only_deploys_a_subset_with_what_it_calls(tmp_path):
+    cli, idp = FakeAgentPG(), FakeIdentity()
+    state = State(tmp_path / "eco")
+    ctx = Context(load(MANIFEST), state, AgentPG(run=cli), only={"cpsim"})
+    ctx.http = idp.client(state.admin_key())
+    apply(ctx)
+    assert set(cli.sandboxes) == {"eco-identity", "eco-pagerlens", "eco-citypulse", "eco-trustdesk", "eco-cpsim"}      # cpsim + its callees (citypulse -> pagerlens)
+    assert "paybroker" not in idp.apps and "llmgw" not in idp.apps
+    granted = {(g["client_id"]) for g in idp.grants}
+    assert "paybroker" not in granted and "trustdesk" in granted
+
+
+def test_unknown_only_names_fail_and_pause_and_plan_reach_the_command(world):
+    ctx, cli, idp = world
+    with pytest.raises(Exception, match="not an app"):
+        ctx.manifest.closure({"ghost"})
+    apply(ctx)
+    ident = next(c for c in cli.calls if c[1:3] == ["sandbox", "create"] and c[3] == "eco-identity")
+    other = next(c for c in cli.calls if c[1:3] == ["sandbox", "create"] and c[3] == "eco-trustdesk")
+    assert "--auto-pause=false" in ident and "--auto-pause=false" not in other
+    cmd = AgentPG.create_sandbox("n", "i", "x", 8000, {}, set(), auto_pause=False, plan="medium")
+    assert "--plan" in cmd.args and "medium" in cmd.args

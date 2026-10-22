@@ -10,6 +10,7 @@ ENV_NAME = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
 SCOPE = re.compile(r"^[a-z0-9][a-z0-9._:-]{0,59}$")
 ROLE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,39}$")
 EXTENSIONS = {"vector", "pg_trgm", "pgcrypto", "hstore", "citext", "uuid-ossp", "btree_gin", "btree_gist"}
+PLANS = {"small", "medium", "large"}
 SECRETISH = re.compile(r"(SECRET|PASSWORD|PASSWD|TOKEN|KEY|DSN|CREDENTIAL)", re.I)
 URL_WITH_PASSWORD = re.compile(r"://[^/\s:@]+:[^/\s@]+@")
 
@@ -43,6 +44,8 @@ class App:
     url_env: dict[str, str]                   # callee app -> env var that holds the callee's URL for this app
     web: bool                                 # browser sign-in (registered as a web client)
     deploy: bool = True                       # False: only registered (a job or CLI that runs elsewhere)
+    auto_pause: bool | None = None            # None: the fleet default; False keeps a sandbox running when idle
+    plan: str | None = None                   # compute plan for the sandbox (small|medium|large); None: the fleet default
 
     @property
     def service(self) -> bool:
@@ -69,6 +72,31 @@ class Manifest:
     identity: App
     apps: dict[str, App]
     groups: tuple[Group, ...] = field(default_factory=tuple)
+    auto_pause: bool = True
+    plan: str | None = None
+
+    def pause_enabled(self, app: App) -> bool:
+        return self.auto_pause if app.auto_pause is None else app.auto_pause
+
+    def plan_for(self, app: App) -> str | None:
+        return app.plan or self.plan
+
+    def closure(self, keys) -> set[str]:
+        """The apps to deploy for a selection: the selection plus every app it calls, transitively (their URLs are needed)."""
+        out: set[str] = set()
+
+        def add(k: str) -> None:
+            if k in out:
+                return
+            if k not in self.apps:
+                raise ManifestError(f"{k!r} is not an app in this manifest")
+            out.add(k)
+            for callee in self.apps[k].calls:
+                add(callee)
+
+        for k in keys:
+            add(k)
+        return out
 
     def sandbox_name(self, key: str) -> str:
         return f"{self.fleet}-{key}"
@@ -150,7 +178,7 @@ def _env(raw, where: str) -> dict[str, str]:
 
 def _app(key: str, raw: dict, where: str, *, identity: bool = False) -> App:
     _only(raw, {"name", "description", "image", "port", "extensions", "env", "generate", "health", "web", "roles", "default_roles",
-                "env_prefix", "exposes", "calls", "url_env", "deploy"}, where)
+                "env_prefix", "exposes", "calls", "url_env", "deploy", "auto_pause", "plan"}, where)
     if not NAME.match(key):
         raise ManifestError(f"{where}: {key!r} must be 2-40 lowercase letters, digits or dashes")
     port = raw.get("port", 8000)
@@ -201,7 +229,13 @@ def _app(key: str, raw: dict, where: str, *, identity: bool = False) -> App:
     deploy = raw.get("deploy", True)
     if not isinstance(deploy, bool):
         raise ManifestError(f"{where}.deploy must be true or false")
-    return App(deploy=deploy, key=key, name=_text(raw.get("name"), f"{where}.name", key), description=str(raw.get("description", ""))[:300],
+    auto_pause = raw.get("auto_pause")
+    if auto_pause is not None and not isinstance(auto_pause, bool):
+        raise ManifestError(f"{where}.auto_pause must be true or false")
+    plan = raw.get("plan")
+    if plan is not None and plan not in PLANS:
+        raise ManifestError(f"{where}.plan must be one of {', '.join(sorted(PLANS))}")
+    return App(deploy=deploy, auto_pause=auto_pause, plan=plan, key=key, name=_text(raw.get("name"), f"{where}.name", key), description=str(raw.get("description", ""))[:300],
                image=_text(raw.get("image"), f"{where}.image", key, 100), port=port, extensions=exts, env=_env(raw.get("env"), f"{where}.env"),
                generate=generate, health=_text(raw.get("health"), f"{where}.health", "/healthz", 100), roles=tuple(roles), default_roles=default_roles,
                env_prefix=str(prefix), exposes=exposes, calls=calls, url_env=url_env, web=web)
@@ -216,12 +250,18 @@ def parse(doc: dict) -> Manifest:
     if not re.match(r"^[a-z0-9][a-z0-9-]{0,19}$", fleet):
         raise ManifestError("fleet must be lowercase letters, digits and dashes (at most 20)")
     ag = _dict(doc.get("agentpg"), "agentpg")
-    _only(ag, {"registry", "tag", "size"}, "agentpg")
+    _only(ag, {"registry", "tag", "size", "auto_pause", "plan"}, "agentpg")
     registry = _text(ag.get("registry"), "agentpg.registry", "ghcr.io/elchinoo", 100).rstrip("/")
     if not re.match(r"^[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)*$", registry):
         raise ManifestError("agentpg.registry must look like ghcr.io/owner")
     tag = _text(ag.get("tag"), "agentpg.tag", "latest", 60)
     size = _text(ag.get("size"), "agentpg.size", "small", 20)
+    fleet_pause = ag.get("auto_pause", True)
+    if not isinstance(fleet_pause, bool):
+        raise ManifestError("agentpg.auto_pause must be true or false")
+    fleet_plan = ag.get("plan")
+    if fleet_plan is not None and fleet_plan not in PLANS:
+        raise ManifestError(f"agentpg.plan must be one of {', '.join(sorted(PLANS))}")
     ident = _app("identity", _dict(doc.get("identity"), "identity"), "identity", identity=True)
     if ident.calls:
         raise ManifestError("identity: the provider does not call other apps")
@@ -256,7 +296,7 @@ def parse(doc: dict) -> Manifest:
                 if t in apps and apps[t].web and role not in {r.name for r in apps[t].roles} and target != "*":
                     raise ManifestError(f"access.groups.{name}.grants.{t}: {role!r} is not a role of {t}")
         groups.append(Group(str(name), str(g.get("description", ""))[:200], grants))
-    m = Manifest(fleet=fleet, registry=registry, tag=tag, size=size, identity=ident, apps=apps, groups=tuple(groups))
+    m = Manifest(fleet=fleet, registry=registry, tag=tag, size=size, identity=ident, apps=apps, groups=tuple(groups), auto_pause=fleet_pause, plan=fleet_plan)
     m.order()                                                  # raises on a cycle
     return m
 

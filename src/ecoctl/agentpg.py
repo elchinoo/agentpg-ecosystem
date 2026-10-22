@@ -54,8 +54,13 @@ class AgentPG:
         return Command(("extensions", "create", instance_id, ext))
 
     @staticmethod
-    def create_sandbox(name: str, image: str, instance_id: str, port: int, env: dict[str, str], secret_names: set[str]) -> Command:
+    def create_sandbox(name: str, image: str, instance_id: str, port: int, env: dict[str, str], secret_names: set[str], *, auto_pause: bool = True,
+                       plan: str | None = None) -> Command:
         args = ["sandbox", "create", name, "--image", image, "--instance", instance_id, "--port", str(port)]
+        if not auto_pause:
+            args.append("--auto-pause=false")
+        if plan:
+            args += ["--plan", plan]
         secrets_ = []
         for k, v in env.items():
             args += ["--env", f"{k}={v}"]
