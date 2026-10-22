@@ -1,5 +1,6 @@
 """The `agentpg` command line, wrapped. Output is parsed the way the deployment tutorial does it: the id is the first column of
 the listing line that names the object, and the URL follows `URL:` in `sandbox status`."""
+import json
 import re
 import subprocess
 import time
@@ -48,7 +49,15 @@ class AgentPG:
     # ---- commands (also used to print a plan) --------------------------------------------------------------------------
     @staticmethod
     def create_instance(name: str, size: str) -> Command:
-        return Command(("create", "--name", name, "--size", size))
+        return Command(("create", "--name", name, "--size", size, "--json"))      # the answer carries the database key, shown only once
+
+    @staticmethod
+    def list_keys(instance_id: str) -> Command:
+        return Command(("keys", "list", instance_id, "--json"))
+
+    @staticmethod
+    def reset_key(instance_id: str, key_id: str) -> Command:
+        return Command(("keys", "reset", instance_id, key_id, "--json"))
 
     @staticmethod
     def extension(instance_id: str, ext: str) -> Command:
@@ -129,3 +138,13 @@ class AgentPG:
 
     def sandbox_url(self, sandbox_id: str) -> str | None:
         return self.sandbox_state(sandbox_id)[1]
+
+
+def token_from(output: str) -> str | None:
+    """The database key (it is also the database password) from a `--json` answer of create or reset, or None if there is none."""
+    try:
+        data = json.loads(output)
+    except ValueError:
+        return None
+    token = data.get("token") if isinstance(data, dict) else None
+    return token if isinstance(token, str) and token else None

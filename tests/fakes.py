@@ -26,7 +26,15 @@ class FakeAgentPG:
         if a[0] == "create":
             name = a[a.index("--name") + 1]
             self.instances[name] = f"inst-{len(self.instances) + 1}"
-            return f"created {name}\n"
+            self.keys = getattr(self, "keys", {})
+            self.keys[self.instances[name]] = {"id": "key-1", "token": f"a1p_sk_{name}_1"}
+            return json.dumps({"id": self.instances[name], "name": name, "token": self.keys[self.instances[name]]["token"]})
+        if a[:2] == ["keys", "list"]:
+            return json.dumps({"keys": [{"id": self.keys[a[2]]["id"], "name": "default"}]})
+        if a[:2] == ["keys", "reset"]:
+            k = self.keys[a[2]]
+            k["token"] += "r"
+            return json.dumps({"id": k["id"], "token": k["token"]})
         if a[:2] == ["instances", "list"]:
             return "ID NAME SIZE VERSION STATUS\n-- ---- ---- ------- ------\n" + "".join(f"{i} {n} small 18 running\n" for n, i in self.instances.items())
         if a[:2] == ["extensions", "create"]:

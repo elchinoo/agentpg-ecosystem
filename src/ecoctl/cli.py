@@ -1,11 +1,12 @@
 """ecoctl: validate, plan, apply, status, env."""
 import argparse
+import json
 import sys
 from pathlib import Path
 
 import httpx
 
-from .agentpg import AgentPG, AgentPGError
+from .agentpg import AgentPG, AgentPGError, token_from
 from .identity_client import Identity, IdentityError
 from .manifest import ManifestError, load
 from .plan import Context, app_env, build
@@ -161,6 +162,37 @@ def cmd_env(args) -> int:
     return 0
 
 
+def cmd_db(args) -> int:
+    """The database key of an app's instance (it is also the database password). Kept from creation; --reset rotates the instance's
+    `default` key, which nothing in the fleet uses (sandboxes get their own key from AgentPG), and keeps the new one."""
+    ctx = _ctx(args)
+    entry = ctx.state.app(args.app)
+    iid = entry.get("instance_id")
+    if not iid:
+        print(f"{args.app} has no instance yet", file=sys.stderr)
+        return 1
+    if args.reset or not entry.get("db_key"):
+        try:
+            keys = json.loads(ctx.agentpg.run(AgentPG.list_keys(iid))).get("keys", [])
+            default = next((k["id"] for k in keys if k.get("name") == "default"), None)
+            if default is None:
+                print("the instance has no key named `default` to reset", file=sys.stderr)
+                return 1
+            token = token_from(ctx.agentpg.run(AgentPG.reset_key(iid, default)))
+        except (AgentPGError, ValueError) as exc:
+            print(f"could not reset the key: {exc}", file=sys.stderr)
+            return 2
+        if not token:
+            print("AgentPG did not return a new key", file=sys.stderr)
+            return 2
+        entry["db_key"] = token
+        ctx.state.save()
+        print("# new key saved to the state file", file=sys.stderr)
+    print("# contains a secret: do not paste into a chat or commit it", file=sys.stderr)
+    print(entry["db_key"])
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="ecoctl", description="Describe, register and provision a fleet of apps on AgentPG.")
     p.add_argument("-f", "--file", default="ecosystem.yaml")
@@ -177,12 +209,15 @@ def main(argv: list[str] | None = None) -> int:
     rc = sub.add_parser("recreate", help="delete sandboxes and create them afresh (new image or environment); cascades to apps that depend on them")
     rc.add_argument("apps", help="comma-separated app keys, or identity (which recreates everything)")
     rc.add_argument("--yes", action="store_true")
+    db = sub.add_parser("db", help="print the database key (the database password) of an app's instance")
+    db.add_argument("app")
+    db.add_argument("--reset", action="store_true", help="rotate the instance's default key and keep the new one")
     sub.add_parser("status", help="health of every app and drift from the identity registry")
     en = sub.add_parser("env", help="print the environment an app is created with")
     en.add_argument("app")
     args = p.parse_args(argv)
     try:
-        return {"validate": cmd_validate, "plan": cmd_plan, "apply": cmd_apply, "status": cmd_status, "env": cmd_env, "recreate": cmd_recreate}[args.cmd](args)
+        return {"validate": cmd_validate, "plan": cmd_plan, "apply": cmd_apply, "status": cmd_status, "env": cmd_env, "db": cmd_db, "recreate": cmd_recreate}[args.cmd](args)
     except ManifestError as exc:
         print(f"manifest error: {exc}", file=sys.stderr)
         return 1

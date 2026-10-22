@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
-from .agentpg import AgentPG, AgentPGError
+from .agentpg import AgentPG, AgentPGError, token_from
 from .identity_client import PENDING_REDIRECT, Identity, IdentityError
 from .manifest import App, Manifest
 from .state import State
@@ -96,7 +96,9 @@ def _deploy(ctx: Context, app: App) -> str:
     if not entry.get("instance_id"):
         entry["instance_id"] = cli.instance_id(m.instance_name(app.key))
         if not entry["instance_id"]:
-            cli.run(AgentPG.create_instance(m.instance_name(app.key), m.size))
+            token = token_from(cli.run(AgentPG.create_instance(m.instance_name(app.key), m.size)))
+            if token:
+                entry["db_key"] = token      # also the database password; AgentPG shows it only now
             entry["instance_id"] = cli.instance_id(m.instance_name(app.key))
         if not entry["instance_id"]:
             raise AgentPGError(f"created instance {m.instance_name(app.key)} but could not find its id in `agentpg instances list`")

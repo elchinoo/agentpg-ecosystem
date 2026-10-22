@@ -274,6 +274,11 @@ target's own `/metrics` credential (for example a CityPulse metrics token) is st
 
 ## 11. Operating it
 
+**Database keys.** AgentPG shows an instance's API key once, when the instance is created, and that key is the database password. `apply`
+saves it in `.ecosystem/state.json` as `db_key`. Print one with `ecoctl db <app>`. For an instance created before this was saved (or if you
+lose the file), `ecoctl db <app> --reset` rotates the instance's `default` key (nothing in the fleet uses it; sandboxes get their own key
+from AgentPG) and saves the new one.
+
 | Task | How |
 |---|---|
 | See everything | `ecoctl status`, `agentpg sandbox list`, `agentpg instances list` |
@@ -285,7 +290,7 @@ target's own `/metrics` credential (for example a CityPulse metrics token) is st
 | Add a person or change roles | Identity console → Users or Groups. Takes effect at their next sign-in |
 | Forgot an app's local admin password | `agentpg sandbox console <id>`, then `trustdesk reset-admin` (or `pagerlens`, `citypulse`, `cpsim`, `paybroker`, `llmgw`, `identity`); for apps that store provider keys this erases them |
 | Rotate the identity signing key | Identity console → Keys → Rotate (the old key stays published for 24 h) |
-| Back up | Each app's data is in its instance; use AgentPG's instance tools. Also keep `.ecosystem/state.json` (it is the only copy of the client secrets) |
+| Back up | Each app's data is in its instance; use AgentPG's instance tools. Also keep `.ecosystem/state.json`: it is the only copy of the client secrets and of each instance's database key |
 
 ## 12. Troubleshooting
 
@@ -309,7 +314,7 @@ target's own `/metrics` credential (for example a CityPulse metrics token) is st
 | Gateway: `429 budget_exceeded` / `rate_limit_exceeded` | The client's budget or rate limit | Clients → raise the limit, or switch to soft mode |
 | Gateway: `503 vault_locked` | A real provider's key is locked after a restart | `LLMGW_ENCRYPTION_KEY` unlocks it automatically; otherwise sign in as admin |
 | `ecoctl apply` says an app "exists with a different environment" | You edited the manifest after creating the sandbox | Delete that sandbox and re-run |
-| Lost `.ecosystem/state.json` | Client secrets were only shown once | Re-run `ecoctl apply --execute --rotate`, then recreate the sandboxes |
+| Lost `.ecosystem/state.json` | Client secrets were only shown once; the database keys too (a key is the database password, and the web UI cannot show it again) | Re-run `ecoctl apply --execute --rotate`, then recreate the sandboxes |
 
 ## 13. Security checklist before you share a URL
 

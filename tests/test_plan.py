@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -32,7 +33,7 @@ def test_apply_creates_everything_in_dependency_order(world):
     ctx, cli, idp = world
     apply(ctx)
     created = [c[c.index("create") + 1] for c in cli.calls if c[1:3] == ["sandbox", "create"]]
-    assert created == ["eco-identity", "eco-pagerlens", "eco-citypulse", "eco-trustdesk", "eco-cpsim", "eco-llmgw", "eco-paybroker"]
+    assert created == ["eco-identity", "eco-pagerlens", "eco-citypulse", "eco-llmgw", "eco-trustdesk", "eco-cpsim", "eco-paybroker"]
     assert set(cli.sandboxes) == set(created) and "eco-pagerlens-agent" not in cli.sandboxes        # registered only, never deployed
     assert ("inst-2", "vector") in cli.extensions and len(cli.instances) == 7
     # an app's environment names the identity provider and the apps it calls, with real URLs
@@ -54,8 +55,8 @@ def test_the_registry_ends_up_pointing_at_the_real_urls(world):
     assert td["post_logout_uris"] == ["https://eco-trustdesk.sandbox.example/"]
     assert [r["name"] for r in td["roles"]] == ["admin", "approver", "viewer"]
     svc = idp.apps["cpsim-service"]
-    assert svc["kind"] == "service" and svc["allowed_audiences"] == ["citypulse", "pagerlens", "trustdesk"]
-    assert set(svc["allowed_scopes"]) == {"citypulse.ingest", "trustdesk.requests.write", "pagerlens.ingest"}
+    assert svc["kind"] == "service" and svc["allowed_audiences"] == ["citypulse", "llmgw", "pagerlens", "trustdesk"]
+    assert set(svc["allowed_scopes"]) == {"citypulse.ingest", "trustdesk.requests.write", "pagerlens.ingest", "llmgw.use"}
     assert "pagerlens-agent-service" in idp.apps and "pagerlens-agent" not in idp.apps          # service only
     assert idp.issuer == "https://eco-identity.sandbox.example"
 
@@ -192,8 +193,8 @@ def test_only_deploys_a_subset_with_what_it_calls(tmp_path):
     ctx = Context(load(MANIFEST), state, AgentPG(run=cli), only={"cpsim"})
     ctx.http = idp.client(state.admin_key())
     apply(ctx)
-    assert set(cli.sandboxes) == {"eco-identity", "eco-pagerlens", "eco-citypulse", "eco-trustdesk", "eco-cpsim"}      # cpsim + its callees (citypulse -> pagerlens)
-    assert "paybroker" not in idp.apps and "llmgw" not in idp.apps
+    assert set(cli.sandboxes) == {"eco-identity", "eco-llmgw", "eco-pagerlens", "eco-citypulse", "eco-trustdesk", "eco-cpsim"}      # cpsim + its callees (citypulse -> pagerlens)
+    assert "paybroker" not in idp.apps
     granted = {(g["client_id"]) for g in idp.grants}
     assert "paybroker" not in granted and "trustdesk" in granted
 
@@ -203,9 +204,7 @@ def test_unknown_only_names_fail_and_pause_and_plan_reach_the_command(world):
     with pytest.raises(Exception, match="not an app"):
         ctx.manifest.closure({"ghost"})
     apply(ctx)
-    ident = next(c for c in cli.calls if c[1:3] == ["sandbox", "create"] and c[3] == "eco-identity")
-    other = next(c for c in cli.calls if c[1:3] == ["sandbox", "create"] and c[3] == "eco-trustdesk")
-    assert "--auto-pause=false" in ident and "--auto-pause=false" not in other
+    assert all("--auto-pause=false" in c for c in cli.calls if c[1:3] == ["sandbox", "create"])      # the fleet default is to stay up
     cmd = AgentPG.create_sandbox("n", "i", "x", 8000, {}, set(), auto_pause=False, plan="medium")
     assert "--plan" in cmd.args and "medium" in cmd.args
 
@@ -248,3 +247,30 @@ def test_recreate_cascades_to_callers_and_resets_the_url(world, monkeypatch):
     changed = {k for k, v in before.items() if after.app(k)["sandbox_id"] != v}
     assert changed == {"pagerlens", "citypulse", "cpsim"}                     # trustdesk and paybroker were left alone
     assert cli.sandboxes["eco-cpsim"]["env"]["PAGERLENS_URL"] == after.app("pagerlens")["url"]
+
+
+def test_the_database_key_is_kept_when_the_instance_is_created(world):
+    ctx, cli, idp = world
+    apply(ctx)
+    for key in ctx.manifest.apps:
+        entry = ctx.state.app(key)
+        if entry.get("instance_id"):
+            assert entry["db_key"].startswith("a1p_sk_")
+    assert json.loads(Path(ctx.state.path).read_text())["apps"]["paybroker"]["db_key"]
+    assert oct(ctx.state.path.stat().st_mode & 0o777) == "0o600"
+
+
+def test_db_command_prints_the_kept_key_and_reset_replaces_it(world, capsys, monkeypatch):
+    from ecoctl import cli as cli_mod
+    ctx, cli, idp = world
+    apply(ctx)
+    monkeypatch.setattr(cli_mod, "_ctx", lambda args: ctx)
+    kept = ctx.state.app("paybroker")["db_key"]
+    assert cli_mod.cmd_db(type("A", (), {"app": "paybroker", "reset": False})()) == 0
+    assert capsys.readouterr().out.strip() == kept
+    assert cli_mod.cmd_db(type("A", (), {"app": "paybroker", "reset": True})()) == 0
+    new = capsys.readouterr().out.strip()
+    assert new != kept and State(ctx.state.dir).app("paybroker")["db_key"] == new
+    del ctx.state.app("trustdesk")["db_key"]
+    assert cli_mod.cmd_db(type("A", (), {"app": "trustdesk", "reset": False})()) == 0      # lost key: fetched afresh
+    assert ctx.state.app("trustdesk")["db_key"]
