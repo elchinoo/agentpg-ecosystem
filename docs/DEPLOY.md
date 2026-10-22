@@ -4,9 +4,12 @@ This guide takes you from nothing to a running fleet you can test live: an **ide
 shared **LLM gateway**, every one a sandbox with its own Postgres database on [AgentPG](https://www.agentpg.dev/). It uses `ecoctl`
 (this repository) for the repetitive parts and tells you exactly what is manual.
 
-> **Status of this procedure.** The pieces are tested one by one (each app's suite, `ecoctl` against a fake `agentpg` CLI and against the real
-> identity provider's admin API). **It has not yet been run end to end on a live AgentPG account.** The first run is the test. Section 12 lists
-> what is most likely to need adjusting and how; if something differs from what is written here, trust the real output and fix the doc.
+> **Status of this procedure.** Run end to end on a live AgentPG account on 2026-10-22: all seven sandboxes came up healthy, single sign-on
+> worked on every app (scripted browser flow against the real identity provider, role `<app>:admin` and `*` permissions), the Simulator fed
+> CityPulse with a minted service token (93 readings sent, 0 failures), CityPulse reported to PagerLens (3 services healthy), the Simulator's
+> companies created 14 requests in TrustDesk, PayBroker processed 60 demo payments (62% approved, p95 137 ms with simulated connector latency), and
+> TrustDesk called the model through the gateway as an ordinary account. **Not seen live:** the UIs in a browser (the author's browser pane could not
+> open these URLs), Google/GitHub login, and any real model provider. The first live run found six problems, all fixed (see the end of section 12).
 
 ## Contents
 1. [What you will create](#1-what-you-will-create)
@@ -125,6 +128,9 @@ in CityPulse, TrustDesk and PagerLens), and the identity provider is always incl
 # Stage 3: the rest
 .venv/bin/ecoctl apply --execute                     # paybroker and llmgw
 ```
+
+**A sandbox's URL contains its id** (`https://app--a1p-prod-sbx-<id>--....code.run`), so a sandbox you delete and recreate gets a **new URL**. Anything that
+knows the old URL must change: that is why `ecoctl recreate` exists (section 11). Decide your first deployment is the real one before you share URLs.
 
 `apply --execute` prints the plan and asks you to confirm (`--yes` skips the question). It creates databases and sandboxes on your account,
 which may use credits. It is **safe to run again**: it finds existing instances and sandboxes by name, never rotates a secret unless you ask
@@ -273,8 +279,8 @@ target's own `/metrics` credential (for example a CityPulse metrics token) is st
 | See everything | `ecoctl status`, `agentpg sandbox list`, `agentpg instances list` |
 | Logs | `agentpg sandbox logs <sandbox-id>` |
 | Resume a paused sandbox | `agentpg sandbox resume <sandbox-id>`; apps hold stored keys locked until a sign-in unlocks them (the platform secret, `*_ENCRYPTION_KEY`, makes that automatic: `ecoctl` sets it) |
-| Deploy a new image | CI pushes `:latest`. Delete and recreate the sandbox so it pulls: `agentpg sandbox delete <id>`, then `ecoctl apply --execute` (data stays in the instance; secrets are reused from `.ecosystem/`) |
-| Change an app's environment | Edit the manifest, delete that sandbox, `ecoctl apply --execute` |
+| Deploy a new image | CI pushes `:latest`. `ecoctl recreate <app>` deletes the sandbox and creates it afresh so it pulls the image (the database and secrets are kept). Because the URL changes, it also recreates every app that **calls** this one (their environment names its URL); recreating `identity` recreates the whole fleet. Allow a couple of minutes per app |
+| Change an app's environment | Edit the manifest, then `ecoctl recreate <app>` |
 | Rotate a client secret | `ecoctl apply --execute --rotate`, then recreate the sandboxes whose environment changed |
 | Add a person or change roles | Identity console → Users or Groups. Takes effect at their next sign-in |
 | Forgot an app's local admin password | `agentpg sandbox console <id>`, then `trustdesk reset-admin` (or `pagerlens`, `citypulse`, `cpsim`, `paybroker`, `llmgw`, `identity`); for apps that store provider keys this erases them |
@@ -286,7 +292,8 @@ target's own `/metrics` credential (for example a CityPulse metrics token) is st
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `agentpg ...` says "Invalid or expired token" | Not logged in | `agentpg login` |
-| `ecoctl` says it cannot find an instance or sandbox id after creating it | The CLI's listing format differs from what `agentpg.py` expects | Run `agentpg instances list` / `agentpg sandbox list` and compare; adjust `_find` in `src/ecoctl/agentpg.py` (the `--json` flag is available) and re-run: it is safe to repeat |
+| `ecoctl` cannot find an instance or sandbox id after creating it | The CLI's listing format differs from what `agentpg.py` expects (it matches the format seen on 2026-10-22: a header row, a dashed row, then `ID NAME ...`) | Compare `agentpg instances list` / `agentpg sandbox list` with `_find` in `src/ecoctl/agentpg.py` (the CLI also has `--json`) and re-run: it is safe to repeat |
+| `ecoctl` waits a long time at a sandbox | A new sandbox is `creating` for a minute or two; the URL appears when it is `running` | It waits up to 7 minutes and reports a failed sandbox with the platform's reason. `agentpg sandbox logs <id>` |
 | Sandbox fails with `provisioning failed (HTTP 400)` | Image private, missing or the CI build failed | Section 3; `gh run list -R elchinoo/<repo>` |
 | Every URL answers an empty `503` | Sandbox auto-paused | `agentpg sandbox resume <id>` |
 | App page says it "can't be reached", `/readyz` says `waking-database` | The instance is waking | Wait a few seconds |
@@ -327,3 +334,14 @@ rm -rf .ecosystem
 
 Check the lists first (`agentpg sandbox list`, `agentpg instances list`): the `awk` filters assume the column layout shown there, and
 deleting an instance deletes its data.
+
+### What the first live run found (all fixed; useful if you see a variation)
+
+1. `agentpg extensions create` takes the **extension name first**, then the instance id.
+2. Instances and sandboxes are not usable the moment `create` returns: `ecoctl` now waits for the instance to be `running` before extensions
+   or a sandbox, and for the sandbox to be `running` before reading its URL (the `Status:` and `URL:` lines of `sandbox status`).
+3. **Identity refused sign-in** because the authorization URL it receives (AgentPG hostnames plus PKCE) is longer than the 300 characters it
+   allowed for the return address. Fixed in identity (limit 2048, tested). Symptom with an old image: HTTP 422 from `POST /login`.
+4. A sandbox's URL changes when it is recreated, so `ecoctl recreate` cascades (section 11).
+5. A sandbox deleted outside `ecoctl` is noticed and recreated by the next `apply`.
+6. `ecoctl status` reported undeployed apps as "NOT REGISTERED"; it now only checks apps in this deployment.

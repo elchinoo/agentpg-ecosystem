@@ -143,7 +143,7 @@ def cmd_status(args) -> int:
                     drift = "NOT REGISTERED"
                 elif app.web and cid == key and r["url"] != ctx.state.app(key).get("url", ""):
                     drift = f"launcher URL differs ({r['url'] or 'empty'})"
-                print(f"  {cid:<22}{r['kind'] if r else '-':<9}{drift or 'ok'}")
+                print(f"  {cid:<26}{r['kind'] if r else '-':<9}{drift or 'ok'}")
                 bad += bool(drift)
     return 1 if bad else 0
 

@@ -74,8 +74,8 @@ gateway's README.
 
 ## Limits
 
-- Tested against a fake `agentpg` CLI and, for the identity side, against the real provider's admin API. **It has not been run
-  against a live AgentPG account.** The CLI output formats follow the deployment tutorial (id = first column of the listing line that
+- Tested against a fake `agentpg` CLI and, for the identity side, against the real provider's admin API. **It was run against a live
+  AgentPG account on 2026-10-22 (see docs/DEPLOY.md for what was verified).** The CLI output formats follow the deployment tutorial (id = first column of the listing line that
   names the object, URL after `URL:`); if your CLI prints something else, `agentpg.py` is the one place to adjust.
 - A sandbox's environment cannot be changed in place by this tool (see above).
 - One database per app. Secrets reach the sandbox as `--env` values, so they pass through the process list of the machine running
