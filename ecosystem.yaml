@@ -43,6 +43,8 @@ apps:
     name: CityPulse
     description: Smart-city IoT sample
     generate: []
+    env:
+      CITYPULSE_ROLE: api            # no built-in simulator: the data comes from CityPulse Simulator, one city per source
     roles:
       - {name: admin, description: "Everything"}
       - {name: operator, description: "Run the simulated city"}
