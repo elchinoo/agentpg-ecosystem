@@ -20,7 +20,7 @@ shared **LLM gateway**, every one a sandbox with its own Postgres database on [A
 6. [First sign-in: the identity provider](#6-first-sign-in-the-identity-provider)
 7. [Sign in to each app](#7-sign-in-to-each-app)
 8. [Smoke tests, app by app](#8-smoke-tests-app-by-app)
-9. [Wire the LLM gateway into the apps](#9-wire-the-llm-gateway-into-the-apps)
+9. [The LLM gateway is wired to the apps for you](#9-the-llm-gateway-is-wired-to-the-apps-for-you)
 10. [Run the simulators and the PagerLens agent](#10-run-the-simulators-and-the-pagerlens-agent)
 11. [Operating it](#11-operating-it)
 12. [Troubleshooting](#12-troubleshooting)
@@ -47,7 +47,7 @@ allows fewer, deploy a subset (section 5): `ecoctl apply --only trustdesk` creat
 What `ecoctl` does for you, in order: creates the databases and sandboxes; registers every app in the identity provider (its roles, a
 browser-sign-in client, and for apps that call others a **service client** limited to exactly the scopes in the manifest); passes each
 app its sign-in settings and generated secrets as environment variables; points each app's redirect URI at its real URL; creates the groups
-and role grants. What it does **not** do: create your first user, configure Google/GitHub login, add provider keys to the gateway, or
+and role grants. What it does **not** do: create your first user, configure Google/GitHub login, add a real provider key to the gateway (section 9), or
 configure the simulators' targets. Those are in sections 6, 9 and 10.
 
 How the pieces trust each other: you sign in once at the identity provider; each app verifies the provider's signed tokens locally and
@@ -119,14 +119,14 @@ Then deploy a small slice first. `--only` takes a comma-separated list and autom
 in CityPulse, TrustDesk and PagerLens), and the identity provider is always included.
 
 ```bash
-# Stage 1: identity + TrustDesk (2 instances, 2 sandboxes). Prove sign-in works before adding more.
+# Stage 1: identity + TrustDesk + the LLM gateway TrustDesk uses (3 instances, 3 sandboxes). Prove sign-in and the LLM wiring work (ecoctl status) before adding more.
 .venv/bin/ecoctl apply --only trustdesk --execute
 
 # Stage 2: the observability trio plus the load generator
-.venv/bin/ecoctl apply --only cpsim --execute        # adds pagerlens, citypulse, trustdesk (already there)
+.venv/bin/ecoctl apply --only cpsim --execute        # adds pagerlens, citypulse (and llmgw, trustdesk: already there)
 
 # Stage 3: the rest
-.venv/bin/ecoctl apply --execute                     # paybroker and llmgw
+.venv/bin/ecoctl apply --execute                     # paybroker
 ```
 
 **A sandbox's URL contains its id** (`https://app--a1p-prod-sbx-<id>--....code.run`), so a sandbox you delete and recreate gets a **new URL**. Anything that
@@ -152,7 +152,7 @@ are in `.ecosystem/state.json` and in `agentpg sandbox list` / `agentpg sandbox 
 The provider was created with a static admin key (generated, kept in `.ecosystem/`). Use it once to bootstrap yourself.
 
 1. Find the URL: `.venv/bin/ecoctl status` (the `eco-identity` row) or `agentpg sandbox status <identity-sandbox-id>`.
-2. Print the key (do not paste it anywhere public): `.venv/bin/ecoctl env identity | grep IDENTITY_API_KEY`.
+2. Print the key (do not paste it anywhere public): `.venv/bin/ecoctl env identity --reveal | grep IDENTITY_API_KEY`.
 3. Open `https://<identity>/admin`. Expand **Use the server's API key instead**, paste the key, sign in.
 4. **Settings → Admin password**: set one (12+ characters). From now on you can sign in with it, and the provider's vault is protected by it as
    well as by the platform secret. Keep the API key for automation (`ecoctl` uses it).
@@ -201,7 +201,7 @@ Do these in order; each takes a few minutes. Use `agentpg sandbox logs <id>` whe
 **TrustDesk** (`https://<trustdesk>`)
 1. **Documents → Load demo policies** (the fictional Acme pack). It was started with `AUTO_SEED=true`, so it may already be there.
 2. **Search**: ask "How many vacation days do new employees get?". You should see passages with document, heading and version.
-3. **Settings → Provider accounts**: add an AI account (a real provider, or the gateway: section 9), then **Request validation** → choose it.
+3. **Settings → Provider accounts**: add an AI account (a real provider, or the gateway, already wired for you: section 9), then **Request validation** → choose it.
 4. **Requests → New request** for a demo employee. Within seconds it moves to *Needs decision* with an AI recommendation, the reasons and
    quoted policy passages. Approve or reject it; the history names *you*.
 5. As a user with only `viewer`: you can read but not decide.
@@ -209,7 +209,7 @@ Do these in order; each takes a few minutes. Use `agentpg sandbox logs <id>` whe
 **PagerLens** (`https://<pagerlens>`)
 1. Sign in; the dashboard shows the systems it monitors (CityPulse and the simulator appear once they report, section 10).
 2. **Lab**: trigger a demo incident (admin only), press **Investigate**, read the diagnosis and the matched runbook.
-3. **Settings → AI accounts** if you want the LLM or hybrid investigation modes (optional; the rules mode needs nothing).
+3. The LLM and hybrid investigation modes use the gateway out of the box (section 9: echo until you add a provider); **Settings → AI accounts** is only for extra accounts.
 
 **CityPulse** (`https://<citypulse>`)
 1. Overview loads; it holds no sensors until the simulator sends readings (section 10).
@@ -224,29 +224,61 @@ Do these in order; each takes a few minutes. Use `agentpg sandbox logs <id>` whe
 4. Open a **Case**, resolve it as an analyst. As a viewer you cannot.
 
 **LLM gateway** (`https://<llmgw>`)
-1. **Providers** shows the built-in `echo` provider; **Models** shows `echo-chat` and `echo-embed`.
-2. **Clients → New client** (for example `trustdesk`), allow `echo-chat`, create a **key** (shown once).
+1. **Providers** shows the built-in `echo` provider; **Models** shows `echo-chat`, `echo-embed`, `chat-default` and `embed-default`.
+2. **Clients** lists one client per app that uses an LLM (created by `ecoctl`; section 9). To try the gateway by hand, **New client**, allow `echo-chat`, create a **key** (shown once).
 3. Try it: `curl https://<llmgw>/v1/chat/completions -H "Authorization: Bearer lg_..." -H "Content-Type: application/json" -d '{"model":"echo-chat","messages":[{"role":"user","content":"hello"}]}'`
 4. **Overview** shows the request and its token count. No prompt or answer text is stored anywhere.
 
-## 9. Wire the LLM gateway into the apps
+## 9. The LLM gateway is wired to the apps for you
 
-The gateway holds the real provider keys so the apps do not. Do this once:
+Nothing to paste. Every app with `llm: true` in `ecosystem.yaml` (TrustDesk, PagerLens, PayBroker) is wired by `ecoctl apply --execute`:
 
-1. **Add a real provider** in the gateway (admin): **Providers → Add**: name, base URL (for example `https://api.openai.com/v1`), the API key
-   (stored encrypted), and **Test**. Provider URLs are checked like every other outbound URL (https only, no private addresses).
-2. **Map model aliases** (**Models**): for example alias `chat` → provider `openai` model `gpt-4o-mini`, with optional second target for failover,
-   and `embed` → an embedding model. Add prices if you want cost estimates.
-3. **One client per app** (**Clients → New client**): `trustdesk`, `pagerlens`, `paybroker`, each limited to the aliases it needs, with a
-   requests-per-minute limit and a monthly token budget (hard or soft). Copy each key when it is shown.
-4. **In each app**, add an *OpenAI-compatible account* with: **base URL** `https://<llmgw>/v1`, **API key** the client's key, **chat model** the alias
-   (`chat`). (TrustDesk: Settings → Provider accounts; PagerLens: Settings → AI accounts; PayBroker: Settings → AI accounts.) Use **Test chat**.
+1. The gateway sandbox is created with a static **operator key** (`LLMGW_API_KEY`, generated, kept in `.ecosystem/state.json`) and with
+   the names of the **default aliases** it seeds on its built-in echo provider: `chat-default` (chat) and `embed-default` (embeddings, 768
+   numbers, what TrustDesk and PagerLens expect).
+2. Before each consuming app is created, `ecoctl` uses that key to create **one gateway client per app** (named after the app, allowed
+   only those two aliases, 60 requests/minute and 5,000,000 tokens/month by default, from `llm:` in the manifest) and keeps its `lg_` key.
+   The gateway shows a key once; `ecoctl` keeps it so the next run changes nothing.
+3. The app's sandbox is created with the settings it reads:
 
-TrustDesk also needs an **embedding** model for semantic search: give the same account an embedding alias and switch embeddings to it under
-Settings. Until then it uses its built-in word-matching embedder, which works for the demo.
+| Variable | Value |
+|---|---|
+| `LLM_BASE_URL` | `https://<llmgw>/v1` |
+| `LLM_API_KEY` | the app's own client key (secret: shown as `***` in plans and by `ecoctl env`) |
+| `LLM_CHAT_MODEL` | `chat-default` |
+| `EMBEDDING_MODEL` | `embed-default` |
+| `EMBEDDING_DIM` | `768` |
+
+   (`EMBEDDING_*` are the names TrustDesk and PagerLens read; PayBroker is given the same contract. Settings from the environment are trusted by the apps,
+   so the gateway's public https URL needs no allow-private-URLs switch.)
+
+Check it: `ecoctl status` lists each app's gateway client and the result of one tiny chat call made with that app's own key;
+`ecoctl llm test trustdesk` runs just that call. Echo answers work immediately, with no provider key anywhere.
+
+**Add a real provider (once, for every app).** In the gateway console (admin): **Providers → Add** (name, base URL such as
+`https://api.openai.com/v1`, the API key, stored encrypted; then **Test**). Then **Models**: open `chat-default`, change its target to that
+provider and model (for example `gpt-4o-mini`; a second target gives failover) and save; do the same for `embed-default` with an embedding model
+that returns **768** numbers (or set the alias's size to match what the apps were created with). **No app, client or key changes**: the next
+request of every app goes to the new model. Add prices to see cost estimates. To switch the default model later, repoint the alias again.
+`LLMGW_ENCRYPTION_KEY` (already set by `ecoctl`) lets the gateway unlock the provider key after a restart.
+
+**See usage per app.** Gateway console **Overview** (per client: requests, tokens, spend against budget, errors) and **Clients**; or
+`GET /api/usage?group=client` (API.md in the gateway repository). Prompts and answers are never stored.
+
+**Change a budget or limit.** Edit the client in the gateway console (an operator's change is kept: `apply` never overwrites an existing client),
+or set `llm.rpm` / `llm.budget` / `llm.budget_mode` in the manifest before the client is first created.
+
+**Rotate an app's key.** `ecoctl apply --execute --rotate` rotates every app's gateway key (and the identity client secrets); the old keys stop at
+once. Then `ecoctl recreate <app>` (or the apps you listed) so the sandboxes get the new keys. If you lose `.ecosystem/state.json`, the next `apply`
+finds the client without a key in hand, **rotates its active key** and says so; recreate that app to give it the new one.
+
+**Upgrading an existing deployment.** The gateway gains the default aliases at its next start (a new image; seeded once, existing aliases untouched).
+A gateway created before this feature has no operator key: `apply` stops at the first client with a hint. Run `ecoctl recreate llmgw` once
+(its database is kept; the apps that use it are recreated too, because its URL changes), then `ecoctl apply --execute`.
 
 Limits worth knowing: the gateway does not stream (the apps never ask it to); its per-client rate limit is per process; token counts the
-provider does not report are estimated and marked so; `echo` needs no key and is good for demos.
+provider does not report are estimated and marked so; the `ecoctl status` call is metered like any other (about a token). The vector
+dimension of TrustDesk's and PagerLens's tables is fixed when their database is first migrated: change `llm.embed_dimensions` only for a new fleet.
 
 ## 10. Run the simulators and the PagerLens agent
 
@@ -264,7 +296,7 @@ provider does not report are estimated and marked so; `echo` needs no key and is
 and nothing else). Get its settings and run it anywhere that can reach the apps (a laptop, a VM, a container):
 
 ```bash
-.venv/bin/ecoctl env pagerlens-agent > pagerlens-agent.env      # contains a secret: keep it private
+.venv/bin/ecoctl env pagerlens-agent --reveal > pagerlens-agent.env      # contains a secret: keep it private (without --reveal secrets print as ***)
 # then, per the PagerLens README: set the scrape targets in agent.yaml and
 set -a; . ./pagerlens-agent.env; set +a; pagerlens-agent run agent.yaml      # or: pagerlens-agent once agent.yaml --dry-run
 ```
@@ -284,9 +316,10 @@ from AgentPG) and saves the new one.
 | See everything | `ecoctl status`, `agentpg sandbox list`, `agentpg instances list` |
 | Logs | `agentpg sandbox logs <sandbox-id>` |
 | Resume a paused sandbox | `agentpg sandbox resume <sandbox-id>`; apps hold stored keys locked until a sign-in unlocks them (the platform secret, `*_ENCRYPTION_KEY`, makes that automatic: `ecoctl` sets it) |
-| Deploy a new image | CI pushes `:latest`. `ecoctl recreate <app>` deletes the sandbox and creates it afresh so it pulls the image (the database and secrets are kept). Because the URL changes, it also recreates every app that **calls** this one (their environment names its URL); recreating `identity` recreates the whole fleet. Allow a couple of minutes per app |
+| Deploy a new image | CI pushes `:latest`. `ecoctl recreate <app>` deletes the sandbox and creates it afresh so it pulls the image (the database and secrets are kept). Because the URL changes, it also recreates every app that **calls** this one, and every app that uses it as the LLM gateway (their environment names its URL); recreating `identity` recreates the whole fleet. Allow a couple of minutes per app |
 | Change an app's environment | Edit the manifest, then `ecoctl recreate <app>` |
-| Rotate a client secret | `ecoctl apply --execute --rotate`, then recreate the sandboxes whose environment changed |
+| Rotate a client secret or a gateway key | `ecoctl apply --execute --rotate`, then recreate the sandboxes whose environment changed (section 9) |
+| Check the LLM wiring | `ecoctl status` (client + one real call per app), `ecoctl llm test <app>` |
 | Add a person or change roles | Identity console → Users or Groups. Takes effect at their next sign-in |
 | Forgot an app's local admin password | `agentpg sandbox console <id>`, then `trustdesk reset-admin` (or `pagerlens`, `citypulse`, `cpsim`, `paybroker`, `llmgw`, `identity`); for apps that store provider keys this erases them |
 | Rotate the identity signing key | Identity console → Keys → Rotate (the old key stays published for 24 h) |
@@ -310,6 +343,9 @@ from AgentPG) and saves the new one.
 | A service call gets `401`/`invalid_scope`/`access_denied` | The calling app's service client is not allowed that scope or audience | `ecoctl validate`; compare `calls`/`exposes` in the manifest with Apps in the identity console; re-run `apply` |
 | Simulator: "the environment variable ... is empty" | The token variable is empty and the simulator has no service credentials | Check `CPSIM_SERVICE_CLIENT_ID/_SECRET` in `ecoctl env cpsim`, or set the variable |
 | PagerLens shows no `citypulse-*` | CityPulse cannot reach PagerLens or lacks the service token | `agentpg sandbox logs <citypulse-id>` (look for `reporter:`); `PAGERLENS_URL` and `CITYPULSE_SERVICE_CLIENT_*` set? |
+| `ecoctl apply` stops at a gateway client with `HTTP 401 ... recreate` | The gateway sandbox was created before `ecoctl` set its operator key (`LLMGW_API_KEY`) | `ecoctl recreate llmgw`, then `ecoctl apply --execute` |
+| `ecoctl status` shows a client `MISSING` or a chat call `HTTP 401` / `403` | The client was deleted, its key revoked, or the alias is not allowed | `ecoctl apply --execute` recreates a missing client; for a lost or revoked key it rotates and tells you to `ecoctl recreate <app>` |
+| `ecoctl status` shows a chat call `HTTP 502` / `503` | The default alias points at a provider that fails or is locked | Gateway console: Models > `chat-default`, Providers > Test; echo needs nothing |
 | Gateway: `403 wrong_credential` | An operator credential was used on `/v1` | Use a client key (`lg_...`) |
 | Gateway: `429 budget_exceeded` / `rate_limit_exceeded` | The client's budget or rate limit | Clients → raise the limit, or switch to soft mode |
 | Gateway: `503 vault_locked` | A real provider's key is locked after a restart | `LLMGW_ENCRYPTION_KEY` unlocks it automatically; otherwise sign in as admin |

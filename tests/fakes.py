@@ -126,3 +126,94 @@ class FakeIdentity:
     def client(self, admin_key: str) -> httpx.Client:
         self.admin_key = admin_key
         return httpx.Client(transport=httpx.MockTransport(self.handler))
+
+
+class FakeGateway:
+    """The LLM gateway's admin API and data plane, as the real one behaves: a client key is shown once, only the operator key (the
+    static LLMGW_API_KEY) reaches /api, only a live client key reaches /v1, a rotation revokes the old key at once."""
+
+    def __init__(self, aliases=("echo-chat", "echo-embed", "chat-default", "embed-default")):
+        self.aliases = set(aliases)
+        self.clients: dict[int, dict] = {}
+        self.keys: dict[int, list[dict]] = {}            # client id -> [{id, key, revoked}]
+        self.requests: list[tuple[str, str]] = []
+        self.chat_calls: list[dict] = []                 # {client, model}
+        self.operator_key: str | None = None             # None: a gateway created without LLMGW_API_KEY
+        self.ready_after = 0                             # /readyz answers 503 this many times first
+        self._n = 0
+        self.upstream_status = 200                       # what a chat call answers (to simulate a broken alias)
+
+    def _new_key(self, cid: int) -> dict:
+        self._n += 1
+        k = {"id": self._n, "key": f"lg_fake{self._n}_{cid}", "revoked": False}
+        self.keys[cid].append(k)
+        return k
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        path, method = request.url.path, request.method
+        self.requests.append((method, path))
+        auth = request.headers.get("authorization", "")
+        body = json.loads(request.content) if request.content else {}
+        if path == "/readyz":
+            if self.ready_after > 0:
+                self.ready_after -= 1
+                return httpx.Response(503, json={"status": "waking"})
+            return httpx.Response(200, json={"status": "ready"})
+        if path.startswith("/v1/"):
+            live = next((cid for cid, ks in self.keys.items() if cid in self.clients for k in ks if not k["revoked"] and auth == "Bearer " + k["key"]), None)
+            if live is None:
+                code = "wrong_credential" if auth == "Bearer " + str(self.operator_key) else "invalid_api_key"
+                return httpx.Response(403 if code == "wrong_credential" else 401, json={"error": {"code": code, "message": "no"}})
+            c = self.clients[live]
+            if body["model"] not in c["allowed_aliases"]:
+                return httpx.Response(403, json={"error": {"code": "model_not_allowed", "message": "no"}})
+            if self.upstream_status != 200:
+                return httpx.Response(self.upstream_status, json={"error": {"code": "upstream_unavailable", "message": "down"}})
+            self.chat_calls.append({"client": c["name"], "model": body["model"], "max_tokens": body.get("max_tokens")})
+            return httpx.Response(200, json={"choices": [{"message": {"content": "Echo: ping"}}], "usage": {"total_tokens": 5}})
+        if self.operator_key is None or auth != "Bearer " + self.operator_key:
+            return httpx.Response(401, json={"detail": "authentication required"})
+        if path == "/api/models" and method == "GET":
+            return httpx.Response(200, json={"items": [{"alias": a} for a in sorted(self.aliases)]})
+        if path == "/api/clients" and method == "GET":
+            return httpx.Response(200, json={"items": list(self.clients.values())})
+        if path == "/api/clients" and method == "POST":
+            if any(c["name"] == body["name"] for c in self.clients.values()):
+                return httpx.Response(422, json={"detail": "a client with that name already exists"})
+            missing = [a for a in body["allowed_aliases"] if a not in self.aliases]
+            if missing:
+                return httpx.Response(422, json={"detail": f"unknown model alias: {missing[0]}"})
+            cid = len(self.clients) + 1
+            self.clients[cid] = {"id": cid, "name": body["name"], "allowed_aliases": body["allowed_aliases"], "rpm_limit": body.get("rpm_limit"),
+                                 "monthly_token_budget": body.get("monthly_token_budget"), "budget_mode": body.get("budget_mode", "hard"), "enabled": True}
+            self.keys[cid] = []
+            out = {"client": self.clients[cid]}
+            if body.get("issue_key", True):
+                k = self._new_key(cid)
+                out["key"] = {"id": k["id"], "key": k["key"], "name": "default"}
+            return httpx.Response(201, json=out)
+        m = re.fullmatch(r"/api/clients/(\d+)/keys(?:/(\d+)(/rotate)?)?", path)
+        if m and int(m.group(1)) in self.clients:
+            cid = int(m.group(1))
+            if method == "GET" and not m.group(2):
+                return httpx.Response(200, json={"items": [{"id": k["id"], "name": "", "prefix": k["key"][:11], "revoked": k["revoked"]} for k in self.keys[cid]]})
+            if method == "POST" and not m.group(2):
+                k = self._new_key(cid)
+                return httpx.Response(201, json={"id": k["id"], "key": k["key"], "name": body.get("name", "")})
+            kid = int(m.group(2)) if m.group(2) else 0
+            old = next((k for k in self.keys[cid] if k["id"] == kid and not k["revoked"]), None)
+            if old is None:
+                return httpx.Response(404, json={"detail": "key not found or already revoked"})
+            if method == "POST" and m.group(3):
+                old["revoked"] = True
+                self.rotations = getattr(self, "rotations", 0) + 1
+                k = self._new_key(cid)
+                return httpx.Response(201, json={"id": k["id"], "key": k["key"], "replaces": kid})
+            if method == "DELETE":
+                old["revoked"] = True
+                return httpx.Response(200, json={"revoked": kid})
+        return httpx.Response(404, json={"detail": f"unhandled {method} {path}"})
+
+    def client(self, operator_key: str | None) -> httpx.Client:
+        self.operator_key = operator_key
+        return httpx.Client(transport=httpx.MockTransport(self.handler))

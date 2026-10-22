@@ -8,6 +8,7 @@ import httpx
 
 from .agentpg import AgentPG, AgentPGError, token_from
 from .identity_client import Identity, IdentityError
+from .llm_client import GatewayError
 from .manifest import ManifestError, load
 from .plan import Context, app_env, build
 from .state import DEFAULT_DIR, State
@@ -58,7 +59,7 @@ def cmd_apply(args) -> int:
         print(f"[{i}/{len(steps)}] {s.title} ...", flush=True)
         try:
             print(f"      {s.run(ctx)}")
-        except (AgentPGError, IdentityError, httpx.HTTPError) as exc:
+        except (AgentPGError, IdentityError, GatewayError, httpx.HTTPError) as exc:
             ctx.state.save()
             print(f"      FAILED: {exc}\n\nProgress is saved; fix the cause and run the same command again.", file=sys.stderr)
             return 2
@@ -72,7 +73,8 @@ def cmd_apply(args) -> int:
 
 def cmd_recreate(args) -> int:
     """Delete sandboxes so the next apply creates them afresh (to pull a new image or change the environment). A sandbox's URL contains
-    its id, so a recreated app gets a new URL: apps that call it are recreated too, and recreating the identity provider recreates all."""
+    its id, so a recreated app gets a new URL: apps that call it (or, for the LLM gateway, use it) are recreated too, and recreating
+    the identity provider recreates all."""
     ctx = _ctx(args)
     m = ctx.manifest
     deployed = {k for k in m.apps if ctx.state.app(k).get("sandbox_id")}
@@ -85,7 +87,7 @@ def cmd_recreate(args) -> int:
     if "identity" in names:
         print("Recreating the identity provider gives it a new URL (the sandbox id is part of it), so every deployed app is recreated too.")
     elif targets - names:
-        print(f"Also recreated because they call {', '.join(sorted(names))}: {', '.join(sorted(targets - names))}")
+        print(f"Also recreated because they call or use {', '.join(sorted(names))}: {', '.join(sorted(targets - names))}")
     ids = {k: ctx.state.app(k).get("sandbox_id") for k in sorted(targets) if ctx.state.app(k).get("sandbox_id")}
     if not ids:
         print("Nothing deployed to recreate.")
@@ -126,6 +128,7 @@ def cmd_status(args) -> int:
                 row.append("down")
         bad += row[0] != "200"
         print(f"{key:<16}{row[0]:<10}{row[1]:<10}{url}")
+    bad += _llm_status(ctx)
     ident_url = ctx.state.data["apps"].get("identity", {}).get("url")
     if ident_url:
         try:
@@ -149,16 +152,63 @@ def cmd_status(args) -> int:
     return 1 if bad else 0
 
 
+def _llm_status(ctx) -> int:
+    """For each app that uses an LLM: does its client exist in the gateway, and does one tiny chat call with its own key work?
+    Returns the number of problems. Keys are read from the state file and never printed."""
+    m = ctx.manifest
+    deployed = [k for k in m.consumers() if ctx.state.app(k).get("sandbox_id")]
+    if not deployed:
+        return 0
+    print(f"\nLLM gateway ({m.llm.gateway}): {ctx.state.app(m.llm.gateway).get('url') or '(not deployed)'}")
+    if not ctx.state.app(m.llm.gateway).get("url"):
+        return len(deployed)
+    gw = ctx.gateway()
+    try:
+        clients = gw.clients()
+    except (GatewayError, httpx.HTTPError) as exc:
+        print(f"  cannot read the gateway's clients: {exc}")
+        return len(deployed)
+    bad = 0
+    print(f"  {'app':<16}{'client':<12}{'chat (' + m.llm.chat_alias + ')'}")
+    for k in deployed:
+        key = ctx.state.app(k).get("llm_key")
+        have = k in clients
+        ok = False
+        chat = "no key in the state file (run `ecoctl apply --execute`)"
+        if key:
+            ok, chat = gw.chat_test(key, m.llm.chat_alias)
+        bad += (not have) or not ok
+        print(f"  {k:<16}{('ok' if have else 'MISSING'):<12}{chat}")
+    return bad
+
+
+def cmd_llm(args) -> int:
+    """`ecoctl llm test <app>`: one tiny chat completion through the gateway with that app's own key."""
+    ctx = _ctx(args)
+    m = ctx.manifest
+    if args.app not in m.apps or not m.apps[args.app].llm:
+        print(f"{args.app} is not an app with `llm: true` in the manifest", file=sys.stderr)
+        return 1
+    key = ctx.state.app(args.app).get("llm_key")
+    if not key or not ctx.state.app(m.llm.gateway).get("url"):
+        print(f"{args.app} has no gateway client yet (run `ecoctl apply --execute`)", file=sys.stderr)
+        return 1
+    ok, detail = ctx.gateway().chat_test(key, m.llm.chat_alias)
+    print(f"{args.app} -> {m.llm.gateway} /v1/chat/completions model {m.llm.chat_alias}: {'ok' if ok else 'FAILED'} ({detail})")
+    return 0 if ok else 1
+
+
 def cmd_env(args) -> int:
     ctx = _ctx(args)
     app = ctx.manifest.everything().get(args.app)
     if app is None:
         print(f"no such app: {args.app}", file=sys.stderr)
         return 1
-    env, _ = app_env(ctx, app)
-    print("# contains secrets: do not paste into a chat or commit it", file=sys.stderr)
+    env, secret_names = app_env(ctx, app)
+    if args.reveal:
+        print("# contains secrets: do not paste into a chat or commit it", file=sys.stderr)
     for k, v in sorted(env.items()):
-        print(f"export {k}={v!r}")
+        print(f"export {k}={(v if args.reveal or k not in secret_names else '***')!r}")
     return 0
 
 
@@ -212,12 +262,16 @@ def main(argv: list[str] | None = None) -> int:
     db = sub.add_parser("db", help="print the database key (the database password) of an app's instance")
     db.add_argument("app")
     db.add_argument("--reset", action="store_true", help="rotate the instance's default key and keep the new one")
-    sub.add_parser("status", help="health of every app and drift from the identity registry")
-    en = sub.add_parser("env", help="print the environment an app is created with")
+    sub.add_parser("status", help="health of every app, each LLM client and its test call, and drift from the identity registry")
+    en = sub.add_parser("env", help="print the environment an app is created with (secret values are shown as *** unless --reveal)")
     en.add_argument("app")
+    en.add_argument("--reveal", action="store_true", help="print secret values too (to configure something that runs elsewhere)")
+    ll = sub.add_parser("llm", help="LLM gateway wiring")
+    ll.add_argument("action", choices=["test"], help="test: one tiny chat call through the gateway with the app's own key")
+    ll.add_argument("app")
     args = p.parse_args(argv)
     try:
-        return {"validate": cmd_validate, "plan": cmd_plan, "apply": cmd_apply, "status": cmd_status, "env": cmd_env, "db": cmd_db, "recreate": cmd_recreate}[args.cmd](args)
+        return {"validate": cmd_validate, "plan": cmd_plan, "apply": cmd_apply, "status": cmd_status, "env": cmd_env, "db": cmd_db, "recreate": cmd_recreate, "llm": cmd_llm}[args.cmd](args)
     except ManifestError as exc:
         print(f"manifest error: {exc}", file=sys.stderr)
         return 1

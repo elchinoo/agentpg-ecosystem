@@ -26,8 +26,9 @@ uv venv && uv pip install -e ".[dev]"
 .venv/bin/ecoctl plan                    # show every command and API call; changes nothing
 .venv/bin/ecoctl apply                   # the same, as a dry run
 .venv/bin/ecoctl apply --execute         # asks first, then creates and registers; safe to run again
-.venv/bin/ecoctl status                  # health of each app, and drift from the identity registry
-.venv/bin/ecoctl env trustdesk           # the environment an app is created with (contains secrets)
+.venv/bin/ecoctl status                  # health of each app, each LLM client + one real call, and drift from the identity registry
+.venv/bin/ecoctl llm test trustdesk      # one tiny chat call through the LLM gateway with that app's own key
+.venv/bin/ecoctl env trustdesk           # the environment an app is created with (secrets shown as ***; --reveal prints them)
 ```
 
 Requires the `agentpg` CLI, logged in (`agentpg login`). `apply --execute` creates databases and sandboxes on your account, which may
@@ -64,13 +65,32 @@ A scope names its app by its prefix (`trustdesk.requests.write` is for `trustdes
 production. An app with `calls` gets a second client, `<key>-service`, and the variables `<PREFIX>_SERVICE_CLIENT_ID/_SECRET`
 beside the web client's `<PREFIX>_OIDC_CLIENT_ID/_SECRET`. Other keys: `image`, `port`, `extensions`, `env` (non-secret),
 `generate` (names that get a random secret), `health`, `web: false` (service only), `deploy: false` (register only: a job or agent
-that runs elsewhere, such as the PagerLens agent), `url_env` (which variable carries a callee's URL; default `<CALLEE>_URL`).
+that runs elsewhere, such as the PagerLens agent), `url_env` (which variable carries a callee's URL; default `<CALLEE>_URL`), `llm` (true: wired to the LLM gateway, below).
 
-## Wire an app to the LLM gateway
+## Wire an app to the LLM gateway (automatic)
 
-The gateway holds the model provider keys. In the gateway's console create a client for the app (it shows a key once), then in the
-app add an OpenAI-compatible account with base URL `https://<gateway>/v1`, that key, and a model alias as the chat model. See the
-gateway's README.
+Add `llm: true` to an app and `ecoctl apply --execute` does the rest, with no manual step:
+
+```yaml
+llm:                          # optional; these are the defaults
+  gateway: llmgw              # the app that runs the gateway; deployed before the apps that use it
+  chat_alias: chat-default    # aliases the gateway seeds on its built-in echo provider
+  embed_alias: embed-default
+  embed_dimensions: 768       # what TrustDesk and PagerLens expect (EMBEDDING_DIM)
+  rpm: 60                     # requests/minute of each app's gateway client
+  budget: 5000000             # tokens/month of each app's client (null: none)
+  budget_mode: hard           # or soft
+apps:
+  trustdesk: {llm: true, ...}
+```
+
+`apply` generates a static operator key for the gateway (`LLMGW_API_KEY`), uses it to create **one client per app** (name = the app
+key, allowed only the two aliases, with that limit and budget) and keeps each `lg_` key in `.ecosystem/state.json` (a lost key is rotated
+and reported). Each app is created with `LLM_BASE_URL=<gateway>/v1`, `LLM_API_KEY` (secret, masked in plans), `LLM_CHAT_MODEL`,
+`EMBEDDING_MODEL` and `EMBEDDING_DIM`. Echo models work at once; to use a real model add one provider key in the gateway and repoint
+`chat-default` / `embed-default` there: every app follows, nothing else changes. A second `apply` changes nothing, and `recreate llmgw`
+recreates the apps that use it (its URL changes). `ecoctl status` checks each client and makes one tiny chat call with its key;
+`ecoctl llm test <app>` does just that call. Details, rotation and upgrade notes: [docs/DEPLOY.md](docs/DEPLOY.md) section 9.
 
 ## Limits
 

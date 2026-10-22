@@ -9,6 +9,15 @@ agentpg:
   auto_pause: false              # the fleet stays up while it is being tested (set true to save cost; resume with `agentpg sandbox resume <id>`)
   # plan: small                  # compute plan of every sandbox (small|medium|large)
 
+llm:                             # apps with `llm: true` are wired to the LLM gateway automatically (every key is optional; these are the defaults)
+  gateway: llmgw                 # the app that runs the gateway; it is deployed before the apps that use it
+  chat_alias: chat-default       # model aliases the gateway seeds on its built-in echo provider: repoint them in the gateway to switch every app
+  embed_alias: embed-default
+  embed_dimensions: 768          # what TrustDesk and PagerLens expect (EMBEDDING_DIM) and what the echo embedding returns
+  rpm: 60                        # requests per minute of each app's gateway client
+  budget: 5000000                # tokens per month of each app's gateway client (null: no budget)
+  budget_mode: hard              # hard: refuse over budget; soft: allow and flag
+
 identity:
   image: identity
   auto_pause: false              # everything signs in through it: never let it sleep
@@ -18,6 +27,7 @@ identity:
 apps:
   trustdesk:
     name: TrustDesk
+    llm: true                    # wired to the LLM gateway: LLM_BASE_URL, LLM_API_KEY, LLM_CHAT_MODEL, EMBEDDING_MODEL, EMBEDDING_DIM
     description: Compliance workspace
     extensions: [vector, pg_trgm]
     generate: [TRUSTDESK_ENCRYPTION_KEY]
@@ -30,6 +40,7 @@ apps:
 
   pagerlens:
     name: PagerLens
+    llm: true                    # wired to the LLM gateway: LLM_BASE_URL, LLM_API_KEY, LLM_CHAT_MODEL, EMBEDDING_MODEL, EMBEDDING_DIM
     description: Observability and incident investigation
     extensions: [vector, pg_trgm]
     generate: [PAGERLENS_ENCRYPTION_KEY]
@@ -72,6 +83,7 @@ apps:
 
   paybroker:
     name: PayBroker
+    llm: true                    # wired to the LLM gateway: LLM_BASE_URL, LLM_API_KEY, LLM_CHAT_MODEL, EMBEDDING_MODEL, EMBEDDING_DIM
     description: Payment broker with a three-tier fraud engine
     extensions: [vector]
     generate: [PAYBROKER_ENCRYPTION_KEY]

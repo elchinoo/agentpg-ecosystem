@@ -7,18 +7,28 @@ from ecoctl.agentpg import AgentPG, AgentPGError, Command
 from ecoctl.manifest import load
 from ecoctl.plan import Context, app_env, build, service_spec, web_spec
 from ecoctl.state import State
-from tests.fakes import FakeAgentPG, FakeIdentity
+from tests.fakes import FakeAgentPG, FakeGateway, FakeIdentity
 
 MANIFEST = Path(__file__).resolve().parents[1] / "ecosystem.yaml"
 
 
 @pytest.fixture
 def world(tmp_path):
-    cli, idp = FakeAgentPG(), FakeIdentity()
+    cli, idp, gw = FakeAgentPG(), FakeIdentity(), FakeGateway()
     state = State(tmp_path / "eco")
     ctx = Context(load(MANIFEST), state, AgentPG(run=cli))
     ctx.http = idp.client(state.admin_key())
+    ctx.llm_http = gw.client(state.secret("llmgw", "LLMGW_API_KEY"))
+    idp.gateway = gw
     return ctx, cli, idp
+
+
+def again(ctx, cli, idp, *, manifest=None, state=None, **kw):
+    """A new run of ecoctl over the same fakes (a new process: the state is read from the file again)."""
+    c = Context(manifest or load(MANIFEST), state or State(ctx.state.dir), AgentPG(run=cli), **kw)
+    c.http = idp.client(c.state.admin_key())
+    c.llm_http = idp.gateway.client(c.state.secret("llmgw", "LLMGW_API_KEY"))
+    return c
 
 
 def apply(ctx):
@@ -33,9 +43,9 @@ def test_apply_creates_everything_in_dependency_order(world):
     ctx, cli, idp = world
     apply(ctx)
     created = [c[c.index("create") + 1] for c in cli.calls if c[1:3] == ["sandbox", "create"]]
-    assert created == ["eco-identity", "eco-pagerlens", "eco-citypulse", "eco-llmgw", "eco-trustdesk", "eco-cpsim", "eco-paybroker"]
+    assert created == ["eco-identity", "eco-llmgw", "eco-pagerlens", "eco-citypulse", "eco-trustdesk", "eco-cpsim", "eco-paybroker"]
     assert set(cli.sandboxes) == set(created) and "eco-pagerlens-agent" not in cli.sandboxes        # registered only, never deployed
-    assert ("inst-2", "vector") in cli.extensions and len(cli.instances) == 7
+    assert ("inst-3", "vector") in cli.extensions and len(cli.instances) == 7
     # an app's environment names the identity provider and the apps it calls, with real URLs
     env = cli.sandboxes["eco-cpsim"]["env"]
     assert env["CPSIM_OIDC_ISSUER"] == "https://eco-identity.sandbox.example"
@@ -74,8 +84,7 @@ def test_a_second_run_converges_and_changes_nothing(world):
     ctx, cli, idp = world
     apply(ctx)
     calls, sandboxes, secrets_before = len(cli.calls), dict(cli.sandboxes), {k: dict(v) for k, v in ctx.state.data["apps"].items()}
-    ctx2 = Context(load(MANIFEST), State(ctx.state.dir), AgentPG(run=cli))
-    ctx2.http = idp.client(ctx2.state.admin_key())
+    ctx2 = again(ctx, cli, idp)
     out = apply(ctx2)
     new = [c for c in cli.calls[calls:] if c[1] in {"create", "extensions"} or c[1:3] == ["sandbox", "create"]]
     assert new == [] and cli.sandboxes == sandboxes
@@ -89,8 +98,7 @@ def test_a_lost_secret_is_reissued_but_a_known_one_is_kept(world, tmp_path):
     apply(ctx)
     state = State(ctx.state.dir)
     del state.data["apps"]["paybroker"]["client_secret"]
-    ctx2 = Context(load(MANIFEST), state, AgentPG(run=cli))
-    ctx2.http = idp.client(state.admin_key())
+    ctx2 = again(ctx, cli, idp, state=state)
     apply(ctx2)
     assert idp.apps["paybroker"]["rotations"] == 1 and state.data["apps"]["paybroker"]["client_secret"] == "cs_paybroker_2"
     assert idp.apps["trustdesk"].get("rotations", 0) == 0
@@ -99,8 +107,7 @@ def test_a_lost_secret_is_reissued_but_a_known_one_is_kept(world, tmp_path):
 def test_rotate_flag_reissues_every_secret(world):
     ctx, cli, idp = world
     apply(ctx)
-    ctx2 = Context(load(MANIFEST), State(ctx.state.dir), AgentPG(run=cli), rotate=True)
-    ctx2.http = idp.client(ctx2.state.admin_key())
+    ctx2 = again(ctx, cli, idp, rotate=True)
     apply(ctx2)
     assert all(a.get("rotations") == 1 for k, a in idp.apps.items())
 
@@ -111,8 +118,7 @@ def test_a_changed_environment_is_reported_not_silently_applied(world):
     m = load(MANIFEST)
     app = m.apps["trustdesk"]
     object.__setattr__(app, "env", {**app.env, "EXTRA": "1"})
-    ctx2 = Context(m, State(ctx.state.dir), AgentPG(run=cli))
-    ctx2.http = idp.client(ctx2.state.admin_key())
+    ctx2 = again(ctx, cli, idp, manifest=m)
     out = dict(apply(ctx2))
     assert "different environment" in out["TrustDesk: database and sandbox"]
     assert "EXTRA" not in cli.sandboxes["eco-trustdesk"]["env"]
@@ -188,10 +194,9 @@ def test_env_for_an_app_before_anything_exists(tmp_path):
 
 
 def test_only_deploys_a_subset_with_what_it_calls(tmp_path):
-    cli, idp = FakeAgentPG(), FakeIdentity()
+    cli, idp, idp.gateway = FakeAgentPG(), FakeIdentity(), FakeGateway()
     state = State(tmp_path / "eco")
-    ctx = Context(load(MANIFEST), state, AgentPG(run=cli), only={"cpsim"})
-    ctx.http = idp.client(state.admin_key())
+    ctx = again(None, cli, idp, state=state, only={"cpsim"})
     apply(ctx)
     assert set(cli.sandboxes) == {"eco-identity", "eco-llmgw", "eco-pagerlens", "eco-citypulse", "eco-trustdesk", "eco-cpsim"}      # cpsim + its callees (citypulse -> pagerlens)
     assert "paybroker" not in idp.apps
@@ -223,8 +228,7 @@ def test_a_sandbox_deleted_behind_our_back_is_recreated_by_the_next_apply(world)
     apply(ctx)
     old = ctx.state.app("trustdesk")["sandbox_id"]
     del cli.sandboxes["eco-trustdesk"]
-    ctx2 = Context(load(MANIFEST), State(ctx.state.dir), AgentPG(run=cli))
-    ctx2.http = idp.client(ctx2.state.admin_key())
+    ctx2 = again(ctx, cli, idp)
     apply(ctx2)
     assert "eco-trustdesk" in cli.sandboxes and ctx2.state.app("trustdesk")["sandbox_id"] != old
 
@@ -241,7 +245,7 @@ def test_recreate_cascades_to_callers_and_resets_the_url(world, monkeypatch):
     ctx, cli, idp = world
     apply(ctx)
     before = {k: ctx.state.app(k)["sandbox_id"] for k in ("pagerlens", "citypulse", "cpsim", "trustdesk", "paybroker")}
-    monkeypatch.setattr(cli_mod, "_ctx", lambda a: Context(load(MANIFEST), State(ctx.state.dir), AgentPG(run=cli), http=idp.client(ctx.state.admin_key())))
+    monkeypatch.setattr(cli_mod, "_ctx", lambda a: again(ctx, cli, idp))
     assert cli_mod.cmd_recreate(argparse.Namespace(apps="pagerlens", yes=True, file=str(MANIFEST), state=str(ctx.state.dir), execute=False, only=None, rotate=False)) == 0
     after = State(ctx.state.dir)
     changed = {k for k, v in before.items() if after.app(k)["sandbox_id"] != v}

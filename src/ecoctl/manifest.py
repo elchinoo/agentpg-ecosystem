@@ -25,6 +25,22 @@ class Role:
     description: str = ""
 
 
+LLM_CONSUMER_ENV = ("LLM_BASE_URL", "LLM_API_KEY", "LLM_CHAT_MODEL", "EMBEDDING_MODEL", "EMBEDDING_DIM")      # the names the apps read; ecoctl owns them
+ALIAS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,59}$")
+
+
+@dataclass(frozen=True)
+class LLM:
+    """How apps that use an LLM are wired to the gateway. Every key is optional."""
+    gateway: str = "llmgw"                    # the app that runs the LLM gateway
+    chat_alias: str = "chat-default"
+    embed_alias: str = "embed-default"
+    embed_dimensions: int = 768               # what TrustDesk and PagerLens expect (EMBEDDING_DIM) and what the echo embedding returns
+    rpm: int = 60                             # requests per minute of each app's gateway client
+    budget: int | None = 5_000_000            # monthly tokens of each app's gateway client; None: no budget
+    budget_mode: str = "hard"                 # hard: refuse over budget; soft: allow and flag
+
+
 @dataclass(frozen=True)
 class App:
     key: str                                  # client id, sandbox name suffix and scope prefix
@@ -46,6 +62,7 @@ class App:
     deploy: bool = True                       # False: only registered (a job or CLI that runs elsewhere)
     auto_pause: bool | None = None            # None: the fleet default; False keeps a sandbox running when idle
     plan: str | None = None                   # compute plan for the sandbox (small|medium|large); None: the fleet default
+    llm: bool = False                         # uses an LLM: wired to the gateway automatically
 
     @property
     def service(self) -> bool:
@@ -74,6 +91,16 @@ class Manifest:
     groups: tuple[Group, ...] = field(default_factory=tuple)
     auto_pause: bool = True
     plan: str | None = None
+    llm: LLM = field(default_factory=LLM)
+
+    def consumers(self) -> list[str]:
+        """The apps that use the LLM gateway."""
+        return sorted(k for k, a in self.apps.items() if a.llm)
+
+    def needs(self, key: str) -> set[str]:
+        """What must exist before `key`: the apps it calls, and the LLM gateway when it uses an LLM."""
+        a = self.apps[key]
+        return set(a.calls) | ({self.llm.gateway} if a.llm else set())
 
     def pause_enabled(self, app: App) -> bool:
         return self.auto_pause if app.auto_pause is None else app.auto_pause
@@ -82,13 +109,14 @@ class Manifest:
         return app.plan or self.plan
 
     def dependents(self, keys) -> set[str]:
-        """The apps that call any of `keys`, transitively: their environment names the callee's URL, which changes when it is recreated."""
+        """The apps that call any of `keys` (or use the LLM gateway, when it is one of them), transitively: their environment names
+        the callee's URL, which changes when it is recreated."""
         out: set[str] = set()
         changed = True
         while changed:
             changed = False
-            for k, a in self.apps.items():
-                if k not in out and (set(a.calls) & (set(keys) | out)):
+            for k in self.apps:
+                if k not in out and (self.needs(k) & (set(keys) | out)):
                     out.add(k)
                     changed = True
         return out
@@ -103,7 +131,7 @@ class Manifest:
             if k not in self.apps:
                 raise ManifestError(f"{k!r} is not an app in this manifest")
             out.add(k)
-            for callee in self.apps[k].calls:
+            for callee in sorted(self.needs(k)):
                 add(callee)
 
         for k in keys:
@@ -133,7 +161,7 @@ class Manifest:
             if key in visiting:
                 raise ManifestError(f"apps call each other in a cycle through {key!r}")
             visiting.add(key)
-            for callee in sorted(self.apps[key].calls):
+            for callee in sorted(self.needs(key)):
                 visit(callee)
             visiting.discard(key)
             done.append(key)
@@ -190,7 +218,7 @@ def _env(raw, where: str) -> dict[str, str]:
 
 def _app(key: str, raw: dict, where: str, *, identity: bool = False) -> App:
     _only(raw, {"name", "description", "image", "port", "extensions", "env", "generate", "health", "web", "roles", "default_roles",
-                "env_prefix", "exposes", "calls", "url_env", "deploy", "auto_pause", "plan"}, where)
+                "env_prefix", "exposes", "calls", "url_env", "deploy", "auto_pause", "plan", "llm"}, where)
     if not NAME.match(key):
         raise ManifestError(f"{where}: {key!r} must be 2-40 lowercase letters, digits or dashes")
     port = raw.get("port", 8000)
@@ -247,15 +275,61 @@ def _app(key: str, raw: dict, where: str, *, identity: bool = False) -> App:
     plan = raw.get("plan")
     if plan is not None and plan not in PLANS:
         raise ManifestError(f"{where}.plan must be one of {', '.join(sorted(PLANS))}")
-    return App(deploy=deploy, auto_pause=auto_pause, plan=plan, key=key, name=_text(raw.get("name"), f"{where}.name", key), description=str(raw.get("description", ""))[:300],
-               image=_text(raw.get("image"), f"{where}.image", key, 100), port=port, extensions=exts, env=_env(raw.get("env"), f"{where}.env"),
+    env = _env(raw.get("env"), f"{where}.env")
+    llm = raw.get("llm", False)
+    if not isinstance(llm, bool):
+        raise ManifestError(f"{where}.llm must be true or false")
+    if llm:
+        clash = [n for n in LLM_CONSUMER_ENV if n in env or n in generate]
+        if clash:
+            raise ManifestError(f"{where}: {', '.join(clash)} is set by ecoctl for an app with `llm: true`; remove them from env/generate")
+        if not deploy:
+            raise ManifestError(f"{where}: `llm: true` needs a deployed app (deploy: true): there is no sandbox to give the gateway settings to")
+    return App(llm=llm, deploy=deploy, auto_pause=auto_pause, plan=plan, key=key, name=_text(raw.get("name"), f"{where}.name", key), description=str(raw.get("description", ""))[:300],
+               image=_text(raw.get("image"), f"{where}.image", key, 100), port=port, extensions=exts, env=env,
                generate=generate, health=_text(raw.get("health"), f"{where}.health", "/healthz", 100), roles=tuple(roles), default_roles=default_roles,
                env_prefix=str(prefix), exposes=exposes, calls=calls, url_env=url_env, web=web)
 
 
+def _int(v, where: str, lo: int, hi: int) -> int:
+    if isinstance(v, bool) or not isinstance(v, int) or not lo <= v <= hi:
+        raise ManifestError(f"{where} must be a whole number from {lo} to {hi}")
+    return v
+
+
+def _llm(raw, apps: dict[str, App]) -> LLM:
+    raw = _dict(raw, "llm")
+    _only(raw, {"gateway", "chat_alias", "embed_alias", "embed_dimensions", "rpm", "budget", "budget_mode"}, "llm")
+    d = LLM()
+    gateway = _text(raw.get("gateway"), "llm.gateway", d.gateway, 40)
+    aliases = {}
+    for k, default in (("chat_alias", d.chat_alias), ("embed_alias", d.embed_alias)):
+        aliases[k] = _text(raw.get(k), f"llm.{k}", default, 60)
+        if not ALIAS.match(aliases[k]):
+            raise ManifestError(f"llm.{k}: {aliases[k]!r} must be 1-60 characters: letters, digits, '.', '_', ':' or '-'")
+    if aliases["chat_alias"] == aliases["embed_alias"]:
+        raise ManifestError("llm.chat_alias and llm.embed_alias must differ")
+    budget = d.budget if "budget" not in raw else (None if raw["budget"] is None else _int(raw["budget"], "llm.budget", 1, 10**13))
+    mode = raw.get("budget_mode", d.budget_mode)
+    if mode not in {"hard", "soft"}:
+        raise ManifestError("llm.budget_mode must be hard or soft")
+    llm = LLM(gateway=gateway, embed_dimensions=_int(raw.get("embed_dimensions", d.embed_dimensions), "llm.embed_dimensions", 1, 8192),
+              rpm=_int(raw.get("rpm", d.rpm), "llm.rpm", 1, 100_000), budget=budget, budget_mode=mode, **aliases)
+    consumers = [k for k, a in apps.items() if a.llm]
+    if consumers:
+        gw = apps.get(gateway)
+        if gw is None:
+            raise ManifestError(f"llm.gateway: {gateway!r} is not an app in this manifest (needed by {', '.join(consumers)})")
+        if not gw.deploy:
+            raise ManifestError(f"llm.gateway: {gateway!r} must be deployed (deploy: true) before the apps that use it")
+        if gw.llm:
+            raise ManifestError(f"apps.{gateway}.llm: the gateway itself cannot be an LLM consumer")
+    return llm
+
+
 def parse(doc: dict) -> Manifest:
     doc = _dict(doc, "the manifest")
-    _only(doc, {"version", "fleet", "agentpg", "identity", "apps", "access"}, "the manifest")
+    _only(doc, {"version", "fleet", "agentpg", "identity", "apps", "access", "llm"}, "the manifest")
     if doc.get("version") != 1:
         raise ManifestError("version must be 1")
     fleet = _text(doc.get("fleet"), "fleet", limit=20)
@@ -308,7 +382,7 @@ def parse(doc: dict) -> Manifest:
                 if t in apps and apps[t].web and role not in {r.name for r in apps[t].roles} and target != "*":
                     raise ManifestError(f"access.groups.{name}.grants.{t}: {role!r} is not a role of {t}")
         groups.append(Group(str(name), str(g.get("description", ""))[:200], grants))
-    m = Manifest(fleet=fleet, registry=registry, tag=tag, size=size, identity=ident, apps=apps, groups=tuple(groups), auto_pause=fleet_pause, plan=fleet_plan)
+    m = Manifest(fleet=fleet, registry=registry, tag=tag, size=size, identity=ident, apps=apps, groups=tuple(groups), auto_pause=fleet_pause, plan=fleet_plan, llm=_llm(doc.get("llm"), apps))
     m.order()                                                  # raises on a cycle
     return m
 

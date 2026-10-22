@@ -99,3 +99,87 @@ def test_unreadable_files_are_manifest_errors(tmp_path):
     (tmp_path / "bad.yaml").write_text("a: [unclosed")
     with pytest.raises(ManifestError):
         load(tmp_path / "bad.yaml")
+
+
+# ---- the LLM gateway wiring -------------------------------------------------------------------------------------------
+def test_llm_defaults_and_the_apps_that_use_it():
+    m = load(REPO_MANIFEST)
+    assert m.consumers() == ["pagerlens", "paybroker", "trustdesk"]
+    assert (m.llm.gateway, m.llm.chat_alias, m.llm.embed_alias, m.llm.embed_dimensions) == ("llmgw", "chat-default", "embed-default", 768)
+    assert not m.apps["cpsim"].llm and not m.apps["llmgw"].llm
+    d = doc()
+    del d["llm"]
+    assert parse(d).llm == parse(d).llm.__class__() and parse(d).consumers() == ["pagerlens", "paybroker", "trustdesk"]      # every key is optional
+
+
+def test_consumers_come_after_the_gateway_and_the_cascade_follows_them():
+    m = load(REPO_MANIFEST)
+    order = [a.key for a in m.order()]
+    assert all(order.index("llmgw") < order.index(k) for k in m.consumers())
+    assert m.dependents({"llmgw"}) == {"pagerlens", "trustdesk", "paybroker", "citypulse", "cpsim", "pagerlens-agent"}      # incl. what calls a consumer
+    assert m.closure({"paybroker"}) == {"paybroker", "llmgw"}
+
+
+def test_budget_can_be_set_or_removed_and_limits_are_checked():
+    d = doc()
+    d["llm"].update({"budget": None, "rpm": 5, "budget_mode": "soft"})
+    llm = parse(d).llm
+    assert llm.budget is None and llm.rpm == 5 and llm.budget_mode == "soft"
+    d["llm"]["budget"] = 1234
+    assert parse(d).llm.budget == 1234
+    for key, bad in (("budget", 0), ("budget", "lots"), ("rpm", True), ("rpm", 0), ("embed_dimensions", 99999), ("budget_mode", "maybe"),
+                     ("chat_alias", "no spaces"), ("embed_alias", "chat-default"), ("surprise", 1)):
+        d = doc()
+        d["llm"][key] = bad
+        with pytest.raises(ManifestError):
+            parse(d)
+
+
+def test_the_gateway_must_exist_be_deployed_and_not_use_itself():
+    d = doc()
+    d["llm"]["gateway"] = "ghost"
+    with pytest.raises(ManifestError, match="'ghost' is not an app"):
+        parse(d)
+    d = doc()
+    d["apps"]["llmgw"]["deploy"] = False
+    with pytest.raises(ManifestError, match="must be deployed"):
+        parse(d)
+    d = doc()
+    d["apps"]["llmgw"]["llm"] = True
+    with pytest.raises(ManifestError, match="cannot be an LLM consumer"):
+        parse(d)
+    d = doc()
+    del d["apps"]["llmgw"]
+    d["apps"]["cpsim"]["calls"].pop("llmgw")
+    with pytest.raises(ManifestError, match="not an app"):
+        parse(d)
+    for app in d["apps"].values():                       # nobody uses an LLM: the gateway is not needed at all
+        app.pop("llm", None)
+    assert parse(d).consumers() == []
+
+
+def test_an_llm_app_cannot_set_the_names_ecoctl_owns_and_must_be_deployed():
+    for name in ("LLM_BASE_URL", "LLM_CHAT_MODEL", "EMBEDDING_MODEL", "EMBEDDING_DIM"):
+        d = doc()
+        d["apps"]["trustdesk"]["env"][name] = "x"
+        with pytest.raises(ManifestError, match="set by ecoctl"):
+            parse(d)
+    d = doc()
+    d["apps"]["trustdesk"]["generate"].append("LLM_API_KEY")
+    with pytest.raises(ManifestError, match="set by ecoctl"):
+        parse(d)
+    d = doc()
+    d["apps"]["pagerlens-agent"]["llm"] = True
+    with pytest.raises(ManifestError, match="needs a deployed app"):
+        parse(d)
+    d = doc()
+    d["apps"]["trustdesk"]["llm"] = "yes"
+    with pytest.raises(ManifestError, match="llm must be true or false"):
+        parse(d)
+
+
+def test_a_consumer_that_the_gateway_calls_is_a_cycle():
+    d = doc()
+    d["apps"]["llmgw"]["calls"] = {"trustdesk": ["trustdesk.metrics"]}
+    with pytest.raises(ManifestError, match="cycle"):
+        parse(d)

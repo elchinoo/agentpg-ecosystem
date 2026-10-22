@@ -9,6 +9,7 @@ import httpx
 
 from .agentpg import AgentPG, AgentPGError, token_from
 from .identity_client import PENDING_REDIRECT, Identity, IdentityError
+from .llm_client import Gateway, GatewayError
 from .manifest import App, Manifest
 from .state import State
 
@@ -28,7 +29,15 @@ class Context:
     http: httpx.Client | None = None                        # injected in tests
     rotate: bool = False
     only: set[str] | None = None                            # deploy just these apps (and what they call); None: all
+    llm_http: httpx.Client | None = None                    # the LLM gateway's admin and data plane; injected in tests
     _identity: Identity | None = None
+
+    def gateway(self) -> Gateway:
+        key = self.manifest.llm.gateway
+        url = self.state.app(key).get("url")
+        if not url:
+            raise GatewayError(f"the LLM gateway ({key}) has no URL yet")
+        return Gateway(url, self.state.secret(key, llm_admin_name(self.manifest)), self.llm_http)
 
     def identity(self) -> Identity:
         if self._identity is None:
@@ -43,6 +52,11 @@ def _env_hash(env: dict[str, str]) -> str:
     return hashlib.sha256(json.dumps(env, sort_keys=True).encode()).hexdigest()[:12]
 
 
+def llm_admin_name(m: Manifest) -> str:
+    """The gateway's static operator key, which ecoctl generates and keeps: LLMGW_API_KEY for the shipped gateway."""
+    return f"{m.apps[m.llm.gateway].env_prefix}_API_KEY"
+
+
 def app_env(ctx: Context, app: App) -> tuple[dict[str, str], set[str]]:
     """The environment a sandbox is created with, and which of its names carry secrets."""
     m, st = ctx.manifest, ctx.state
@@ -51,6 +65,14 @@ def app_env(ctx: Context, app: App) -> tuple[dict[str, str], set[str]]:
     for name in app.generate:
         env[name] = st.secret(app.key, name)
         secret_names.add(name)
+    if m.consumers() and app.key == m.llm.gateway:
+        name = llm_admin_name(m)
+        env[name] = st.secret(app.key, name)                                  # the operator key ecoctl creates one client per app with
+        secret_names.add(name)
+        # the default aliases the gateway seeds on its built-in echo provider, so every app works before a real provider exists
+        env[f"{app.env_prefix}_DEFAULT_CHAT_ALIAS"] = m.llm.chat_alias
+        env[f"{app.env_prefix}_DEFAULT_EMBED_ALIAS"] = m.llm.embed_alias
+        env[f"{app.env_prefix}_DEFAULT_EMBED_DIM"] = str(m.llm.embed_dimensions)
     if app.key == "identity":
         env["IDENTITY_API_KEY"] = st.admin_key()
         secret_names.add("IDENTITY_API_KEY")
@@ -74,6 +96,19 @@ def app_env(ctx: Context, app: App) -> tuple[dict[str, str], set[str]]:
         url = st.app(callee).get("url")
         if url:
             env[app.url_env.get(callee, f"{m.apps[callee].env_prefix}_URL")] = url
+    if app.llm:
+        # the names TrustDesk and PagerLens read (config.py / embedcfg.py); environment settings are trusted by the apps, so the
+        # gateway's public https URL needs no allow-private switch
+        gw_url = st.app(m.llm.gateway).get("url")
+        if gw_url:
+            env["LLM_BASE_URL"] = f"{gw_url}/v1"
+        env["LLM_CHAT_MODEL"] = m.llm.chat_alias
+        env["EMBEDDING_MODEL"] = m.llm.embed_alias
+        env["EMBEDDING_DIM"] = str(m.llm.embed_dimensions)
+        key = st.app(app.key).get("llm_key")
+        if key:
+            env["LLM_API_KEY"] = key
+            secret_names.add("LLM_API_KEY")
     return env, secret_names
 
 
@@ -154,6 +189,23 @@ def _register(ctx: Context, app: App) -> str:
     return ", ".join(notes) or "registered"
 
 
+def _llm_client(ctx: Context, app: App) -> str:
+    """One gateway client per app, named after it, allowed the two default aliases and limited by the manifest. Its key is kept in the
+    state file (the gateway shows it once); a lost key is replaced by rotating the client's active key."""
+    m, entry = ctx.manifest, ctx.state.app(app.key)
+    gw = ctx.gateway()
+    gw.wait_ready()
+    res = gw.ensure_client(app.key, f"{app.name} (created by ecoctl)", [m.llm.chat_alias, m.llm.embed_alias], m.llm.rpm, m.llm.budget,
+                           m.llm.budget_mode, known_key=bool(entry.get("llm_key")), rotate=ctx.rotate)
+    note = res.note
+    if res.key:
+        entry["llm_key"] = res.key
+        if entry.get("sandbox_id"):
+            note += f"; the running app still holds the old key: run `ecoctl recreate {app.key}`"
+    ctx.state.save()
+    return f"gateway client '{app.key}': {note}"
+
+
 def _finish_urls(ctx: Context, app: App) -> str:
     url = ctx.state.app(app.key)["url"]
     if app.web:
@@ -189,6 +241,13 @@ def build(ctx: Context) -> list[Step]:
         steps.append(Step(f"{app.name}: register with the identity provider", detail, (lambda a: lambda c: _register(c, a))(app)))
         if not app.deploy:
             continue
+        if app.llm:
+            lm = m.llm
+            steps.append(Step(f"{app.name}: LLM gateway client and key",
+                              [f"gateway {lm.gateway}: ensure client '{app.key}' (aliases {lm.chat_alias}, {lm.embed_alias}; {lm.rpm} requests/min; " +
+                               (f"{lm.budget:,} tokens/month, {lm.budget_mode}" if lm.budget else "no token budget") + ")",
+                               "keep its key in the state file (shown once by the gateway; rotated if lost)"],
+                              (lambda a: lambda c: _llm_client(c, a))(app)))
         env, sec = app_env(ctx, app)
         placeholders = {k: ("<generated>" if k in sec else v) for k, v in env.items()}
         placeholders.setdefault(f"{app.env_prefix}_OIDC_ISSUER", "<identity url>")
@@ -202,6 +261,11 @@ def build(ctx: Context) -> list[Step]:
             placeholders.setdefault(app.url_env.get(callee, f"{m.apps[callee].env_prefix}_URL"), f"<{callee} url>")
         for g in app.generate:
             placeholders[g] = "<generated>"
+        if app.llm:
+            placeholders.setdefault("LLM_BASE_URL", f"<{m.llm.gateway} url>/v1")
+            placeholders["LLM_API_KEY"] = "<generated>"
+        if m.consumers() and app.key == m.llm.gateway:
+            placeholders[llm_admin_name(m)] = "<generated>"
         deploy = [AgentPG.create_instance(m.instance_name(app.key), m.size).display(),
                   *[AgentPG.extension("<instance-id>", e).display() for e in app.extensions],
                   AgentPG.create_sandbox(m.sandbox_name(app.key), m.image(app), "<instance-id>", app.port, placeholders,

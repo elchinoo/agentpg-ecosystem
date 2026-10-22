@@ -17,7 +17,7 @@ from ecoctl.agentpg import AgentPG  # noqa: E402
 from ecoctl.manifest import load  # noqa: E402
 from ecoctl.plan import Context, build  # noqa: E402
 from ecoctl.state import State  # noqa: E402
-from tests.fakes import FakeAgentPG  # noqa: E402
+from tests.fakes import FakeAgentPG, FakeGateway  # noqa: E402
 
 MANIFEST = Path(__file__).resolve().parents[1] / "ecosystem.yaml"
 
@@ -37,11 +37,12 @@ def test_apply_against_the_real_provider(tmp_path, monkeypatch):
     monkeypatch.setenv("IDENTITY_PUBLIC_URL", "https://eco-identity.sandbox.example")
     identity_api.reset_server()
     with TestClient(identity_api.app, base_url="https://eco-identity.sandbox.example") as http:
-        cli = FakeAgentPG()
-        ctx = Context(load(MANIFEST), state, AgentPG(run=cli), http=http)
+        cli, gw = FakeAgentPG(), FakeGateway()
+        llm_http = gw.client(state.secret("llmgw", "LLMGW_API_KEY"))
+        ctx = Context(load(MANIFEST), state, AgentPG(run=cli), http=http, llm_http=llm_http)
         for step in build(ctx):
             step.run(ctx)
-        again = Context(load(MANIFEST), State(state.dir), AgentPG(run=cli), http=http)
+        again = Context(load(MANIFEST), State(state.dir), AgentPG(run=cli), http=http, llm_http=llm_http)
         for step in build(again):
             step.run(again)                                                   # converges: no duplicates, no rotation
         registry = {a["client_id"]: a for a in http.get("/api/apps", headers={"Authorization": f"Bearer {state.admin_key()}"}).json()}
