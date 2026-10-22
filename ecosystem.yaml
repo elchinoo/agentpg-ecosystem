@@ -13,7 +13,7 @@ llm:                             # apps with `llm: true` are wired to the LLM ga
   gateway: llmgw                 # the app that runs the gateway; it is deployed before the apps that use it
   chat_alias: chat-default       # model aliases the gateway seeds on its built-in echo provider: repoint them in the gateway to switch every app
   embed_alias: embed-default
-  embed_dimensions: 768          # what TrustDesk and PagerLens expect (EMBEDDING_DIM) and what the echo embedding returns
+  embed_dimensions: 1536         # EMBEDDING_DIM of the apps = the size of the real embedding model behind embed-default (text-embedding-3-small)
   rpm: 60                        # requests per minute of each app's gateway client
   budget: 5000000                # tokens per month of each app's gateway client (null: no budget)
   budget_mode: hard              # hard: refuse over budget; soft: allow and flag
