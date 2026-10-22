@@ -50,6 +50,7 @@ apps:
     exposes: [citypulse.ingest, citypulse.read, citypulse.metrics]
     calls:
       pagerlens: [pagerlens.ingest]
+      llmgw: [llmgw.use]
 
   cpsim:
     name: CityPulse Simulator
@@ -65,6 +66,7 @@ apps:
       citypulse: [citypulse.ingest]
       trustdesk: [trustdesk.requests.write]
       pagerlens: [pagerlens.ingest]
+      llmgw: [llmgw.use]
 
   paybroker:
     name: PayBroker
@@ -99,6 +101,7 @@ apps:
     deploy: false
     calls:
       pagerlens: [pagerlens.ingest]
+      llmgw: [llmgw.use]
     url_env: {pagerlens: PAGERLENS_URL}
 
 access:
