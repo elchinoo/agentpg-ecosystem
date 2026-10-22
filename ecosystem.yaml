@@ -80,6 +80,7 @@ apps:
       trustdesk: [trustdesk.requests.write]
       pagerlens: [pagerlens.ingest]
       llmgw: [llmgw.use]
+    uses: [paybroker, identity]      # PAYBROKER_URL and IDENTITY_URL too, so the simulator holds all six fleet addresses; PayBroker is called with a merchant key, not a scope, and recreating it recreates this app
 
   paybroker:
     name: PayBroker

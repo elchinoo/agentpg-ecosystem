@@ -17,6 +17,7 @@ class FakeAgentPG:
         self._ids = itertools.count(1)
         self.creating_polls = 0                  # how many `status` calls answer `creating` before `running`
         self.failed: set[str] = set()
+        self.url_with_id = False                 # like the real platform: the sandbox id is part of its URL, so a recreated sandbox gets a new one
 
     def __call__(self, args: list[str]) -> str:
         self.calls.append(args)
@@ -58,7 +59,7 @@ class FakeAgentPG:
             sb["polls"] = sb.get("polls", 0) + 1
             if sb["polls"] <= self.creating_polls:
                 return f"ID: {sb['id']}\nName: {name}\nStatus: creating\n"
-            return f"ID: {sb['id']}\nName: {name}\nStatus: running\nURL: https://{name}.sandbox.example\n"
+            return f"ID: {sb['id']}\nName: {name}\nStatus: running\nURL: https://{name}{'-' + sb['id'] if self.url_with_id else ''}.sandbox.example\n"
         raise AssertionError(f"unexpected agentpg call {args}")
 
     def commands(self, *prefix: str) -> list[list[str]]:

@@ -65,7 +65,27 @@ A scope names its app by its prefix (`trustdesk.requests.write` is for `trustdes
 production. An app with `calls` gets a second client, `<key>-service`, and the variables `<PREFIX>_SERVICE_CLIENT_ID/_SECRET`
 beside the web client's `<PREFIX>_OIDC_CLIENT_ID/_SECRET`. Other keys: `image`, `port`, `extensions`, `env` (non-secret),
 `generate` (names that get a random secret), `health`, `web: false` (service only), `deploy: false` (register only: a job or agent
-that runs elsewhere, such as the PagerLens agent), `url_env` (which variable carries a callee's URL; default `<CALLEE>_URL`), `llm` (true: wired to the LLM gateway, below).
+that runs elsewhere, such as the PagerLens agent), `url_env` (which variable carries a callee's URL; default `<CALLEE>_URL`), `uses` (below), `llm` (true: wired to the LLM gateway, below).
+
+### `uses`: an app's address without a scope
+
+`calls` is for apps reached with an identity token: it registers a service client with that scope and injects the callee's URL.
+An app can also reach another one **some other way** (CityPulse Simulator drives PayBroker with a merchant secret key, which no identity
+scope can carry) and still need its address, and its address changes whenever that app is recreated. `uses` is that, with no scope:
+
+```yaml
+  cpsim:
+    calls: {citypulse: [citypulse.ingest], trustdesk: [trustdesk.requests.write], pagerlens: [pagerlens.ingest], llmgw: [llmgw.use]}
+    uses: [paybroker, identity]     # PAYBROKER_URL and IDENTITY_URL; no service client, no scope
+```
+
+Each listed app (or `identity`, the provider) gets its URL injected as `<PREFIX>_URL` (override per app with `url_env`), is deployed **before**
+this app, is pulled in by `--only`, and **`recreate` cascades**: `ecoctl recreate paybroker` also recreates cpsim so its environment
+names PayBroker's new URL (recreating `identity` already recreates everything). Validated: an existing deployed app other than this one, not
+listed twice, not also under `calls`, no cycles. With `calls` and `uses` together the simulator holds all six fleet addresses
+(`CITYPULSE_URL`, `PAYBROKER_URL`, `TRUSTDESK_URL`, `PAGERLENS_URL`, `LLMGW_URL`, `IDENTITY_URL`), which is what lets its cities, companies
+and workloads follow the fleet with `${CITYPULSE_URL}`-style targets (see the simulator's README). A deployed sandbox's environment cannot change in place:
+after adding `uses` to a running fleet, `ecoctl recreate cpsim` once.
 
 ## Wire an app to the LLM gateway (automatic)
 

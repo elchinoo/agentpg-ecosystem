@@ -116,17 +116,17 @@ Always look before you leap:
 ```
 
 Then deploy a small slice first. `--only` takes a comma-separated list and automatically adds what those apps **call** (the simulator pulls
-in CityPulse, TrustDesk and PagerLens), and the identity provider is always included.
+in CityPulse, TrustDesk, PagerLens and PayBroker), and the identity provider is always included.
 
 ```bash
 # Stage 1: identity + TrustDesk + the LLM gateway TrustDesk uses (3 instances, 3 sandboxes). Prove sign-in and the LLM wiring work (ecoctl status) before adding more.
 .venv/bin/ecoctl apply --only trustdesk --execute
 
 # Stage 2: the observability trio plus the load generator
-.venv/bin/ecoctl apply --only cpsim --execute        # adds pagerlens, citypulse (and llmgw, trustdesk: already there)
+.venv/bin/ecoctl apply --only cpsim --execute        # adds pagerlens, citypulse and paybroker (the simulator `uses` it; llmgw, trustdesk: already there)
 
 # Stage 3: the rest
-.venv/bin/ecoctl apply --execute                     # paybroker
+.venv/bin/ecoctl apply --execute                     # anything not pulled in yet
 ```
 
 **A sandbox's URL contains its id** (`https://app--a1p-prod-sbx-<id>--....code.run`), so a sandbox you delete and recreate gets a **new URL**. Anything that
@@ -287,6 +287,10 @@ dimension of TrustDesk's and PagerLens's tables is fixed when their database is 
    a token variable name (it must contain `TOKEN`). Leave that variable **unset** and the simulator mints a token from the identity provider
    for you (scope `citypulse.ingest`), because `CPSIM_SERVICE_CLIENT_ID/_SECRET` were set. Save and start the city.
 2. In CityPulse, readings arrive; in PagerLens, `citypulse-*` appears as monitored.
+   **Follow the fleet instead of typing URLs.** The simulator sandbox is created with all six fleet addresses (`CITYPULSE_URL`, `PAYBROKER_URL`,
+   `TRUSTDESK_URL`, `PAGERLENS_URL`, `LLMGW_URL`, `IDENTITY_URL`; Settings > Fleet lists them). In a city, company or workload press **Use the fleet's ...**
+   next to the URL (it stores `${CITYPULSE_URL}` and so on) and the address is looked up when it starts: after `ecoctl recreate <app>` the simulator is recreated
+   too (manifest `uses:`/`calls:`) with the new addresses, and nothing needs retyping. A fleet deployed before `uses:` existed needs `ecoctl recreate cpsim` once.
 3. **Companies**: create a company targeting TrustDesk (`https://<trustdesk>`), leave `TRUSTDESK_CLIENT_TOKEN` unset (same mechanism, scope
    `trustdesk.requests.write`), choose the count of each request type, **Preview**, then **Save and run**. Requests appear in TrustDesk with AI advice.
 4. In PagerLens, try the failure stories: stop the CityPulse sandbox (`agentpg sandbox pause <id>`), or start a *burst* in the simulator,
@@ -316,7 +320,7 @@ from AgentPG) and saves the new one.
 | See everything | `ecoctl status`, `agentpg sandbox list`, `agentpg instances list` |
 | Logs | `agentpg sandbox logs <sandbox-id>` |
 | Resume a paused sandbox | `agentpg sandbox resume <sandbox-id>`; apps hold stored keys locked until a sign-in unlocks them (the platform secret, `*_ENCRYPTION_KEY`, makes that automatic: `ecoctl` sets it) |
-| Deploy a new image | CI pushes `:latest`. `ecoctl recreate <app>` deletes the sandbox and creates it afresh so it pulls the image (the database and secrets are kept). Because the URL changes, it also recreates every app that **calls** this one, and every app that uses it as the LLM gateway (their environment names its URL); recreating `identity` recreates the whole fleet. Allow a couple of minutes per app |
+| Deploy a new image | CI pushes `:latest`. `ecoctl recreate <app>` deletes the sandbox and creates it afresh so it pulls the image (the database and secrets are kept). Because the URL changes, it also recreates every app that **calls** this one, every app that lists it under `uses` (the simulator uses PayBroker and identity), and every app that uses it as the LLM gateway (their environment names its URL); recreating `identity` recreates the whole fleet. Allow a couple of minutes per app |
 | Change an app's environment | Edit the manifest, then `ecoctl recreate <app>` |
 | Rotate a client secret or a gateway key | `ecoctl apply --execute --rotate`, then recreate the sandboxes whose environment changed (section 9) |
 | Check the LLM wiring | `ecoctl status` (client + one real call per app), `ecoctl llm test <app>` |

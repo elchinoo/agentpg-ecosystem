@@ -56,7 +56,7 @@ def test_a_call_must_name_an_app_a_scope_with_the_callee_prefix_and_an_exposed_s
         (lambda d: d["apps"]["cpsim"]["calls"].update({"trustdesk": ["citypulse.ingest"]}), "must start with 'trustdesk.'"),
         (lambda d: d["apps"]["cpsim"]["calls"].update({"trustdesk": ["trustdesk.typo"]}), "not listed under apps.trustdesk.exposes"),
         (lambda d: d["apps"]["cpsim"]["calls"].update({"trustdesk": []}), "lists no scopes"),
-        (lambda d: d["apps"]["cpsim"].update({"url_env": {"paybroker": "PAYBROKER_URL"}}), "only apps it calls"),
+        (lambda d: d["apps"]["cpsim"].update({"url_env": {"pagerlens-agent": "AGENT_URL"}}), "only apps it calls or uses"),
     ):
         d = doc()
         mutate(d)

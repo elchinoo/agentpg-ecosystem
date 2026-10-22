@@ -43,7 +43,7 @@ def test_apply_creates_everything_in_dependency_order(world):
     ctx, cli, idp = world
     apply(ctx)
     created = [c[c.index("create") + 1] for c in cli.calls if c[1:3] == ["sandbox", "create"]]
-    assert created == ["eco-identity", "eco-llmgw", "eco-pagerlens", "eco-citypulse", "eco-trustdesk", "eco-cpsim", "eco-paybroker"]
+    assert created == ["eco-identity", "eco-llmgw", "eco-pagerlens", "eco-citypulse", "eco-paybroker", "eco-trustdesk", "eco-cpsim"]
     assert set(cli.sandboxes) == set(created) and "eco-pagerlens-agent" not in cli.sandboxes        # registered only, never deployed
     assert ("inst-3", "vector") in cli.extensions and len(cli.instances) == 7
     # an app's environment names the identity provider and the apps it calls, with real URLs
@@ -198,10 +198,10 @@ def test_only_deploys_a_subset_with_what_it_calls(tmp_path):
     state = State(tmp_path / "eco")
     ctx = again(None, cli, idp, state=state, only={"cpsim"})
     apply(ctx)
-    assert set(cli.sandboxes) == {"eco-identity", "eco-llmgw", "eco-pagerlens", "eco-citypulse", "eco-trustdesk", "eco-cpsim"}      # cpsim + its callees (citypulse -> pagerlens)
-    assert "paybroker" not in idp.apps
+    assert set(cli.sandboxes) == {"eco-identity", "eco-llmgw", "eco-pagerlens", "eco-citypulse", "eco-trustdesk", "eco-paybroker", "eco-cpsim"}      # + citypulse -> pagerlens, + paybroker (used)
+    assert "paybroker" in idp.apps and "pagerlens-agent" not in idp.apps          # a used app is deployed and registered
     granted = {(g["client_id"]) for g in idp.grants}
-    assert "paybroker" not in granted and "trustdesk" in granted
+    assert "paybroker" in granted and "trustdesk" in granted
 
 
 def test_unknown_only_names_fail_and_pause_and_plan_reach_the_command(world):
@@ -235,7 +235,7 @@ def test_a_sandbox_deleted_behind_our_back_is_recreated_by_the_next_apply(world)
 
 def test_dependents_follow_calls_transitively():
     m = load(MANIFEST)
-    assert m.dependents({"pagerlens"}) == {"citypulse", "cpsim", "pagerlens-agent"} and m.dependents({"trustdesk"}) == {"cpsim"} and m.dependents({"paybroker"}) == set()
+    assert m.dependents({"pagerlens"}) == {"citypulse", "cpsim", "pagerlens-agent"} and m.dependents({"trustdesk"}) == {"cpsim"} and m.dependents({"paybroker"}) == {"cpsim"}      # `uses` cascades
 
 
 def test_recreate_cascades_to_callers_and_resets_the_url(world, monkeypatch):

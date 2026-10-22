@@ -92,10 +92,10 @@ def app_env(ctx: Context, app: App) -> tuple[dict[str, str], set[str]]:
             if sec:
                 env[f"{app.env_prefix}_SERVICE_CLIENT_SECRET"] = sec
                 secret_names.add(f"{app.env_prefix}_SERVICE_CLIENT_SECRET")
-    for callee in app.calls:
+    for callee, var in m.url_vars(app).items():                    # `calls` and `uses`: their addresses, so a recreated callee needs this app recreated
         url = st.app(callee).get("url")
         if url:
-            env[app.url_env.get(callee, f"{m.apps[callee].env_prefix}_URL")] = url
+            env[var] = url
     if app.llm:
         # the names TrustDesk and PagerLens read (config.py / embedcfg.py); environment settings are trusted by the apps, so the
         # gateway's public https URL needs no allow-private switch
@@ -257,8 +257,8 @@ def build(ctx: Context) -> list[Step]:
         if app.service:
             placeholders[f"{app.env_prefix}_SERVICE_CLIENT_ID"] = app.service_client_id
             placeholders.setdefault(f"{app.env_prefix}_SERVICE_CLIENT_SECRET", "<generated>")
-        for callee in app.calls:
-            placeholders.setdefault(app.url_env.get(callee, f"{m.apps[callee].env_prefix}_URL"), f"<{callee} url>")
+        for callee, var in m.url_vars(app).items():
+            placeholders.setdefault(var, f"<{callee} url>")
         for g in app.generate:
             placeholders[g] = "<generated>"
         if app.llm:

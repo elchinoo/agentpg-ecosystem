@@ -63,6 +63,7 @@ class App:
     auto_pause: bool | None = None            # None: the fleet default; False keeps a sandbox running when idle
     plan: str | None = None                   # compute plan for the sandbox (small|medium|large); None: the fleet default
     llm: bool = False                         # uses an LLM: wired to the gateway automatically
+    uses: tuple[str, ...] = ()                # apps (or `identity`) whose URL is injected without a scope: called by other means (a merchant key, ...)
 
     @property
     def service(self) -> bool:
@@ -98,9 +99,14 @@ class Manifest:
         return sorted(k for k, a in self.apps.items() if a.llm)
 
     def needs(self, key: str) -> set[str]:
-        """What must exist before `key`: the apps it calls, and the LLM gateway when it uses an LLM."""
+        """What must exist before `key`: the apps it calls or uses, and the LLM gateway when it uses an LLM. (The identity provider is
+        always deployed first, and recreating it recreates everything, so it is not listed here.)"""
         a = self.apps[key]
-        return set(a.calls) | ({self.llm.gateway} if a.llm else set())
+        return set(a.calls) | (set(a.uses) - {"identity"}) | ({self.llm.gateway} if a.llm else set())
+
+    def url_vars(self, app: App) -> dict[str, str]:
+        """callee key -> the environment variable that carries its URL in `app`: every app it calls or uses (`identity` included)."""
+        return {callee: app.url_env.get(callee, f"{self.everything()[callee].env_prefix}_URL") for callee in (*app.calls, *app.uses)}
 
     def pause_enabled(self, app: App) -> bool:
         return self.auto_pause if app.auto_pause is None else app.auto_pause
@@ -109,7 +115,7 @@ class Manifest:
         return app.plan or self.plan
 
     def dependents(self, keys) -> set[str]:
-        """The apps that call any of `keys` (or use the LLM gateway, when it is one of them), transitively: their environment names
+        """The apps that call or use any of `keys` (or use the LLM gateway, when it is one of them), transitively: their environment names
         the callee's URL, which changes when it is recreated."""
         out: set[str] = set()
         changed = True
@@ -218,7 +224,7 @@ def _env(raw, where: str) -> dict[str, str]:
 
 def _app(key: str, raw: dict, where: str, *, identity: bool = False) -> App:
     _only(raw, {"name", "description", "image", "port", "extensions", "env", "generate", "health", "web", "roles", "default_roles",
-                "env_prefix", "exposes", "calls", "url_env", "deploy", "auto_pause", "plan", "llm"}, where)
+                "env_prefix", "exposes", "calls", "uses", "url_env", "deploy", "auto_pause", "plan", "llm"}, where)
     if not NAME.match(key):
         raise ManifestError(f"{where}: {key!r} must be 2-40 lowercase letters, digits or dashes")
     port = raw.get("port", 8000)
@@ -256,6 +262,12 @@ def _app(key: str, raw: dict, where: str, *, identity: bool = False) -> App:
             if not isinstance(s, str) or not SCOPE.match(s) or s.split(".", 1)[0] != callee:
                 raise ManifestError(f"{where}.calls.{callee}: scope {s!r} must start with '{callee}.' (a scope addresses one app by its prefix)")
         calls[callee] = tuple(dict.fromkeys(scopes))
+    uses = tuple(_list(raw.get("uses"), f"{where}.uses"))
+    for u in uses:
+        if not isinstance(u, str) or not NAME.match(u):
+            raise ManifestError(f"{where}.uses: {u!r} is not an app key")
+    if len(set(uses)) != len(uses):
+        raise ManifestError(f"{where}.uses lists an app twice")
     url_env = {k: str(v) for k, v in _dict(raw.get("url_env"), f"{where}.url_env").items()}
     for k, v in url_env.items():
         if not ENV_NAME.match(v):
@@ -288,7 +300,7 @@ def _app(key: str, raw: dict, where: str, *, identity: bool = False) -> App:
     return App(llm=llm, deploy=deploy, auto_pause=auto_pause, plan=plan, key=key, name=_text(raw.get("name"), f"{where}.name", key), description=str(raw.get("description", ""))[:300],
                image=_text(raw.get("image"), f"{where}.image", key, 100), port=port, extensions=exts, env=env,
                generate=generate, health=_text(raw.get("health"), f"{where}.health", "/healthz", 100), roles=tuple(roles), default_roles=default_roles,
-               env_prefix=str(prefix), exposes=exposes, calls=calls, url_env=url_env, web=web)
+               env_prefix=str(prefix), exposes=exposes, calls=calls, url_env=url_env, uses=uses, web=web)
 
 
 def _int(v, where: str, lo: int, hi: int) -> int:
@@ -364,9 +376,18 @@ def parse(doc: dict) -> Manifest:
             missing = [s for s in scopes if s not in apps[callee].exposes]
             if missing:
                 raise ManifestError(f"apps.{key}.calls.{callee}: {', '.join(missing)} not listed under apps.{callee}.exposes")
+        for used in app.uses:
+            if used == key:
+                raise ManifestError(f"apps.{key}.uses: an app cannot use itself")
+            if used in app.calls:
+                raise ManifestError(f"apps.{key}.uses: {used!r} is already under calls (calls injects its URL too); list it in one place")
+            if used != "identity" and used not in apps:
+                raise ManifestError(f"apps.{key}.uses: {used!r} is not an app in this manifest")
+            if used != "identity" and not apps[used].deploy:
+                raise ManifestError(f"apps.{key}.uses: {used!r} is not deployed (deploy: false), so it has no URL to inject")
         for callee in app.url_env:
-            if callee not in app.calls:
-                raise ManifestError(f"apps.{key}.url_env.{callee}: only apps it calls can be mapped")
+            if callee not in app.calls and callee not in app.uses:
+                raise ManifestError(f"apps.{key}.url_env.{callee}: only apps it calls or uses can be mapped")
     groups = []
     for name, g in _dict(_dict(doc.get("access"), "access").get("groups"), "access.groups").items():
         g = _dict(g, f"access.groups.{name}")
