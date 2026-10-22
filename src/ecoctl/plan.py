@@ -100,12 +100,21 @@ def _deploy(ctx: Context, app: App) -> str:
             entry["instance_id"] = cli.instance_id(m.instance_name(app.key))
         if not entry["instance_id"]:
             raise AgentPGError(f"created instance {m.instance_name(app.key)} but could not find its id in `agentpg instances list`")
+        st.save()
+    if not entry.get("extensions_done"):
+        cli.wait_instance(entry["instance_id"])
         for ext in app.extensions:
             cli.run(AgentPG.extension(entry["instance_id"], ext))
+        entry["extensions_done"] = True
+        st.save()
+    if entry.get("sandbox_id") and entry["sandbox_id"] not in cli.sandbox_ids():           # deleted behind our back: start over
+        for k in ("sandbox_id", "url", "env_hash"):
+            entry.pop(k, None)
         st.save()
     env, secret_names = app_env(ctx, app)
     outcome = []
     if not entry.get("sandbox_id"):
+        cli.wait_instance(entry["instance_id"])
         entry["sandbox_id"] = cli.sandbox_id(m.sandbox_name(app.key))
         if not entry["sandbox_id"]:
             cli.run(AgentPG.create_sandbox(m.sandbox_name(app.key), m.image(app), entry["instance_id"], app.port, env, secret_names,
@@ -119,9 +128,7 @@ def _deploy(ctx: Context, app: App) -> str:
         outcome.append("exists with a different environment: delete the sandbox and re-run to apply it (the database keeps its data)")
     if not entry["sandbox_id"]:
         raise AgentPGError(f"could not find sandbox {m.sandbox_name(app.key)} in `agentpg sandbox list`")
-    entry["url"] = cli.sandbox_url(entry["sandbox_id"]) or entry.get("url")
-    if not entry["url"]:
-        raise AgentPGError(f"sandbox {entry['sandbox_id']} has no URL yet (is it running? try `agentpg sandbox status {entry['sandbox_id']}`)")
+    entry["url"] = cli.wait_url(entry["sandbox_id"])
     st.save()
     return f"{entry['url']} ({', '.join(outcome) or 'unchanged'})"
 

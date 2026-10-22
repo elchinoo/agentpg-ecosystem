@@ -81,6 +81,18 @@ class Manifest:
     def plan_for(self, app: App) -> str | None:
         return app.plan or self.plan
 
+    def dependents(self, keys) -> set[str]:
+        """The apps that call any of `keys`, transitively: their environment names the callee's URL, which changes when it is recreated."""
+        out: set[str] = set()
+        changed = True
+        while changed:
+            changed = False
+            for k, a in self.apps.items():
+                if k not in out and (set(a.calls) & (set(keys) | out)):
+                    out.add(k)
+                    changed = True
+        return out
+
     def closure(self, keys) -> set[str]:
         """The apps to deploy for a selection: the selection plus every app it calls, transitively (their URLs are needed)."""
         out: set[str] = set()

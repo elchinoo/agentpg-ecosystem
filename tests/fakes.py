@@ -13,6 +13,10 @@ class FakeAgentPG:
         self.extensions: list[tuple[str, str]] = []
         self.calls: list[list[str]] = []
         self.fail_on: str | None = None
+        import itertools
+        self._ids = itertools.count(1)
+        self.creating_polls = 0                  # how many `status` calls answer `creating` before `running`
+        self.failed: set[str] = set()
 
     def __call__(self, args: list[str]) -> str:
         self.calls.append(args)
@@ -24,20 +28,29 @@ class FakeAgentPG:
             self.instances[name] = f"inst-{len(self.instances) + 1}"
             return f"created {name}\n"
         if a[:2] == ["instances", "list"]:
-            return "ID NAME\n" + "".join(f"{i} {n}\n" for n, i in self.instances.items())
+            return "ID NAME SIZE VERSION STATUS\n-- ---- ---- ------- ------\n" + "".join(f"{i} {n} small 18 running\n" for n, i in self.instances.items())
         if a[:2] == ["extensions", "create"]:
-            self.extensions.append((a[2], a[3]))
+            self.extensions.append((a[3], a[2]))          # recorded as (instance, extension); the CLI takes the name first
             return "ok\n"
         if a[:2] == ["sandbox", "create"]:
             env = dict(x.split("=", 1) for i, x in enumerate(a) if i and a[i - 1] == "--env")
-            self.sandboxes[a[2]] = {"id": f"sbx-{len(self.sandboxes) + 1}", "env": env, "image": a[a.index("--image") + 1],
+            self.sandboxes[a[2]] = {"id": f"sbx-{next(self._ids)}", "env": env, "image": a[a.index("--image") + 1],
                                     "instance": a[a.index("--instance") + 1], "port": a[a.index("--port") + 1]}
             return "ok\n"
+        if a[:2] == ["sandbox", "delete"]:
+            gone = next(n for n, s in self.sandboxes.items() if s["id"] == a[2])
+            del self.sandboxes[gone]
+            return "deleted\n"
         if a[:2] == ["sandbox", "list"]:
-            return "ID NAME\n" + "".join(f"{s['id']} {n}\n" for n, s in self.sandboxes.items())
+            return "ID NAME IMAGE PLAN STATUS INSTANCE ERROR\n-- ---- ----- ---- ------ -------- -----\n" + "".join(
+                f"{s['id']} {n} {s['image']} small running {s['instance']} -\n" for n, s in self.sandboxes.items())
         if a[:2] == ["sandbox", "status"]:
             name = next(n for n, s in self.sandboxes.items() if s["id"] == a[2])
-            return f"Name: {name}\nURL: https://{name}.sandbox.example\nState: running\n"
+            sb = self.sandboxes[name]
+            sb["polls"] = sb.get("polls", 0) + 1
+            if sb["polls"] <= self.creating_polls:
+                return f"ID: {sb['id']}\nName: {name}\nStatus: creating\n"
+            return f"ID: {sb['id']}\nName: {name}\nStatus: running\nURL: https://{name}.sandbox.example\n"
         raise AssertionError(f"unexpected agentpg call {args}")
 
     def commands(self, *prefix: str) -> list[list[str]]:

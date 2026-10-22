@@ -130,16 +130,28 @@ def test_a_failure_keeps_progress_and_the_rerun_resumes(world):
     assert len(cli.instances) == 7                                                           # the identity instance was reused
 
 
-def test_a_sandbox_without_a_url_is_an_error(world):
+def test_apply_waits_while_a_sandbox_is_creating(world, monkeypatch):
     ctx, cli, idp = world
-    orig = cli.__call__
+    cli.creating_polls = 2
+    import ecoctl.agentpg as ag
+    monkeypatch.setattr(ag.time, "sleep", lambda s: None)
+    apply(ctx)
+    assert ctx.state.app("trustdesk")["url"] == "https://eco-trustdesk.sandbox.example"
+    assert max(sb["polls"] for sb in cli.sandboxes.values()) >= 3
 
-    def no_url(args):
-        return "Name: x\nState: starting\n" if args[1:3] == ["sandbox", "status"] else orig(args)
 
-    ctx.agentpg = AgentPG(run=no_url)
-    with pytest.raises(AgentPGError, match="no URL yet"):
-        apply(ctx)
+def test_a_failed_or_never_ready_sandbox_is_an_error_with_the_reason():
+    cli = FakeAgentPG()
+    cli(["agentpg", "create", "--name", "d", "--size", "small"])
+    cli(["agentpg", "sandbox", "create", "s", "--image", "i", "--instance", "inst-1", "--port", "8000"])
+    sid = cli.sandboxes["s"]["id"]
+    api = AgentPG(run=lambda args: "ID: x\nStatus: failed\n" if args[1:3] == ["sandbox", "status"] else f"ID NAME ERROR\n{sid} s provisioning failed (HTTP 400)\n")
+    with pytest.raises(AgentPGError, match="is failed.*provisioning failed"):
+        api.wait_url(sid, sleep=lambda s: None)
+    slow = AgentPG(run=lambda args: "Status: creating\n")
+    ticks = iter(range(0, 10000, 100))
+    with pytest.raises(AgentPGError, match="still 'creating'"):
+        slow.wait_url("x", timeout=300, sleep=lambda s: None, clock=lambda: next(ticks))
 
 
 def test_secrets_are_masked_in_the_printed_plan_and_never_in_the_manifest(world):
@@ -196,3 +208,43 @@ def test_unknown_only_names_fail_and_pause_and_plan_reach_the_command(world):
     assert "--auto-pause=false" in ident and "--auto-pause=false" not in other
     cmd = AgentPG.create_sandbox("n", "i", "x", 8000, {}, set(), auto_pause=False, plan="medium")
     assert "--plan" in cmd.args and "medium" in cmd.args
+
+
+def test_wait_instance_polls_until_running_and_reports_failure():
+    states = iter(["creating", "creating", "running"])
+    api = AgentPG(run=lambda a: f"ID NAME SIZE VERSION STATUS\n-- ---- ---- ------- ------\npg-1 eco-x-db small 18 {next(states)}\n")
+    api.wait_instance("pg-1", sleep=lambda s: None)
+    bad = AgentPG(run=lambda a: "ID NAME STATUS\npg-1 x failed\n")
+    with pytest.raises(AgentPGError, match="is failed"):
+        bad.wait_instance("pg-1", sleep=lambda s: None)
+
+
+def test_a_sandbox_deleted_behind_our_back_is_recreated_by_the_next_apply(world):
+    ctx, cli, idp = world
+    apply(ctx)
+    old = ctx.state.app("trustdesk")["sandbox_id"]
+    del cli.sandboxes["eco-trustdesk"]
+    ctx2 = Context(load(MANIFEST), State(ctx.state.dir), AgentPG(run=cli))
+    ctx2.http = idp.client(ctx2.state.admin_key())
+    apply(ctx2)
+    assert "eco-trustdesk" in cli.sandboxes and ctx2.state.app("trustdesk")["sandbox_id"] != old
+
+
+def test_dependents_follow_calls_transitively():
+    m = load(MANIFEST)
+    assert m.dependents({"pagerlens"}) == {"citypulse", "cpsim", "pagerlens-agent"} and m.dependents({"trustdesk"}) == {"cpsim"} and m.dependents({"paybroker"}) == set()
+
+
+def test_recreate_cascades_to_callers_and_resets_the_url(world, monkeypatch):
+    import argparse
+
+    from ecoctl import cli as cli_mod
+    ctx, cli, idp = world
+    apply(ctx)
+    before = {k: ctx.state.app(k)["sandbox_id"] for k in ("pagerlens", "citypulse", "cpsim", "trustdesk", "paybroker")}
+    monkeypatch.setattr(cli_mod, "_ctx", lambda a: Context(load(MANIFEST), State(ctx.state.dir), AgentPG(run=cli), http=idp.client(ctx.state.admin_key())))
+    assert cli_mod.cmd_recreate(argparse.Namespace(apps="pagerlens", yes=True, file=str(MANIFEST), state=str(ctx.state.dir), execute=False, only=None, rotate=False)) == 0
+    after = State(ctx.state.dir)
+    changed = {k for k, v in before.items() if after.app(k)["sandbox_id"] != v}
+    assert changed == {"pagerlens", "citypulse", "cpsim"}                     # trustdesk and paybroker were left alone
+    assert cli.sandboxes["eco-cpsim"]["env"]["PAGERLENS_URL"] == after.app("pagerlens")["url"]

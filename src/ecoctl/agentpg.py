@@ -2,6 +2,7 @@
 the listing line that names the object, and the URL follows `URL:` in `sandbox status`."""
 import re
 import subprocess
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -51,7 +52,7 @@ class AgentPG:
 
     @staticmethod
     def extension(instance_id: str, ext: str) -> Command:
-        return Command(("extensions", "create", instance_id, ext))
+        return Command(("extensions", "create", ext, instance_id))      # name first, then the instance id
 
     @staticmethod
     def create_sandbox(name: str, image: str, instance_id: str, port: int, env: dict[str, str], secret_names: set[str], *, auto_pause: bool = True,
@@ -68,6 +69,10 @@ class AgentPG:
                 secrets_.append(v)
         return Command(tuple(args), tuple(secrets_))
 
+    @staticmethod
+    def delete_sandbox(sandbox_id: str) -> Command:
+        return Command(("sandbox", "delete", sandbox_id, "--force"))
+
     # ---- lookups -----------------------------------------------------------------------------------------------------------
     def _find(self, listing: list[str], name: str) -> str | None:
         for line in self._run([self.bin, *listing]).splitlines():
@@ -76,12 +81,51 @@ class AgentPG:
                 return cols[0]
         return None
 
+    def sandbox_ids(self) -> set[str]:
+        return {ln.split()[0] for ln in self._run([self.bin, "sandbox", "list"]).splitlines()[2:] if ln.split()}
+
     def instance_id(self, name: str) -> str | None:
         return self._find(["instances", "list"], name)
 
     def sandbox_id(self, name: str) -> str | None:
         return self._find(["sandbox", "list"], name)
 
+    def wait_instance(self, instance_id: str, timeout: float = 420, interval: float = 5, sleep=None, clock=None) -> None:
+        """Wait until the instance's row in `instances list` says running (extensions and sandboxes need that)."""
+        sleep, clock = sleep or time.sleep, clock or time.monotonic
+        deadline = clock() + timeout
+        while True:
+            row = next((ln.split() for ln in self._run([self.bin, "instances", "list"]).splitlines() if ln.split()[:1] == [instance_id]), [])
+            status = next((c.lower() for c in row if c.lower() in {"running", "creating", "provisioning", "starting", "failed", "error", "stopped"}), "unknown")
+            if status == "running":
+                return
+            if status in {"failed", "error"}:
+                raise AgentPGError(f"instance {instance_id} is {status} (see `agentpg instances describe {instance_id}`)")
+            if clock() > deadline:
+                raise AgentPGError(f"instance {instance_id} is still '{status}' after {int(timeout)} s; check `agentpg instances list`")
+            sleep(interval)
+
+    def sandbox_state(self, sandbox_id: str) -> tuple[str, str | None]:
+        """(status, url) from `sandbox status`: the URL only appears once the sandbox is running."""
+        text = self._run([self.bin, "sandbox", "status", sandbox_id])
+        st = re.search(r"^\s*Status:\s*(\S+)", text, re.M)
+        url = URL_LINE.search(text)
+        return (st.group(1).lower() if st else "unknown"), (url.group(1).rstrip("/") if url else None)
+
+    def wait_url(self, sandbox_id: str, timeout: float = 420, interval: float = 5, sleep=None, clock=None) -> str:
+        """Wait until the sandbox is running and has a URL. A failed sandbox is an error naming the platform's reason."""
+        sleep, clock = sleep or time.sleep, clock or time.monotonic
+        deadline = clock() + timeout
+        while True:
+            status, url = self.sandbox_state(sandbox_id)
+            if url and status in {"running", "ready", "active"}:
+                return url
+            if status in {"failed", "error", "deleted"}:
+                detail = next((ln for ln in self._run([self.bin, "sandbox", "list"]).splitlines() if sandbox_id in ln), "")
+                raise AgentPGError(f"sandbox {sandbox_id} is {status}: {detail.strip()[:300]} (see `agentpg sandbox logs {sandbox_id}`)")
+            if clock() > deadline:
+                raise AgentPGError(f"sandbox {sandbox_id} is still '{status}' after {int(timeout)} s; check `agentpg sandbox status {sandbox_id}`")
+            sleep(interval)
+
     def sandbox_url(self, sandbox_id: str) -> str | None:
-        m = URL_LINE.search(self._run([self.bin, "sandbox", "status", sandbox_id]))
-        return m.group(1).rstrip("/") if m else None
+        return self.sandbox_state(sandbox_id)[1]
