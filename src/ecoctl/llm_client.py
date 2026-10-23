@@ -16,6 +16,7 @@ class GatewayError(RuntimeError):
 class ClientKey:
     key: str | None               # only when this call created or rotated it
     note: str                     # "created", "kept", "rotated (key was lost)", ...
+    added: tuple[str, ...] = ()   # default aliases this call added to an existing client
 
 
 class Gateway:
@@ -59,10 +60,16 @@ class Gateway:
     def models(self) -> set[str]:
         return {m["alias"] for m in self._call("GET", "/api/models")["items"]}
 
+    def update_client(self, cid: int, fields: dict) -> dict:
+        """PATCH only the given fields (rpm_limit, monthly_token_budget, budget_mode, allowed_aliases). Never touches keys."""
+        return self._call("PATCH", f"/api/clients/{cid}", json=fields)
+
     def ensure_client(self, name: str, description: str, aliases: list[str], rpm: int, budget: int | None, budget_mode: str, *,
-                      known_key: bool, rotate: bool = False) -> ClientKey:
-        """Create the client if missing (its key comes back once). An existing client is left as it is (an operator may have tuned its
-        limits); its key is replaced only on request or when we hold none, by rotating the active key (or issuing one if none is left)."""
+                      known_key: bool, rotate: bool = False, default_aliases: tuple[str, ...] = ()) -> ClientKey:
+        """Create the client if missing (its key comes back once). An existing client keeps its limits (an operator may have tuned them;
+        `ecoctl llm sync` is the explicit way to change them); the only thing added is any of `default_aliases` it lacks, so a hand-made
+        client cannot lock an app out with model_not_allowed. Its key is replaced only on request or when we hold none, by rotating the
+        active key (or issuing one if none is left)."""
         existing = self.clients().get(name)
         if existing is None:
             body = {"name": name, "description": description, "allowed_aliases": aliases, "rpm_limit": rpm, "budget_mode": budget_mode, "issue_key": True}
@@ -70,9 +77,14 @@ class Gateway:
                 body["monthly_token_budget"] = budget
             out = self._call("POST", "/api/clients", json=body)
             return ClientKey(out["key"]["key"], "client created")
-        if known_key and not rotate:
-            return ClientKey(None, "kept")
         cid = existing["id"]
+        have = list(existing.get("allowed_aliases") or [])
+        added = tuple(a for a in default_aliases if a not in have)
+        if added:
+            self.update_client(cid, {"allowed_aliases": [*have, *added]})
+        extra = f"; added missing default alias(es) {', '.join(added)}" if added else ""
+        if known_key and not rotate:
+            return ClientKey(None, "kept" + extra, added)
         active = [k for k in self._call("GET", f"/api/clients/{cid}/keys")["items"] if not k["revoked"]]
         why = "rotated" if known_key else "rotated (the key was lost)"
         if active:
@@ -82,7 +94,7 @@ class Gateway:
         else:
             out = self._call("POST", f"/api/clients/{cid}/keys", json={"name": "ecoctl"})
             why = "new key issued (none was active)"
-        return ClientKey(out["key"], why)
+        return ClientKey(out["key"], why + extra, added)
 
     # ---- data plane, with the app's own key ----------------------------------------------------------------------------------
     def chat_test(self, app_key: str, model: str) -> tuple[bool, str]:

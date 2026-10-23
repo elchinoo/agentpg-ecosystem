@@ -9,6 +9,7 @@ import httpx
 from .agentpg import AgentPG, AgentPGError, token_from
 from .identity_client import Identity, IdentityError
 from .llm_client import GatewayError
+from .llm_sync import diff_app, table
 from .manifest import ManifestError, load
 from .plan import Context, app_env, build
 from .state import DEFAULT_DIR, State
@@ -169,7 +170,8 @@ def _llm_status(ctx) -> int:
         print(f"  cannot read the gateway's clients: {exc}")
         return len(deployed)
     bad = 0
-    print(f"  {'app':<16}{'client':<12}{'chat (' + m.llm.chat_alias + ')'}")
+    print(f"  {'app':<16}{'client':<12}{'limits':<10}{'chat (' + m.llm.chat_alias + ')'}")
+    drifting = []
     for k in deployed:
         key = ctx.state.app(k).get("llm_key")
         have = k in clients
@@ -178,12 +180,73 @@ def _llm_status(ctx) -> int:
         if key:
             ok, chat = gw.chat_test(key, m.llm.chat_alias)
         bad += (not have) or not ok
-        print(f"  {k:<16}{('ok' if have else 'MISSING'):<12}{chat}")
+        d = diff_app(m, k, clients.get(k))
+        drifting += [k] if have and d.drift else []
+        print(f"  {k:<16}{('ok' if have else 'MISSING'):<12}{('-' if not have else 'DRIFT' if d.drift else 'ok'):<10}{chat}")
+    if drifting:
+        print(f"  warning: the limits or aliases of {', '.join(drifting)} differ from the manifest (an operator's live change, or a hand-made client): "
+              "`ecoctl llm sync` shows the difference, `ecoctl llm sync --apply <app>` brings the gateway in line")
     return bad
 
 
+def cmd_llm_sync(args) -> int:
+    """Compare each consumer's gateway client with the manifest; with --apply, PATCH the named apps (or --all), only the differing fields.
+    Extra aliases are kept unless --prune-aliases. Exit 1 on drift without --apply (for CI), 2 on a gateway error."""
+    ctx = _ctx(args)
+    m = ctx.manifest
+    names = list(args.apps or [])
+    bad = [n for n in names if n not in m.apps or not m.apps[n].llm]
+    if bad:
+        print(f"not an app with `llm: true` in the manifest: {', '.join(bad)}", file=sys.stderr)
+        return 1
+    if args.apply and not (names or args.all):
+        print("--apply needs the app(s) to change, or --all", file=sys.stderr)
+        return 1
+    if names and args.all:
+        print("name apps or use --all, not both", file=sys.stderr)
+        return 1
+    if args.prune_aliases and not args.apply:
+        print("note: --prune-aliases only matters with --apply; showing what it would remove", file=sys.stderr)
+    targets = m.consumers() if (args.all or not names) else sorted(set(names))
+    if not ctx.state.app(m.llm.gateway).get("url"):
+        print(f"the LLM gateway ({m.llm.gateway}) is not deployed yet (run `ecoctl apply --execute`)", file=sys.stderr)
+        return 1
+    gw = ctx.gateway()
+    try:
+        clients = gw.clients()
+    except (GatewayError, httpx.HTTPError) as exc:
+        print(f"cannot read the gateway's clients: {exc}", file=sys.stderr)
+        return 2
+    diffs = [diff_app(m, k, clients.get(k), args.prune_aliases) for k in targets]
+    rows = [r for d in diffs for r in d.rows]
+    if not rows:
+        print(f"in sync: {', '.join(targets)} (limits and aliases match the manifest)")
+        return 0
+    print(table(rows))
+    if not args.apply:
+        print("\nNothing was changed. `ecoctl llm sync --apply <app...>` (or --all) sets the differing fields; "
+              "missing aliases are added, extras are kept unless --prune-aliases. Keys are never touched.")
+        return 1
+    failed = 0
+    for d in diffs:
+        if d.missing:
+            print(f"{d.app}: no client yet (run `ecoctl apply --execute`)")
+        elif d.patch:
+            try:
+                gw.update_client(d.client_id, d.patch)
+                print(f"{d.app}: updated {', '.join(sorted(d.patch))}")
+            except (GatewayError, httpx.HTTPError) as exc:
+                failed += 1
+                print(f"{d.app}: FAILED: {exc}", file=sys.stderr)
+        else:
+            print(f"{d.app}: nothing to change (extra aliases kept)")
+    return 2 if failed else 0
+
+
 def cmd_llm(args) -> int:
-    """`ecoctl llm test <app>`: one tiny chat completion through the gateway with that app's own key."""
+    """`ecoctl llm test <app>`: one tiny chat completion through the gateway with that app's own key. `ecoctl llm sync`: see cmd_llm_sync."""
+    if getattr(args, "action", "test") == "sync":
+        return cmd_llm_sync(args)
     ctx = _ctx(args)
     m = ctx.manifest
     if args.app not in m.apps or not m.apps[args.app].llm:
@@ -266,9 +329,14 @@ def main(argv: list[str] | None = None) -> int:
     en = sub.add_parser("env", help="print the environment an app is created with (secret values are shown as *** unless --reveal)")
     en.add_argument("app")
     en.add_argument("--reveal", action="store_true", help="print secret values too (to configure something that runs elsewhere)")
-    ll = sub.add_parser("llm", help="LLM gateway wiring")
-    ll.add_argument("action", choices=["test"], help="test: one tiny chat call through the gateway with the app's own key")
-    ll.add_argument("app")
+    ll = sub.add_parser("llm", help="LLM gateway wiring").add_subparsers(dest="action", required=True)
+    lt = ll.add_parser("test", help="one tiny chat call through the gateway with the app's own key")
+    lt.add_argument("app")
+    ls = ll.add_parser("sync", help="compare each app's gateway client (limits, aliases) with the manifest; --apply brings the gateway in line")
+    ls.add_argument("apps", nargs="*", metavar="APP", help="apps to compare/change (default: all consumers when only comparing)")
+    ls.add_argument("--all", action="store_true", help="with --apply: every app that uses an LLM")
+    ls.add_argument("--apply", action="store_true", help="PATCH the differing fields (without it nothing changes; exit 1 if there is drift)")
+    ls.add_argument("--prune-aliases", action="store_true", help="also remove aliases the manifest does not list (default: keep and report them)")
     args = p.parse_args(argv)
     try:
         return {"validate": cmd_validate, "plan": cmd_plan, "apply": cmd_apply, "status": cmd_status, "env": cmd_env, "db": cmd_db, "recreate": cmd_recreate, "llm": cmd_llm}[args.cmd](args)

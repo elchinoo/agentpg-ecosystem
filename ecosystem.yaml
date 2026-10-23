@@ -17,6 +17,10 @@ llm:                             # apps with `llm: true` are wired to the LLM ga
   rpm: 60                        # requests per minute of each app's gateway client
   budget: 5000000                # tokens per month of each app's gateway client (null: no budget)
   budget_mode: hard              # hard: refuse over budget; soft: allow and flag
+  # These are the defaults of every app. An app can override them with a mapping instead of `true` (every key optional; budget: null = no budget):
+  #   pagerlens:
+  #     llm: {rpm: 120, budget: 20000000, budget_mode: soft, aliases: [my-extra-alias]}   # aliases: extra ones besides chat/embed above
+  # Limits are applied when the gateway client is first created; change a running one with `ecoctl llm sync` (compare) / `--apply` (set).
 
 identity:
   image: identity

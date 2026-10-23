@@ -195,8 +195,9 @@ def _llm_client(ctx: Context, app: App) -> str:
     m, entry = ctx.manifest, ctx.state.app(app.key)
     gw = ctx.gateway()
     gw.wait_ready()
-    res = gw.ensure_client(app.key, f"{app.name} (created by ecoctl)", [m.llm.chat_alias, m.llm.embed_alias], m.llm.rpm, m.llm.budget,
-                           m.llm.budget_mode, known_key=bool(entry.get("llm_key")), rotate=ctx.rotate)
+    lim = m.limits(app.key)
+    res = gw.ensure_client(app.key, f"{app.name} (created by ecoctl)", list(lim.aliases), lim.rpm, lim.budget, lim.budget_mode,
+                           known_key=bool(entry.get("llm_key")), rotate=ctx.rotate, default_aliases=(m.llm.chat_alias, m.llm.embed_alias))
     note = res.note
     if res.key:
         entry["llm_key"] = res.key
@@ -242,10 +243,11 @@ def build(ctx: Context) -> list[Step]:
         if not app.deploy:
             continue
         if app.llm:
-            lm = m.llm
+            lm = m.limits(app.key)
             steps.append(Step(f"{app.name}: LLM gateway client and key",
-                              [f"gateway {lm.gateway}: ensure client '{app.key}' (aliases {lm.chat_alias}, {lm.embed_alias}; {lm.rpm} requests/min; " +
+                              [f"gateway {m.llm.gateway}: ensure client '{app.key}' (aliases {', '.join(lm.aliases)}; {lm.rpm} requests/min; " +
                                (f"{lm.budget:,} tokens/month, {lm.budget_mode}" if lm.budget else "no token budget") + ")",
+                               "an existing client keeps its limits (`ecoctl llm sync` changes them) but gets any missing default alias",
                                "keep its key in the state file (shown once by the gateway; rotated if lost)"],
                               (lambda a: lambda c: _llm_client(c, a))(app)))
         env, sec = app_env(ctx, app)

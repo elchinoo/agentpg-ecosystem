@@ -42,6 +42,25 @@ class LLM:
 
 
 @dataclass(frozen=True)
+class LLMOverride:
+    """What an app's `llm:` mapping sets; only the keys it names (budget_set tells `budget: null` from not given)."""
+    rpm: int | None = None
+    budget: int | None = None
+    budget_set: bool = False
+    budget_mode: str | None = None
+    aliases: tuple[str, ...] = ()             # extra aliases besides the two defaults
+
+
+@dataclass(frozen=True)
+class Limits:
+    """The effective gateway client settings of one app: its override, else the global `llm:` block."""
+    rpm: int
+    budget: int | None
+    budget_mode: str
+    aliases: tuple[str, ...]                  # the two defaults, then the app's extras
+
+
+@dataclass(frozen=True)
 class App:
     key: str                                  # client id, sandbox name suffix and scope prefix
     name: str
@@ -63,6 +82,7 @@ class App:
     auto_pause: bool | None = None            # None: the fleet default; False keeps a sandbox running when idle
     plan: str | None = None                   # compute plan for the sandbox (small|medium|large); None: the fleet default
     llm: bool = False                         # uses an LLM: wired to the gateway automatically
+    llm_override: LLMOverride = LLMOverride() # limits and extra aliases for this app's gateway client (`llm: {rpm: ...}`)
     uses: tuple[str, ...] = ()                # apps (or `identity`) whose URL is injected without a scope: called by other means (a merchant key, ...)
 
     @property
@@ -97,6 +117,13 @@ class Manifest:
     def consumers(self) -> list[str]:
         """The apps that use the LLM gateway."""
         return sorted(k for k, a in self.apps.items() if a.llm)
+
+    def limits(self, key: str) -> Limits:
+        """Effective gateway limits and aliases of a consumer: its own `llm:` mapping over the global defaults."""
+        o, g = self.apps[key].llm_override, self.llm
+        extras = tuple(a for a in o.aliases if a not in (g.chat_alias, g.embed_alias))
+        return Limits(rpm=g.rpm if o.rpm is None else o.rpm, budget=o.budget if o.budget_set else g.budget,
+                      budget_mode=o.budget_mode or g.budget_mode, aliases=(g.chat_alias, g.embed_alias, *extras))
 
     def needs(self, key: str) -> set[str]:
         """What must exist before `key`: the apps it calls or uses, and the LLM gateway when it uses an LLM. (The identity provider is
@@ -288,16 +315,23 @@ def _app(key: str, raw: dict, where: str, *, identity: bool = False) -> App:
     if plan is not None and plan not in PLANS:
         raise ManifestError(f"{where}.plan must be one of {', '.join(sorted(PLANS))}")
     env = _env(raw.get("env"), f"{where}.env")
-    llm = raw.get("llm", False)
-    if not isinstance(llm, bool):
-        raise ManifestError(f"{where}.llm must be true or false")
+    llm_raw = raw.get("llm", False)
+    override = LLMOverride()
+    if isinstance(llm_raw, dict):
+        override = _llm_override(llm_raw, f"{where}.llm")
+        llm = True
+    elif isinstance(llm_raw, bool):
+        llm = llm_raw
+    else:
+        raise ManifestError(f"{where}.llm must be true, false or a mapping (rpm, budget, budget_mode, aliases)")
     if llm:
         clash = [n for n in LLM_CONSUMER_ENV if n in env or n in generate]
         if clash:
             raise ManifestError(f"{where}: {', '.join(clash)} is set by ecoctl for an app with `llm: true`; remove them from env/generate")
         if not deploy:
             raise ManifestError(f"{where}: `llm: true` needs a deployed app (deploy: true): there is no sandbox to give the gateway settings to")
-    return App(llm=llm, deploy=deploy, auto_pause=auto_pause, plan=plan, key=key, name=_text(raw.get("name"), f"{where}.name", key), description=str(raw.get("description", ""))[:300],
+    return App(llm=llm, llm_override=override, deploy=deploy, auto_pause=auto_pause, plan=plan,
+               key=key, name=_text(raw.get("name"), f"{where}.name", key), description=str(raw.get("description", ""))[:300],
                image=_text(raw.get("image"), f"{where}.image", key, 100), port=port, extensions=exts, env=env,
                generate=generate, health=_text(raw.get("health"), f"{where}.health", "/healthz", 100), roles=tuple(roles), default_roles=default_roles,
                env_prefix=str(prefix), exposes=exposes, calls=calls, url_env=url_env, uses=uses, web=web)
@@ -307,6 +341,22 @@ def _int(v, where: str, lo: int, hi: int) -> int:
     if isinstance(v, bool) or not isinstance(v, int) or not lo <= v <= hi:
         raise ManifestError(f"{where} must be a whole number from {lo} to {hi}")
     return v
+
+
+def _llm_override(raw: dict, where: str) -> LLMOverride:
+    _only(raw, {"rpm", "budget", "budget_mode", "aliases"}, where)
+    rpm = None if "rpm" not in raw else _int(raw["rpm"], f"{where}.rpm", 1, 100_000)
+    budget = None if raw.get("budget") is None else _int(raw["budget"], f"{where}.budget", 1, 10**13)
+    mode = raw.get("budget_mode")
+    if mode is not None and mode not in {"hard", "soft"}:
+        raise ManifestError(f"{where}.budget_mode must be hard or soft")
+    aliases = _list(raw.get("aliases"), f"{where}.aliases")
+    for a in aliases:
+        if not isinstance(a, str) or not ALIAS.match(a):
+            raise ManifestError(f"{where}.aliases: {a!r} must be 1-60 characters: letters, digits, '.', '_', ':' or '-'")
+    if len(set(aliases)) != len(aliases):
+        raise ManifestError(f"{where}.aliases lists an alias twice")
+    return LLMOverride(rpm=rpm, budget=budget, budget_set="budget" in raw, budget_mode=mode, aliases=tuple(aliases))
 
 
 def _llm(raw, apps: dict[str, App]) -> LLM:

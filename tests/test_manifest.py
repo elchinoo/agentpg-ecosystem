@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from ecoctl.manifest import ManifestError, load, parse
+from ecoctl.manifest import Limits, ManifestError, load, parse
 
 REPO_MANIFEST = Path(__file__).resolve().parents[1] / "ecosystem.yaml"
 
@@ -174,7 +174,7 @@ def test_an_llm_app_cannot_set_the_names_ecoctl_owns_and_must_be_deployed():
         parse(d)
     d = doc()
     d["apps"]["trustdesk"]["llm"] = "yes"
-    with pytest.raises(ManifestError, match="llm must be true or false"):
+    with pytest.raises(ManifestError, match="llm must be true, false or a mapping"):
         parse(d)
 
 
@@ -182,4 +182,45 @@ def test_a_consumer_that_the_gateway_calls_is_a_cycle():
     d = doc()
     d["apps"]["llmgw"]["calls"] = {"trustdesk": ["trustdesk.metrics"]}
     with pytest.raises(ManifestError, match="cycle"):
+        parse(d)
+
+
+# ---- per-app LLM limits ----------------------------------------------------------------------------------------------------
+def test_an_app_llm_can_be_true_or_a_mapping_and_overrides_the_global_limits():
+    d = doc()
+    d["llm"].update({"rpm": 60, "budget": 5_000_000, "budget_mode": "hard"})
+    d["apps"]["trustdesk"]["llm"] = {"rpm": 5, "budget": None, "budget_mode": "soft", "aliases": ["extra", "chat-default"]}
+    d["apps"]["pagerlens"]["llm"] = {"budget": 99}
+    d["apps"]["paybroker"]["llm"] = {}
+    m = parse(d)
+    assert m.limits("trustdesk") == Limits(5, None, "soft", ("chat-default", "embed-default", "extra"))      # null = no budget; default repeated once
+    assert m.limits("pagerlens") == Limits(60, 99, "hard", ("chat-default", "embed-default"))                # only the named key overrides
+    assert m.limits("paybroker") == Limits(60, 5_000_000, "hard", ("chat-default", "embed-default"))
+    assert m.apps["trustdesk"].llm and m.apps["paybroker"].llm and m.consumers() == ["pagerlens", "paybroker", "trustdesk"]
+    d = doc()
+    d["apps"]["trustdesk"]["llm"] = True
+    assert parse(d).limits("trustdesk") == parse(doc()).limits("trustdesk")
+
+
+@pytest.mark.parametrize("bad, msg", [
+    ({"rpm": 0}, "rpm must be a whole number"), ({"rpm": 100_001}, "rpm must be"), ({"rpm": True}, "rpm must be"), ({"rpm": None}, "rpm must be"),
+    ({"budget": 0}, "budget must be"), ({"budget": "5"}, "budget must be"), ({"budget_mode": "firm"}, "hard or soft"),
+    ({"aliases": "x"}, "aliases must be a list"), ({"aliases": ["a b"]}, "aliases: 'a b'"), ({"aliases": ["x", "x"]}, "twice"),
+    ({"aliases": [1]}, "aliases: 1"), ({"speed": 1}, "unknown key"),
+])
+def test_an_app_llm_mapping_is_validated_like_the_global_block(bad, msg):
+    d = doc()
+    d["apps"]["trustdesk"]["llm"] = bad
+    with pytest.raises(ManifestError, match=msg):
+        parse(d)
+
+
+def test_an_llm_mapping_needs_a_deployed_app_and_a_true_false_or_mapping():
+    d = doc()
+    d["apps"]["pagerlens-agent"]["llm"] = {"rpm": 3}
+    with pytest.raises(ManifestError, match="needs a deployed app"):
+        parse(d)
+    d = doc()
+    d["apps"]["trustdesk"]["llm"] = [1]
+    with pytest.raises(ManifestError, match="true, false or a mapping"):
         parse(d)

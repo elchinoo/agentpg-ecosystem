@@ -23,5 +23,10 @@ Report vulnerabilities privately through GitHub's "Report a vulnerability" (Secu
   sandboxes the new ones. To rotate one app, rotate its key in the gateway console (or revoke it) and run `apply`: a client with no key in
   the state file has its active key rotated and the new one stored. After a suspected leak of the state file, also rotate the operator key
   (remove `LLMGW_API_KEY` under `apps.llmgw.generated` in the state file, then `ecoctl recreate llmgw`).
-- `apply` never overwrites a client an operator tuned (limits, budget, aliases); it only creates missing clients and replaces lost keys.
+- `apply` never overwrites the limits of a client an operator tuned; it creates missing clients, replaces lost keys and only *adds* a missing
+  default alias (so a hand-made client cannot lock an app out). Budgets and rate limits are the **blast-radius limit** of a leaked app key, so
+  they can be set per app in the manifest (`llm: {rpm, budget, budget_mode, aliases}`; give a risky or exposed app a small budget and `hard`).
+  Changing a running client is **explicit**: `ecoctl llm sync` only shows the difference (exit 1 on drift); `--apply <app>|--all` sets the
+  differing fields, adds missing aliases, and removes extras only with `--prune-aliases`. It never touches keys; the gateway's own audit log
+  records the change.
 - `ecoctl status` and `ecoctl llm test` make one tiny chat call with an app's key from the state file; keys are never printed or logged.

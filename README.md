@@ -110,7 +110,28 @@ and reported). Each app is created with `LLM_BASE_URL=<gateway>/v1`, `LLM_API_KE
 `EMBEDDING_MODEL` and `EMBEDDING_DIM`. Echo models work at once; to use a real model add one provider key in the gateway and repoint
 `chat-default` / `embed-default` there: every app follows, nothing else changes. A second `apply` changes nothing, and `recreate llmgw`
 recreates the apps that use it (its URL changes). `ecoctl status` checks each client and makes one tiny chat call with its key;
-`ecoctl llm test <app>` does just that call. Details, rotation and upgrade notes: [docs/DEPLOY.md](docs/DEPLOY.md) section 9.
+`ecoctl llm test <app>` does just that call.
+
+**Limits per app.** The `llm:` block above is the default. An app can override it with a mapping instead of `true` (every key optional;
+`budget: null` = no budget; `aliases` = extra aliases besides the two defaults):
+
+```yaml
+apps:
+  pagerlens: {llm: {rpm: 120, budget: 20000000, budget_mode: soft, aliases: [my-extra-alias]}, ...}
+  trustdesk: {llm: true, ...}   # the global defaults
+```
+
+Limits are applied when the client is **first created**; `apply` never overwrites an existing client's limits (it only adds missing
+default aliases, and says so). To change a running client use the gateway console/API, or make the gateway follow the manifest:
+
+```
+ecoctl llm sync                         # table of differences (app, field, gateway, manifest); changes nothing; exit 1 if any (CI)
+ecoctl llm sync --apply trustdesk       # set only the differing fields of the named app(s); or --all
+ecoctl llm sync --all --apply --prune-aliases   # also remove aliases the manifest does not list (default: kept, reported "extra, kept")
+```
+
+Missing aliases are always added; clients that do not exist yet are reported `missing, run apply`; keys are never touched.
+`ecoctl status` shows a `limits` column (`DRIFT`) and a warning pointing to `ecoctl llm sync`. Details, rotation and upgrade notes: [docs/DEPLOY.md](docs/DEPLOY.md) section 9.
 
 ## Limits
 

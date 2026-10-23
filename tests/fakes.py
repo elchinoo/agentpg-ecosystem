@@ -138,6 +138,7 @@ class FakeGateway:
         self.clients: dict[int, dict] = {}
         self.keys: dict[int, list[dict]] = {}            # client id -> [{id, key, revoked}]
         self.requests: list[tuple[str, str]] = []
+        self.patches: list[dict] = []                    # bodies of PATCH /api/clients/{id}
         self.chat_calls: list[dict] = []                 # {client, model}
         self.operator_key: str | None = None             # None: a gateway created without LLMGW_API_KEY
         self.ready_after = 0                             # /readyz answers 503 this many times first
@@ -193,6 +194,14 @@ class FakeGateway:
                 k = self._new_key(cid)
                 out["key"] = {"id": k["id"], "key": k["key"], "name": "default"}
             return httpx.Response(201, json=out)
+        m = re.fullmatch(r"/api/clients/(\d+)", path)
+        if m and method == "PATCH" and int(m.group(1)) in self.clients:
+            missing = [a for a in body.get("allowed_aliases", []) if a not in self.aliases]
+            if missing:
+                return httpx.Response(422, json={"detail": f"unknown model alias: {missing[0]}"})
+            self.patches.append(dict(body))
+            self.clients[int(m.group(1))].update(body)
+            return httpx.Response(200, json=self.clients[int(m.group(1))])
         m = re.fullmatch(r"/api/clients/(\d+)/keys(?:/(\d+)(/rotate)?)?", path)
         if m and int(m.group(1)) in self.clients:
             cid = int(m.group(1))

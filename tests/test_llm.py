@@ -271,7 +271,7 @@ def test_status_reports_each_clients_existence_and_a_real_call(deployed, capsys)
     assert "LLM gateway (llmgw): https://eco-llmgw.sandbox.example" in out
     section = out.split("LLM gateway (")[1].splitlines()
     for k in CONSUMERS:
-        assert next(ln for ln in section if ln.strip().startswith(k)).split() == [k, "ok", "ok"]
+        assert next(ln for ln in section if ln.strip().startswith(k)).split() == [k, "ok", "ok", "ok"]
     assert [c["client"] for c in gateway_of(idp).chat_calls] == sorted(CONSUMERS) and all(c["max_tokens"] == 1 for c in gateway_of(idp).chat_calls)
     assert all(ctx.state.app(k)["llm_key"] not in out for k in CONSUMERS)             # keys are never printed
 

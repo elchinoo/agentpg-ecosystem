@@ -237,7 +237,7 @@ Nothing to paste. Every app with `llm: true` in `ecosystem.yaml` (TrustDesk, Pag
    the names of the **default aliases** it seeds on its built-in echo provider: `chat-default` (chat) and `embed-default` (embeddings, 768
    numbers, what TrustDesk and PagerLens expect).
 2. Before each consuming app is created, `ecoctl` uses that key to create **one gateway client per app** (named after the app, allowed
-   only those two aliases, 60 requests/minute and 5,000,000 tokens/month by default, from `llm:` in the manifest) and keeps its `lg_` key.
+   only those two aliases (plus any extras listed for the app), 60 requests/minute and 5,000,000 tokens/month by default, from `llm:` in the manifest, optionally overridden per app) and keeps its `lg_` key.
    The gateway shows a key once; `ecoctl` keeps it so the next run changes nothing.
 3. The app's sandbox is created with the settings it reads:
 
@@ -265,8 +265,32 @@ request of every app goes to the new model. Add prices to see cost estimates. To
 **See usage per app.** Gateway console **Overview** (per client: requests, tokens, spend against budget, errors) and **Clients**; or
 `GET /api/usage?group=client` (API.md in the gateway repository). Prompts and answers are never stored.
 
-**Change a budget or limit.** Edit the client in the gateway console (an operator's change is kept: `apply` never overwrites an existing client),
-or set `llm.rpm` / `llm.budget` / `llm.budget_mode` in the manifest before the client is first created.
+**Where limits are set, and which one wins.** Four places, from the least to the most specific:
+
+1. `llm:` in `ecosystem.yaml` (`rpm`, `budget`, `budget_mode`): the default of every app.
+2. `llm: {rpm, budget, budget_mode, aliases}` under one app (instead of `llm: true`; every key optional, `budget: null` = no budget,
+   `aliases` = extra aliases besides `chat-default`/`embed-default`). An app's key beats the global one.
+3. The gateway console or API, live (Clients → edit). The gateway is the runtime truth: it enforces what it holds.
+4. `ecoctl llm sync`, which copies 1+2 onto the gateway on request.
+
+The manifest (1+2) is read at two moments only: when `apply` first **creates** a client, and when you run `ecoctl llm sync --apply`. `apply` on
+an existing client never overwrites its limits, so a live change in the console (3) survives every `apply` until you run `sync --apply`, at which
+point the manifest wins again for the fields that differ. The one thing `apply` does change on an existing client is **adding a missing default
+alias** (it prints `added missing default alias(es) ...`): a hand-made client that lacked them got `HTTP 403 model_not_allowed`.
+
+```
+ecoctl llm sync                                  # compare every consumer: app, field, gateway value, manifest value. Changes nothing;
+                                                 # exit 1 if there is drift (use it in CI), 0 if none, 2 on a gateway error
+ecoctl llm sync trustdesk paybroker --apply      # PATCH only those apps, only the differing fields (rpm, monthly budget, budget_mode, aliases)
+ecoctl llm sync --all --apply                    # every app that uses an LLM (--apply needs app names or --all)
+ecoctl llm sync --all --apply --prune-aliases    # also remove aliases the manifest does not list
+```
+
+Aliases: missing ones are always added; extras are **kept and reported** (`extra, kept`) unless `--prune-aliases`, so an alias an operator
+granted by hand is never removed by surprise (list it under the app's `aliases:` to make it official). A client that does not exist yet is
+reported `missing, run apply`; sync never creates clients and never touches keys. It is idempotent, and the gateway's own audit trail records each
+change. `ecoctl status` marks a consumer whose limits or aliases differ with `DRIFT` and prints a warning that points here (a warning, not a failure: a
+live tweak is legitimate); the live chat test still runs.
 
 **Rotate an app's key.** `ecoctl apply --execute --rotate` rotates every app's gateway key (and the identity client secrets); the old keys stop at
 once. Then `ecoctl recreate <app>` (or the apps you listed) so the sandboxes get the new keys. If you lose `.ecosystem/state.json`, the next `apply`
