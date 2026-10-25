@@ -100,6 +100,20 @@ apps:
       - {name: viewer, description: "Read only"}
     exposes: [paybroker.read, paybroker.metrics]
 
+  shopfront:
+    name: ShopFront
+    llm: true                    # wired to the LLM gateway: semantic search and the order-support assistant
+    description: Sample web shop that takes payments through PayBroker
+    extensions: [vector, pg_trgm]
+    generate: [SHOPFRONT_ENCRYPTION_KEY]
+    uses: [paybroker]            # the shop's browser and server talk to PayBroker; its keys are entered once in Settings (vault), not here
+    url_env: {paybroker: SHOPFRONT_PAYBROKER_URL}
+    roles:
+      - {name: admin, description: "Everything"}
+      - {name: staff, description: "Orders, refunds and the catalog"}
+      - {name: viewer, description: "Read orders"}
+    exposes: [shopfront.api, shopfront.read, shopfront.metrics]
+
   llmgw:
     name: LLM gateway
     image: llm-gateway
