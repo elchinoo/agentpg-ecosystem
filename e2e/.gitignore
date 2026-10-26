@@ -1,0 +1,7 @@
+node_modules/
+test-results/
+playwright-report/
+reports/
+# Screenshots are generated on every run; only the curated set is committed (git add -f).
+screenshots/**
+!screenshots/.gitkeep
