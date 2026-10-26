@@ -12,7 +12,7 @@ const SHOPPER = 'pat.shopper@example.com';
  */
 test.describe.configure({ mode: 'serial' });
 
-// Real finding (findings/shopfront.md): status badges (green/amber) fail WCAG AA contrast in the kit's CSS.
+// Real finding (FINDINGS.md): status badges (green/amber) fail WCAG AA contrast in the kit's CSS.
 const BADGE = ['color-contrast'];
 
 let shop: AppInstance;
@@ -117,11 +117,11 @@ test('back office: the order shows the PayBroker payment trail', async ({ page, 
   await snap(page, 'shopfront', 'admin-order', { knownA11y: BADGE });
 });
 
-// REAL BUG (findings/shopfront.md, "confirm dialog inside a modal dialog is dead"): the kit's confirmDialog is a popover appended to
+// REAL BUG (FINDINGS.md, "confirm dialog inside a modal dialog is dead"): the kit's confirmDialog is a popover appended to
 // <body>; while the order <dialog> is open modally, Chrome treats everything outside it as inert, so neither a mouse click nor Enter
 // reaches "Refund payment". The intended behaviour is asserted here; the test is expected to fail until the kit is fixed.
 test('back office: a refund can be confirmed in the order dialog', async ({ page }) => {
-  test.fail(true, 'confirmDialog popover is inert while the order <dialog> is modal (kit bug, see findings/shopfront.md)');
+  test.fail(true, 'confirmDialog popover is inert while the order <dialog> is modal (kit bug, see FINDINGS.md)');
   await shopAdminLogin(page);
   await page.goto(shop.url + '/admin#orders');
   await page.locator('#view-orders tbody tr').first().click();

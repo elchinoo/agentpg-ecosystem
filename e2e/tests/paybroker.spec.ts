@@ -4,7 +4,7 @@ import { loginViaApi } from '../harness/helpers/kitadmin';
 import { authorize, tokenize, SAFE_CUSTOMER, RISKY } from '../harness/helpers/paybroker';
 import type { AppInstance } from '../harness/fleet';
 
-// Real finding (see findings/paybroker.md): the green/amber status badge text fails WCAG AA contrast.
+// Real finding (see FINDINGS.md): the green/amber status badge text fails WCAG AA contrast.
 const BADGE = ['color-contrast'];
 
 test.describe.configure({ mode: 'serial' });
@@ -115,11 +115,11 @@ test('typing in the AI triage limits survives the refresh', async ({ page, snap 
   await snap(page, 'paybroker', 'settings', { knownA11y: BADGE });
 });
 
-// REAL BUG (findings/paybroker.md, "confirm dialog inside a modal dialog is dead"): the kit's confirmDialog is a popover appended to
+// REAL BUG (FINDINGS.md, "confirm dialog inside a modal dialog is dead"): the kit's confirmDialog is a popover appended to
 // <body>. While the merchant <dialog> is open modally Chrome treats everything outside it as inert, so neither the mouse nor Enter
 // reaches "Revoke". The intended behaviour is asserted; the test is expected to fail until the kit is fixed.
 test('revoking an API key can be confirmed inside the merchant window', async ({ page }) => {
-  test.fail(true, 'confirmDialog popover is inert while the merchant <dialog> is modal (kit bug, see findings/paybroker.md)');
+  test.fail(true, 'confirmDialog popover is inert while the merchant <dialog> is modal (kit bug, see FINDINGS.md)');
   await loginViaApi(page, pb, 'X-PayBroker-CSRF');
   await page.goto(pb.url + '/#merchants');
   await page.locator('#view-merchants tbody tr', { hasText: 'E2E Coffee Roasters' }).click();

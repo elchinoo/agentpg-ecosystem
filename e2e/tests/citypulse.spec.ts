@@ -3,7 +3,7 @@ import { kitSetupViaUi } from '../harness/ui';
 import { loginViaApi as kitLoginViaApi } from '../harness/helpers/citypulse';
 import type { AppInstance } from '../harness/fleet';
 
-// Known, documented in findings/citypulse.md: horizontally scrollable table wrappers are not keyboard focusable.
+// Known, documented in FINDINGS.md: horizontally scrollable table wrappers are not keyboard focusable.
 const SCROLL = ['scrollable-region-focusable'];
 
 test.describe.configure({ mode: 'serial' });
