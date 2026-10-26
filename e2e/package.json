@@ -5,6 +5,7 @@
   "description": "Real-browser end-to-end suite for the fleet. Runs only against local apps on 127.0.0.1 with throwaway databases.",
   "scripts": {
     "test": "playwright test",
+    "a11y": "node scripts/a11y-summary.mjs",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

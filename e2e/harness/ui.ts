@@ -20,9 +20,14 @@ export async function kitLoginViaUi(page: Page, app: AppInstance) {
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
 }
 
-/** Sign in without a UI round trip (cookie lands in the page's browser context). */
+/** Sign in without a UI round trip (cookie lands in the page's browser context). Sends the app's CSRF header. */
 export async function kitLoginViaApi(page: Page, app: AppInstance, endpoint = '/api/login') {
-  const r = await page.context().request.post(app.url + endpoint, { data: { password: app.adminPassword } });
+  const html = await (await page.context().request.get(app.url + '/')).text();
+  const name = html.match(/data-csrf="([^"]+)"/)?.[1];
+  const r = await page.context().request.post(app.url + endpoint, {
+    data: { password: app.adminPassword },
+    headers: name ? { [name]: '1' } : {},
+  });
   expect(r.ok(), `sign in to ${app.name}`).toBeTruthy();
 }
 

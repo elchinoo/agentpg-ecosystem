@@ -116,9 +116,11 @@ export const test = base.extend<Fixtures, { _fleet: Fleet }>({
         for (const theme of ['light', 'dark'] as Theme[]) {
           await setTheme(page, theme);
           await page.waitForTimeout(150); // let CSS transitions settle; screenshots only, never assertions
-          const style = opts.hide?.length ? await page.addStyleTag({ content: `${opts.hide.join(',')}{visibility:hidden !important}` }) : undefined;
+          // inline styles via evaluate: apps with a strict CSP (style-src 'self') refuse injected <style> tags
+          const hideSel = opts.hide?.join(',') ?? '';
+          if (hideSel) await page.evaluate((sel) => document.querySelectorAll<HTMLElement>(sel).forEach((e) => { e.dataset.e2eVis = e.style.visibility; e.style.visibility = 'hidden'; }), hideSel);
           await page.screenshot({ path: path.join(dir, `${name}-${theme}-${vp}.png`), fullPage: true, animations: 'disabled' });
-          await style?.evaluate((n) => n.remove());
+          if (hideSel) await page.evaluate((sel) => document.querySelectorAll<HTMLElement>(sel).forEach((e) => { e.style.visibility = e.dataset.e2eVis ?? ''; delete e.dataset.e2eVis; }), hideSel);
           if (!opts.noAudit) findings.push(...(await audit(page, app, name, theme, vp)));
         }
       }
