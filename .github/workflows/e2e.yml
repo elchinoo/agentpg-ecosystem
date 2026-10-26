@@ -1,0 +1,148 @@
+name: E2E
+
+# Real-browser end-to-end suite (e2e/). Not run on push or pull request: it needs every sibling repository,
+# a Postgres 17 with pgvector and a Chrome. Run it by hand or nightly.
+permissions: {}
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"   # nightly, 03:17 UTC
+
+concurrency:
+  group: e2e
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      # Where the harness finds Postgres 17 (it starts its own throwaway cluster, one per run) and keeps its scratch files.
+      E2E_PG_BIN: /usr/lib/postgresql/17/bin
+      E2E_SCRATCH: ${{ runner.temp }}/e2e
+      # The apps are checked out next to the ecosystem repository, the layout the harness expects:
+      #   $GITHUB_WORKSPACE/{ecosystem,agentpg-kit,trustdesk,paybroker,pagerlens,CityPulse,CityPulseSimulator,llm-gateway,identity,shopfront}
+    steps:
+      - name: Checkout ecosystem (this repository)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: ecosystem
+          persist-credentials: false
+
+      # The sibling repositories. If they are private, create a read-only token (contents: read on these repositories) and store
+      # it as the secret E2E_REPOS_TOKEN; otherwise the workflow's own token is used.
+      - name: Checkout agentpg-kit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { repository: elchinoo/agentpg-kit, path: agentpg-kit, token: "${{ secrets.E2E_REPOS_TOKEN || github.token }}", persist-credentials: false }
+      - name: Checkout TrustDesk
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { repository: elchinoo/TrustDesk, path: trustdesk, token: "${{ secrets.E2E_REPOS_TOKEN || github.token }}", persist-credentials: false }
+      - name: Checkout PayBroker
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { repository: elchinoo/PayBroker, path: paybroker, token: "${{ secrets.E2E_REPOS_TOKEN || github.token }}", persist-credentials: false }
+      - name: Checkout PagerLens
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { repository: elchinoo/PagerLens, path: pagerlens, token: "${{ secrets.E2E_REPOS_TOKEN || github.token }}", persist-credentials: false }
+      - name: Checkout CityPulse
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { repository: elchinoo/CityPulse, path: CityPulse, token: "${{ secrets.E2E_REPOS_TOKEN || github.token }}", persist-credentials: false }
+      - name: Checkout CityPulseSimulator
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { repository: elchinoo/CityPulseSimulator, path: CityPulseSimulator, token: "${{ secrets.E2E_REPOS_TOKEN || github.token }}", persist-credentials: false }
+      - name: Checkout llm-gateway
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { repository: elchinoo/llm-gateway, path: llm-gateway, token: "${{ secrets.E2E_REPOS_TOKEN || github.token }}", persist-credentials: false }
+      - name: Checkout identity
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { repository: elchinoo/identity, path: identity, token: "${{ secrets.E2E_REPOS_TOKEN || github.token }}", persist-credentials: false }
+      - name: Checkout ShopFront
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { repository: elchinoo/ShopFront, path: shopfront, token: "${{ secrets.E2E_REPOS_TOKEN || github.token }}", persist-credentials: false }
+
+      # The harness starts its own throwaway Postgres per run, so no service container is needed; it only needs the server
+      # binaries and the pgvector extension of major version 17 (pg_trgm ships with the contrib package).
+      - name: Install PostgreSQL 17 with pgvector
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y postgresql-17 postgresql-17-pgvector
+          sudo systemctl disable --now postgresql || true   # the harness runs its own cluster; the packaged one must not hold resources
+          test -x "$E2E_PG_BIN/initdb"
+          ls /usr/share/postgresql/17/extension/vector.control /usr/share/postgresql/17/extension/pg_trgm.control
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install every app in its own virtualenv (.venv inside each repository, as the harness expects)
+        run: |
+          for repo in trustdesk paybroker pagerlens CityPulse CityPulseSimulator llm-gateway identity shopfront; do
+            echo "::group::$repo"
+            (cd "$repo" && uv venv --python 3.12 && uv pip install -e ".[dev]")
+            echo "::endgroup::"
+          done
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ecosystem/e2e/package-lock.json
+
+      # The suite drives the installed Google Chrome (channel: 'chrome'); no Playwright browser download.
+      - name: Install Chrome
+        id: chrome
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+          install-chromedriver: false
+      - name: Make Chrome visible to Playwright's chrome channel
+        run: |
+          if [ ! -x /opt/google/chrome/chrome ]; then
+            sudo mkdir -p /opt/google/chrome
+            sudo ln -sf "${{ steps.chrome.outputs.chrome-path }}" /opt/google/chrome/chrome
+          fi
+          /opt/google/chrome/chrome --version
+
+      - name: Install the suite's packages
+        working-directory: ecosystem/e2e
+        run: npm ci
+
+      - name: Run the suite
+        working-directory: ecosystem/e2e
+        run: npx playwright test
+
+      - name: Accessibility findings
+        if: always()
+        working-directory: ecosystem/e2e
+        run: |
+          {
+            echo '### Accessibility findings (axe; serious and critical fail the test unless listed as known)'
+            echo '```'
+            npm run --silent a11y
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the Playwright report and traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            ecosystem/e2e/playwright-report
+            ecosystem/e2e/test-results
+            ecosystem/e2e/reports
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload the screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: ecosystem/e2e/screenshots
+          if-no-files-found: ignore
+          retention-days: 14
