@@ -54,7 +54,7 @@ test('an employee request arrives through the client API and the approver follow
   await expect(review.getByText('Quote found word for word in the document')).toBeVisible({ timeout: 30_000 });
   await expect(review.locator('blockquote').first()).not.toBeEmpty();
   expect((await fleet.fakeLlm()).calls.some((c) => c.path.endsWith('/chat/completions'))).toBeTruthy();
-  await snap(page, 'trustdesk', 'review-ai-advice', { phone: true, knownA11y: ['color-contrast'] });
+  await snap(page, 'trustdesk', 'review-ai-advice', { phone: true });
 
   await review.getByRole('button', { name: 'Approve', exact: true }).click();
   // The client application sees the decision, but never the advice.

@@ -4,15 +4,27 @@ import { execFileSync } from 'node:child_process';
 import { startCluster, Cluster } from './pg';
 import { REPOS_DIR } from './util';
 
-/** Print the agentpg-kit version each app virtualenv really imports (the apps share one UI kit). */
-function logKitVersions() {
+/**
+ * Print, per app: the HEAD of its sibling checkout, whether the working tree is dirty, whether its venv runs the app editable from
+ * that very checkout (no stale installed copy), and the agentpg-kit version it imports.
+ */
+function logFleetVersions() {
   for (const repo of ['trustdesk', 'paybroker', 'pagerlens', 'CityPulse', 'CityPulseSimulator', 'llm-gateway', 'identity', 'shopfront']) {
-    const py = path.join(REPOS_DIR, repo, '.venv', 'bin', 'python');
+    const dir = path.join(REPOS_DIR, repo);
+    const py = path.join(dir, '.venv', 'bin', 'python');
+    const env = { PATH: '/usr/bin:/bin' };
     try {
-      const v = execFileSync(py, ['-c', 'import importlib.metadata as m,apgkit,os;print(m.version("agentpg-kit"), "editable" if "site-packages" not in apgkit.__file__ else "installed")'], { env: { PATH: '/usr/bin:/bin' }, encoding: 'utf8' }).trim();
-      console.log(`[e2e] ${repo}: agentpg-kit ${v}`);
+      const head = execFileSync('git', ['-C', dir, 'rev-parse', '--short', 'HEAD'], { env, encoding: 'utf8' }).trim();
+      const dirty = execFileSync('git', ['-C', dir, 'status', '--porcelain'], { env, encoding: 'utf8' }).trim() ? ' (dirty tree)' : '';
+      const name = (fs.readFileSync(path.join(dir, 'pyproject.toml'), 'utf8').match(/^name\s*=\s*"([^"]+)"/m) || [])[1];
+      const code =
+        `import importlib.metadata as m,json,apgkit;d=m.distribution(${JSON.stringify(name)});u=json.loads(d.read_text("direct_url.json") or "{}");` +
+        `print(("editable" if u.get("dir_info",{}).get("editable") else "NOT EDITABLE"), u.get("url","?").replace("file://",""), "kit", m.version("agentpg-kit"))`;
+      const info = execFileSync(py, ['-c', code], { env, encoding: 'utf8' }).trim();
+      const stale = info.includes('NOT EDITABLE') || !info.includes(dir) ? '  <-- STALE INSTALL?' : '';
+      console.log(`[e2e] ${repo}@${head}${dirty}: ${info}${stale}`);
     } catch {
-      console.log(`[e2e] ${repo}: agentpg-kit version unknown (no .venv?)`);
+      console.log(`[e2e] ${repo}: version info unavailable (no .venv?)`);
     }
   }
 }
@@ -28,7 +40,7 @@ function stopAtExit() {
 
 /** One throwaway Postgres per run. Its address reaches the workers through the environment. */
 export default async function globalSetup() {
-  logKitVersions();
+  logFleetVersions();
   cluster = await startCluster();
   process.env.E2E_PG_PORT = String(cluster.port);
   process.env.E2E_RUN_DIR = cluster.dir;

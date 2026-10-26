@@ -3,8 +3,6 @@ import { kitSetupViaUi } from '../harness/ui';
 import { loginViaApi as kitLoginViaApi } from '../harness/helpers/citypulse';
 import type { AppInstance } from '../harness/fleet';
 
-// Known, documented in FINDINGS.md: horizontally scrollable table wrappers are not keyboard focusable.
-const SCROLL = ['scrollable-region-focusable'];
 
 test.describe.configure({ mode: 'serial' });
 
@@ -45,7 +43,7 @@ test('the simulator is set up and holds the ingest credential', async ({ page, s
   await field.fill(ingestToken);
   await field.locator('xpath=ancestor::tr').getByRole('button', { name: 'Save' }).click();
   await expect(page.locator('#toast')).toContainText('Saved');
-  await snap(page, 'cpsim', 'settings', { knownA11y: ['color-contrast'] });
+  await snap(page, 'cpsim', 'settings');
 });
 
 test('a generated city streams into CityPulse and fills the heatmap', async ({ page, snap }) => {
@@ -58,7 +56,7 @@ test('a generated city streams into CityPulse and fills the heatmap', async ({ p
   await expect(first).toBeVisible();
   city = (await first.textContent())!.trim();
   expect(city).toMatch(/^[a-z0-9][a-z0-9-]*$/);
-  await snap(page, 'cpsim', 'cities-generated', { knownA11y: SCROLL });
+  await snap(page, 'cpsim', 'cities-generated');
 
   await page.goto(`${sim.url}/#cities/${city}`);
   await expect(page.getByRole('heading', { name: city, level: 1 })).toBeVisible();
@@ -70,14 +68,14 @@ test('a generated city streams into CityPulse and fills the heatmap', async ({ p
   await expect(page.getByRole('heading', { name: 'Delivery to CityPulse' })).toBeVisible();
   // readings are really delivered
   await expect(page.locator('dt', { hasText: 'Readings sent' }).locator('xpath=following-sibling::dd[1]')).not.toHaveText('0', { timeout: 60_000 });
-  await snap(page, 'cpsim', 'city-running', { phone: true, knownA11y: SCROLL });
+  await snap(page, 'cpsim', 'city-running', { phone: true });
 
   await page.goto(cp.url + '/#overview');
   const cells = page.locator('.heat button[aria-label*="healthy"]');
   await expect(cells.first()).toBeVisible({ timeout: 60_000 });
   expect(await cells.count()).toBeGreaterThan(3);
   await expect(page.locator('.status-banner')).toBeVisible();
-  await snap(page, 'citypulse', 'overview', { phone: true, knownA11y: SCROLL });
+  await snap(page, 'citypulse', 'overview', { phone: true });
 });
 
 test('pressing BURST changes the simulated city status', async ({ page, snap }) => {
@@ -89,7 +87,7 @@ test('pressing BURST changes the simulated city status', async ({ page, snap }) 
   await page.getByRole('button', { name: 'BURST' }).click();
   await expect(page.locator('#toast')).toContainText('Burst started');
   await expect(boost).toContainText('s left', { timeout: 15_000 });
-  await snap(page, 'cpsim', 'city-burst', { knownA11y: SCROLL });
+  await snap(page, 'cpsim', 'city-burst');
   await page.goto(cp.url + '/#overview');
   await expect(page.locator('.status-banner')).toBeVisible();
 });

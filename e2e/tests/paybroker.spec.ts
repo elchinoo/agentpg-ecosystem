@@ -4,8 +4,6 @@ import { loginViaApi } from '../harness/helpers/kitadmin';
 import { authorize, tokenize, SAFE_CUSTOMER, RISKY } from '../harness/helpers/paybroker';
 import type { AppInstance } from '../harness/fleet';
 
-// Real finding (see FINDINGS.md): the green/amber status badge text fails WCAG AA contrast.
-const BADGE: string[] = []; // kit badge contrast fixed in agentpg-kit 0.2.5
 
 test.describe.configure({ mode: 'serial' });
 
@@ -55,7 +53,7 @@ test('a merchant gets keys and allowed browser origins', async ({ page, snap }) 
     if (kind === 'secret') sk = v; else pk = v;
   }
   await detail.locator('.codewrap code').evaluateAll((els) => els.forEach((e) => (e.textContent = 'key shown once (masked)')));
-  await snap(page, 'paybroker', 'merchant-keys', { knownA11y: BADGE });
+  await snap(page, 'paybroker', 'merchant-keys', {});
 
   // the origins persist across a reload
   await page.reload();
@@ -79,7 +77,7 @@ test('a test payment is approved and shows up with the decision explained', asyn
   const detail = page.locator('#detail');
   await expect(detail.getByRole('heading', { name: 'Reasons' }).or(detail.getByText('No risk signals worth reporting.'))).toBeVisible();
   await expect(detail).toContainText(/Fraud engine: \d+ \/ 1000/);
-  await snap(page, 'paybroker', 'payment-detail', { phone: true, knownA11y: BADGE });
+  await snap(page, 'paybroker', 'payment-detail', { phone: true });
 });
 
 test('a risky payment is declined and opens a fraud case', async ({ page, snap }) => {
@@ -94,7 +92,7 @@ test('a risky payment is declined and opens a fraud case', async ({ page, snap }
   const card = page.locator('#case-list .case', { hasText: flaggedPaymentId });
   await expect(card).toBeVisible();
   await expect(card).toContainText('NEW_ACCOUNT');
-  await snap(page, 'paybroker', 'cases', { knownA11y: BADGE });
+  await snap(page, 'paybroker', 'cases', {});
   await card.getByRole('button', { name: flaggedPaymentId }).click();
   await expect(page.locator('#detail')).toContainText(/Decline/);
 });
@@ -112,7 +110,7 @@ test('typing in the AI triage limits survives the refresh', async ({ page, snap 
   await expect(cap).toHaveValue('1234');
   await page.locator('form', { has: cap }).getByRole('button', { name: 'Save' }).click();
   await expect(page.locator('#tr-source')).toContainText('Calls per 24 hours: saved here');
-  await snap(page, 'paybroker', 'settings', { knownA11y: BADGE });
+  await snap(page, 'paybroker', 'settings', {});
 });
 
 // Regression test for the kit's confirmDialog inside a modal <dialog> (dead before agentpg-kit 0.2.5, see FINDINGS.md).

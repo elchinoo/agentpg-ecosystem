@@ -21,7 +21,7 @@ test('an administrator sets the identity provider up', async ({ page, snap }) =>
   await page.locator('#setup-pw2').fill(idp.adminPassword);
   await page.getByRole('button', { name: 'Create admin password' }).click();
   await expect(page.getByRole('heading', { name: 'Overview', level: 1 })).toBeVisible();
-  await snap(page, 'identity', 'overview', { phone: true, knownA11y: ['scrollable-region-focusable'] });
+  await snap(page, 'identity', 'overview', { phone: true });
 });
 
 test('they register an app that defines a role', async ({ page, snap }) => {
@@ -47,7 +47,7 @@ test('they create a group, a user in it, and grant the user a role', async ({ pa
   await page.getByLabel('New group').fill('finance');
   await page.getByRole('button', { name: 'Create' }).click();
   await expect(page.getByRole('cell', { name: 'finance', exact: true })).toBeVisible();
-  await snap(page, 'identity', 'groups', { knownA11y: ['select-name'] });
+  await snap(page, 'identity', 'groups');
 
   await page.goto(idp.url + '/admin#users');
   await page.locator('input[name=username]').fill('alice');

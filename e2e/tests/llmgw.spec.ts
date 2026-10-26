@@ -70,5 +70,5 @@ test('the app calls the gateway with its key and the usage shows on the dashboar
   }).toPass({ timeout: 30_000 });
   await expect(page.getByRole('cell', { name: 'e2e-app', exact: true })).toBeVisible();
   await expect(page.locator('.stats .stat').first().locator('strong')).toHaveText('1');
-  await snap(page, 'llmgw', 'overview', { phone: true, knownA11y: ['scrollable-region-focusable'] });
+  await snap(page, 'llmgw', 'overview', { phone: true });
 });

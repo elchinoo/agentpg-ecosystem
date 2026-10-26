@@ -12,8 +12,6 @@ const SHOPPER = 'pat.shopper@example.com';
  */
 test.describe.configure({ mode: 'serial' });
 
-// Real finding (FINDINGS.md): status badges (green/amber) fail WCAG AA contrast in the kit's CSS.
-const BADGE: string[] = []; // kit badge contrast fixed in agentpg-kit 0.2.5
 
 let shop: AppInstance;
 let pb: AppInstance;
@@ -80,7 +78,7 @@ test('the shop is set up and connected to PayBroker', async ({ page, snap }) => 
   await expect(page.getByRole('status').filter({ hasText: 'Saved' })).toBeVisible();
   await page.getByRole('button', { name: 'Test connection' }).click();
   await expect(page.locator('#pb-test-result').getByRole('heading', { name: 'Connection works' })).toBeVisible();
-  await snap(page, 'shopfront', 'admin-settings', { knownA11y: BADGE });
+  await snap(page, 'shopfront', 'admin-settings', {});
 });
 
 test('a first-time customer is sent through PayBroker\'s 3-D Secure page and comes back paid', async ({ page, snap }) => {
@@ -90,11 +88,11 @@ test('a first-time customer is sent through PayBroker\'s 3-D Secure page and com
   await page.locator('#co-pay').click();
   await expect(page).toHaveURL(new RegExp(pb.url.replace(/[.]/g, '\\.') + '/3ds/'));
   await expect(page.getByRole('heading', { name: 'Verify this payment' })).toBeVisible();
-  await snap(page, 'shopfront', 'three-d-secure', { knownA11y: BADGE });
+  await snap(page, 'shopfront', 'three-d-secure', {});
   await page.getByRole('button', { name: /Approve/ }).click();
   await expect(page).toHaveURL(/\/order\//);
   await expect(page.locator('#order-badge')).toHaveText(/paid/i);
-  await snap(page, 'shopfront', 'order-paid', { phone: true, knownA11y: BADGE });
+  await snap(page, 'shopfront', 'order-paid', { phone: true });
 });
 
 test('a returning customer pays with a test card and the order is paid at once', async ({ page }) => {
@@ -114,7 +112,7 @@ test('back office: the order shows the PayBroker payment trail', async ({ page, 
   await expect(dlg.locator('#od-payment')).toContainText(/pay_[a-z0-9]+/);
   await expect(dlg.locator('#od-payment')).toContainText('Fraud assessment');
   await expect(dlg.locator('#od-events')).toContainText('paid');
-  await snap(page, 'shopfront', 'admin-order', { knownA11y: BADGE });
+  await snap(page, 'shopfront', 'admin-order', {});
 });
 
 // Regression test for the kit's confirmDialog inside a modal <dialog> (dead before agentpg-kit 0.2.5, see FINDINGS.md).
@@ -137,5 +135,5 @@ test('a declined card shows a friendly message and keeps the order for another t
   await expect(out).toContainText(/Payment (declined|not completed)/);
   await expect(out).toContainText(/Enter another card/);
   await expect(page).toHaveURL(/\/checkout/);
-  await snap(page, 'shopfront', 'declined', { knownA11y: BADGE });
+  await snap(page, 'shopfront', 'declined', {});
 });
