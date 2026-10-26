@@ -79,7 +79,7 @@ test('the validation setting a person is typing survives 15 s of page timers', a
   await page.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(page.getByText('Saved.', { exact: true })).toBeVisible();
   await expect(rate).toHaveValue('7');
-  await snap(page, 'trustdesk', 'settings', { knownA11y: ['color-contrast'] });
+  await snap(page, 'trustdesk', 'settings', {});
 });
 
 test('deleting a provider account asks to type its name; cancel keeps it, confirm removes it', async ({ page, snap }) => {
@@ -99,7 +99,7 @@ test('deleting a provider account asks to type its name; cancel keeps it, confir
   await expect(confirm).toBeDisabled();
   await dialog.getByRole('textbox').fill('Throwaway');
   await expect(confirm).toBeDisabled();
-  await snap(page, 'trustdesk', 'delete-account-dialog', { knownA11y: ['color-contrast'] });
+  await snap(page, 'trustdesk', 'delete-account-dialog', {});
   await dialog.getByRole('button', { name: 'Cancel' }).click();
   await expect(dialog).toBeHidden();
   await expect(card).toBeVisible();

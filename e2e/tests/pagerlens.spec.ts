@@ -38,7 +38,7 @@ test('break a scenario in the Lab, investigate with Rules, read hypotheses and e
   await expect(evidence).toBeVisible();
   await evidence.click();
   await expect(page.getByRole('button', { name: 'Close' })).toBeVisible();
-  await snap(page, 'pagerlens', 'investigation', { phone: true, knownA11y: ['color-contrast', 'scrollable-region-focusable'] }); // see FINDINGS.md
+  await snap(page, 'pagerlens', 'investigation', { phone: true, knownA11y: ['scrollable-region-focusable'] }); // see FINDINGS.md
 
   await page.getByLabel('Real cause').selectOption('bad_deploy');
   await page.getByRole('button', { name: 'Mark resolved' }).click();

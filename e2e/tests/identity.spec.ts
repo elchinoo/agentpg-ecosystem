@@ -38,7 +38,7 @@ test('they register an app that defines a role', async ({ page, snap }) => {
   await expect(page.getByRole('heading', { name: 'Secret for demoapp' })).toBeVisible();
   await page.getByRole('button', { name: 'Done' }).click();
   await expect(page.getByRole('cell', { name: /Demo App/ })).toBeVisible();
-  await snap(page, 'identity', 'apps', { knownA11y: ['color-contrast'] });
+  await snap(page, 'identity', 'apps', {});
 });
 
 test('they create a group, a user in it, and grant the user a role', async ({ page, snap }) => {
@@ -47,7 +47,7 @@ test('they create a group, a user in it, and grant the user a role', async ({ pa
   await page.getByLabel('New group').fill('finance');
   await page.getByRole('button', { name: 'Create' }).click();
   await expect(page.getByRole('cell', { name: 'finance', exact: true })).toBeVisible();
-  await snap(page, 'identity', 'groups', { knownA11y: ['color-contrast', 'select-name', 'label'] });
+  await snap(page, 'identity', 'groups', { knownA11y: ['select-name'] });
 
   await page.goto(idp.url + '/admin#users');
   await page.locator('input[name=username]').fill('alice');
@@ -62,7 +62,7 @@ test('they create a group, a user in it, and grant the user a role', async ({ pa
   await page.getByPlaceholder('role name, e.g. approver').fill('approver');
   await page.getByRole('button', { name: 'Grant', exact: true }).click();
   await expect(page.getByRole('row', { name: /demoapp\s+approver/ })).toBeVisible();
-  await snap(page, 'identity', 'user-roles', { knownA11y: ['color-contrast'] });
+  await snap(page, 'identity', 'user-roles', {});
 
   // a role for the whole group
   await page.goto(idp.url + '/admin#groups');

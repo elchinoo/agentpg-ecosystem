@@ -12,7 +12,7 @@ export function backdateCustomer(email: string, days = 30) {
   if (!port) throw new Error('E2E_PG_PORT missing');
   execFileSync(
     path.join(PG_BIN, 'psql'),
-    ['-h', '127.0.0.1', '-p', port, '-U', 'postgres', '-d', 'e2e_shopfront', '-v', 'ON_ERROR_STOP=1', '-c', `UPDATE shop_order SET created_at = created_at - interval '${Number(days)} days' WHERE lower(email) = '${email.toLowerCase().replace(/'/g, "''")}'`],
+    ['-h', '127.0.0.1', '-p', port, '-U', 'postgres', '-d', 'e2e_shopfront', '-v', 'ON_ERROR_STOP=1', '-c', `UPDATE shop_order SET created_at = created_at - interval '${Number(days)} days', paid_at = paid_at - interval '${Number(days)} days' WHERE lower(email) = '${email.toLowerCase().replace(/'/g, "''")}'`],
     { env: { PATH: '/usr/bin:/bin', LANG: 'C' }, stdio: 'pipe' },
   );
 }

@@ -13,7 +13,7 @@ const SHOPPER = 'pat.shopper@example.com';
 test.describe.configure({ mode: 'serial' });
 
 // Real finding (FINDINGS.md): status badges (green/amber) fail WCAG AA contrast in the kit's CSS.
-const BADGE = ['color-contrast'];
+const BADGE: string[] = []; // kit badge contrast fixed in agentpg-kit 0.2.5
 
 let shop: AppInstance;
 let pb: AppInstance;
@@ -84,7 +84,7 @@ test('the shop is set up and connected to PayBroker', async ({ page, snap }) => 
 });
 
 test('a first-time customer is sent through PayBroker\'s 3-D Secure page and comes back paid', async ({ page, snap }) => {
-  // PayBroker treats a customer with no history as a new account (guest first order: score ~600 = challenge).
+  // The 3155 test card makes the issuer ask for 3-D Secure (ISSUER_REQUIRES_3DS).
   await buy(page, '4000 0025 0000 3155');
   await snap(page, 'shopfront', 'checkout', { phone: true });
   await page.locator('#co-pay').click();
@@ -117,31 +117,16 @@ test('back office: the order shows the PayBroker payment trail', async ({ page, 
   await snap(page, 'shopfront', 'admin-order', { knownA11y: BADGE });
 });
 
-// REAL BUG (FINDINGS.md, "confirm dialog inside a modal dialog is dead"): the kit's confirmDialog is a popover appended to
-// <body>; while the order <dialog> is open modally, Chrome treats everything outside it as inert, so neither a mouse click nor Enter
-// reaches "Refund payment". The intended behaviour is asserted here; the test is expected to fail until the kit is fixed.
-test('back office: a refund can be confirmed in the order dialog', async ({ page }) => {
-  test.fail(true, 'confirmDialog popover is inert while the order <dialog> is modal (kit bug, see FINDINGS.md)');
+// Regression test for the kit's confirmDialog inside a modal <dialog> (dead before agentpg-kit 0.2.5, see FINDINGS.md).
+test('back office: a refund is confirmed in the order dialog and reaches PayBroker', async ({ page }) => {
   await shopAdminLogin(page);
   await page.goto(shop.url + '/admin#orders');
   await page.locator('#view-orders tbody tr').first().click();
   const dlg = page.locator('dialog[open]');
   await dlg.locator('#od-refund-btn').click();
-  const box = (await page.getByRole('button', { name: 'Refund payment' }).boundingBox())!;
-  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
-  await expect(dlg.locator('h2 .badge')).toHaveText(/refunded/i, { timeout: 3000 });
-});
-
-test('back office: the refund goes through to PayBroker (via the admin API, since the UI confirm is blocked)', async ({ page }) => {
-  await shopAdminLogin(page);
-  await page.goto(shop.url + '/admin#orders');
-  await page.locator('#view-orders tbody tr').first().click();
-  const dlg = page.locator('dialog[open]');
-  const number = (await dlg.locator('h2').first().innerText()).match(/SF-\d+/)![0];
-  const r = await page.context().request.post(`${shop.url}/api/orders/${number}/refund`, { data: {}, headers: { 'X-ShopFront-CSRF': '1' } });
-  expect(r.ok()).toBeTruthy();
-  await dlg.locator('#od-refresh').click();
+  await page.getByRole('button', { name: 'Refund payment' }).click();
   await expect(dlg.locator('h2 .badge')).toHaveText(/refunded/i);
+  await dlg.locator('#od-refresh').click();
   await expect(dlg.locator('#od-payment')).toContainText('Refunded');
 });
 

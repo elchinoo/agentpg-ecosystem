@@ -51,6 +51,8 @@ Environment knobs: `E2E_PG_BIN` (Postgres binaries), `E2E_REPOS_DIR` (parent of 
 | `identity` | setup; register an app; create a group, a user and a role in the UI; OIDC discovery and JWKS are reachable |
 | `shopfront` (with PayBroker) | PayBroker merchant (allowed origin = the shop, webhook = the shop), keys typed into the local shop; search, cart, checkout with a PayBroker test card tokenized from the browser (CORS); order paid; back office shows the payment trail; refund; 3-D Secure through PayBroker's hosted page; a declined card shows the friendly message |
 
+Each run prints the agentpg-kit version every app venv imports (`[e2e] <repo>: agentpg-kit X editable`); install the sibling kit editable in each venv (`uv pip install -e ../agentpg-kit`) so the run tests the kit you mean to.
+
 Real bugs the suite found are marked `test.fail()` (they turn red once fixed) and described in [FINDINGS.md](FINDINGS.md).
 
 ## Layout

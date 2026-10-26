@@ -35,7 +35,7 @@ test('they add a model alias on the built-in echo provider', async ({ page, snap
   await dialog.getByLabel('Upstream model for target 1').fill('echo');
   await dialog.getByRole('button', { name: 'Save' }).click();
   await expect(page.getByRole('cell', { name: 'e2e-chat' })).toBeVisible();
-  await snap(page, 'llmgw', 'models', { knownA11y: ['color-contrast'] });
+  await snap(page, 'llmgw', 'models', {});
 });
 
 test('they create a client and receive a key', async ({ page, snap }) => {
@@ -48,7 +48,7 @@ test('they create a client and receive a key', async ({ page, snap }) => {
   const key = page.locator('#detail pre.code code').first();
   await expect(key).toHaveText(/^lg_/);
   clientKey = (await key.textContent())!.trim();
-  await snap(page, 'llmgw', 'client-created', { hide: ['#detail pre.code code'], knownA11y: ['color-contrast'] });
+  await snap(page, 'llmgw', 'client-created', { hide: ['#detail pre.code code'] });
 });
 
 test('the app calls the gateway with its key and the usage shows on the dashboard', async ({ page, snap }) => {
@@ -70,5 +70,5 @@ test('the app calls the gateway with its key and the usage shows on the dashboar
   }).toPass({ timeout: 30_000 });
   await expect(page.getByRole('cell', { name: 'e2e-app', exact: true })).toBeVisible();
   await expect(page.locator('.stats .stat').first().locator('strong')).toHaveText('1');
-  await snap(page, 'llmgw', 'overview', { phone: true, knownA11y: ['scrollable-region-focusable', 'color-contrast'] });
+  await snap(page, 'llmgw', 'overview', { phone: true, knownA11y: ['scrollable-region-focusable'] });
 });

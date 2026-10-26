@@ -5,7 +5,7 @@ import { authorize, tokenize, SAFE_CUSTOMER, RISKY } from '../harness/helpers/pa
 import type { AppInstance } from '../harness/fleet';
 
 // Real finding (see FINDINGS.md): the green/amber status badge text fails WCAG AA contrast.
-const BADGE = ['color-contrast'];
+const BADGE: string[] = []; // kit badge contrast fixed in agentpg-kit 0.2.5
 
 test.describe.configure({ mode: 'serial' });
 
@@ -115,11 +115,8 @@ test('typing in the AI triage limits survives the refresh', async ({ page, snap 
   await snap(page, 'paybroker', 'settings', { knownA11y: BADGE });
 });
 
-// REAL BUG (FINDINGS.md, "confirm dialog inside a modal dialog is dead"): the kit's confirmDialog is a popover appended to
-// <body>. While the merchant <dialog> is open modally Chrome treats everything outside it as inert, so neither the mouse nor Enter
-// reaches "Revoke". The intended behaviour is asserted; the test is expected to fail until the kit is fixed.
+// Regression test for the kit's confirmDialog inside a modal <dialog> (dead before agentpg-kit 0.2.5, see FINDINGS.md).
 test('revoking an API key can be confirmed inside the merchant window', async ({ page }) => {
-  test.fail(true, 'confirmDialog popover is inert while the merchant <dialog> is modal (kit bug, see FINDINGS.md)');
   await loginViaApi(page, pb, 'X-PayBroker-CSRF');
   await page.goto(pb.url + '/#merchants');
   await page.locator('#view-merchants tbody tr', { hasText: 'E2E Coffee Roasters' }).click();
@@ -127,8 +124,6 @@ test('revoking an API key can be confirmed inside the merchant window', async ({
   await detail.locator('#key-name').fill('to be revoked');
   await detail.getByRole('button', { name: 'Create key' }).click();
   await detail.locator('tbody').getByRole('button', { name: 'Revoke' }).last().click();
-  const ok = page.locator('.confirm-box').getByRole('button', { name: 'Revoke' });
-  const box = (await ok.boundingBox())!;
-  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
-  await expect(detail.locator('tbody td', { hasText: 'revoked' })).toBeVisible({ timeout: 3000 });
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Revoke' }).click();
+  await expect(detail.locator('tbody td.actions', { hasText: 'revoked' })).toBeVisible();
 });

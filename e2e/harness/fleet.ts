@@ -57,8 +57,14 @@ export class Fleet {
       name,
       workDir,
       newDb: () => {
-        const db = `e2e_${name}`;
-        cluster.createDb(db);
+        // `e2e_<app>` normally (helpers refer to it); a restarted worker meets the old database on the same cluster and gets a suffixed one.
+        let db = `e2e_${name}`;
+        try {
+          cluster.createDb(db);
+        } catch {
+          db = `e2e_${name}_${Math.random().toString(36).slice(2, 8)}`;
+          cluster.createDb(db);
+        }
         return cluster.url(db);
       },
       fakeLlm: () => (this.llm ??= startFakeLlm()),
