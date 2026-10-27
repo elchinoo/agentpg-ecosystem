@@ -21,6 +21,7 @@ shared **LLM gateway**, every one a sandbox with its own Postgres database on [A
 7. [Sign in to each app](#7-sign-in-to-each-app)
 8. [Smoke tests, app by app](#8-smoke-tests-app-by-app)
 9. [The LLM gateway is wired to the apps for you](#9-the-llm-gateway-is-wired-to-the-apps-for-you)
+    - [9b. ShopFront is connected to PayBroker for you](#9b-shopfront-is-connected-to-paybroker-for-you)
 10. [Run the simulators and the PagerLens agent](#10-run-the-simulators-and-the-pagerlens-agent)
 11. [Operating it](#11-operating-it)
 12. [Troubleshooting](#12-troubleshooting)
@@ -304,6 +305,56 @@ Limits worth knowing: the gateway does not stream (the apps never ask it to); it
 provider does not report are estimated and marked so; the `ecoctl status` call is metered like any other (about a token). The vector
 dimension of TrustDesk's and PagerLens's tables is fixed when their database is first migrated: change `llm.embed_dimensions` only for a new fleet.
 
+## 9b. ShopFront is connected to PayBroker for you
+
+Nothing to copy by hand: no merchant key, no webhook secret pasted into Settings, no allowed origin to retype when the shop's sandbox
+address changes. `ecosystem.yaml` says it once, on the shop:
+
+```yaml
+  shopfront:
+    exposes: [shopfront.api, shopfront.read, shopfront.metrics, shopfront.admin]
+    connect:
+      paybroker: {merchant: "ShopFront"}      # the merchant's exact name in PayBroker (1-60 characters)
+  paybroker:
+    exposes: [paybroker.read, paybroker.metrics, paybroker.admin]
+```
+
+`ecoctl validate` checks that the shop `uses` or `calls` PayBroker, that both `<app>.admin` scopes are listed under `exposes` (it tells you
+which one is missing), and refuses unknown keys under `connect`. `apply --execute` registers one more service client, **`ecoctl`**, allowed
+`paybroker.admin` (audience `paybroker`) and `shopfront.admin` (audience `shopfront`), and keeps its secret in the state file like the others.
+
+**What runs, after both apps are up** (`apply`, `recreate`, or on its own as `ecoctl connect [app] [--rotate] [--dry-run]`). Each step prints one
+line, `created`, `kept` or `updated`, and the whole thing is idempotent: a re-run on a connected fleet makes no write call.
+
+1. `ecoctl` gets a service token per audience (`client_credentials`; one admin scope each, cached until just before it expires).
+2. **Merchant**: PayBroker's merchant is found by its exact name and created when missing (a concurrent creation is treated as a find).
+3. **Allowed origins**: the list is **managed**. It becomes exactly the shop's *current* public URL; an origin somebody added by hand is
+   replaced. (That is what makes a recreated shop work again without a visit to PayBroker's settings.)
+4. **Keys**: two keys named `ecoctl:shopfront:secret` and `ecoctl:shopfront:publishable`, created by `ecoctl` (PayBroker shows a key's value once). The
+   values live only in `.ecosystem/state.json`. If PayBroker no longer lists a key, or the state lost its value, a new one is created and the stale one
+   (same name) is deleted. Keys with other names, such as one you made by hand, are never touched.
+5. **Webhook**: URL `<shop>/webhooks/paybroker`. Every set of the webhook **rotates the signing secret**, so `ecoctl` sets it only when the URL changed, it holds
+   no secret, PayBroker holds another URL, or the shop's fingerprint of the secret differs from the one kept. The returned secret goes to the state file.
+6. **Shop settings**: PayBroker's current URL, the two keys and the webhook secret are pushed to the shop's `PUT /api/settings/paybroker`, only the fields whose
+   fingerprint (first 8 hex of the SHA-256; the shop never echoes a secret) differs. A locked vault (HTTP 423) is retried with backoff for about 60 s.
+7. **Test**: the shop's own connection test. A failing test stops the run with its checks listed.
+
+```bash
+.venv/bin/ecoctl connect --dry-run       # what would change; reads only, writes nothing
+.venv/bin/ecoctl connect                 # reconcile now (apply and recreate do it for you)
+.venv/bin/ecoctl connect --rotate        # new merchant keys and a new webhook signing secret, pushed to the shop; the old keys are deleted
+.venv/bin/ecoctl status                  # ends with a CONNECTIONS table: app -> peer, merchant, origin, keys, webhook, test (read-only calls)
+```
+
+**When something moves.** `ecoctl recreate shopfront` (new sandbox address) updates the origin and the webhook URL, rotates the signing secret and pushes it;
+`ecoctl recreate paybroker` recreates the shop too (it `uses` PayBroker) and then reconnects it to the new address. `apply --rotate` rotates the identity client
+secrets, **not** the merchant's keys: that is `ecoctl connect --rotate`.
+
+**What is in the state file** (`.ecosystem/state.json`, mode 0600, git-ignored): `apps.ecoctl.service_secret`, and under `apps.shopfront.connect.paybroker` the
+merchant id, the two keys (`id` and `value`), the webhook URL and the webhook secret. They are sent only in an `Authorization` header or a JSON body over
+https (plain http only for localhost), never in a URL, a command line, a log line or an error message. Lose the file and the next `ecoctl connect` creates
+new keys (deleting the old ones named `ecoctl:...`) and rotates the webhook secret; nothing is lost but a moment of rejected payments.
+
 ## 10. Run the simulators and the PagerLens agent
 
 **CityPulse Simulator** (`https://<cpsim>`): sign in (admin or operator).
@@ -347,6 +398,7 @@ from AgentPG) and saves the new one.
 | Deploy a new image | CI pushes `:latest`. `ecoctl recreate <app>` deletes the sandbox and creates it afresh so it pulls the image (the database and secrets are kept). Because the URL changes, it also recreates every app that **calls** this one, every app that lists it under `uses` (the simulator uses PayBroker and identity), and every app that uses it as the LLM gateway (their environment names its URL); recreating `identity` recreates the whole fleet. Allow a couple of minutes per app |
 | Change an app's environment | Edit the manifest, then `ecoctl recreate <app>` |
 | Rotate a client secret or a gateway key | `ecoctl apply --execute --rotate`, then recreate the sandboxes whose environment changed (section 9) |
+| Rotate the shop's PayBroker keys and webhook secret | `ecoctl connect --rotate` (section 9b); `ecoctl connect --dry-run` shows what would change |
 | Check the LLM wiring | `ecoctl status` (client + one real call per app), `ecoctl llm test <app>` |
 | Add a person or change roles | Identity console → Users or Groups. Takes effect at their next sign-in |
 | Forgot an app's local admin password | `agentpg sandbox console <id>`, then `trustdesk reset-admin` (or `pagerlens`, `citypulse`, `cpsim`, `paybroker`, `llmgw`, `identity`); for apps that store provider keys this erases them |
@@ -377,6 +429,10 @@ from AgentPG) and saves the new one.
 | Gateway: `403 wrong_credential` | An operator credential was used on `/v1` | Use a client key (`lg_...`) |
 | Gateway: `429 budget_exceeded` / `rate_limit_exceeded` | The client's budget or rate limit | Clients → raise the limit, or switch to soft mode |
 | Gateway: `503 vault_locked` | A real provider's key is locked after a restart | `LLMGW_ENCRYPTION_KEY` unlocks it automatically; otherwise sign in as admin |
+| `ecoctl connect` says the identity provider refused the `ecoctl` service client | The `ecoctl` client is not registered (or its secret in the state file is stale) | `ecoctl apply --execute` registers it again (`--rotate` issues a new secret) |
+| `ecoctl connect`: "the shop's vault is still locked after 60 s" | The shop's vault opens only after a sign-in or its encryption key | Unlock it (the platform key makes that automatic), then `ecoctl connect` |
+| `ecoctl connect`: "connection test ... failed: webhook_secret: FAILED" | PayBroker signs with another secret than the shop holds | `ecoctl connect --rotate` sets both ends afresh |
+| `ecoctl status` shows `DIFFERS` under origin or webhook | The shop moved, or somebody edited the merchant or the shop's settings by hand | `ecoctl connect` (add `--dry-run` first to see the change) |
 | `ecoctl apply` says an app "exists with a different environment" | You edited the manifest after creating the sandbox | Delete that sandbox and re-run |
 | Lost `.ecosystem/state.json` | Client secrets were only shown once; the database keys too (a key is the database password, and the web UI cannot show it again) | Re-run `ecoctl apply --execute --rotate`, then recreate the sandboxes |
 

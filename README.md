@@ -28,6 +28,7 @@ uv venv && uv pip install -e ".[dev]"
 .venv/bin/ecoctl apply --execute         # asks first, then creates and registers; safe to run again
 .venv/bin/ecoctl status                  # health of each app, each LLM client + one real call, and drift from the identity registry
 .venv/bin/ecoctl llm test trustdesk      # one tiny chat call through the LLM gateway with that app's own key
+.venv/bin/ecoctl connect --dry-run       # what connecting ShopFront to PayBroker would change (apply does it for you)
 .venv/bin/ecoctl env trustdesk           # the environment an app is created with (secrets shown as ***; --reveal prints them)
 ```
 
@@ -132,6 +133,34 @@ ecoctl llm sync --all --apply --prune-aliases   # also remove aliases the manife
 
 Missing aliases are always added; clients that do not exist yet are reported `missing, run apply`; keys are never touched.
 `ecoctl status` shows a `limits` column (`DRIFT`) and a warning pointing to `ecoctl llm sync`. Details, rotation and upgrade notes: [docs/DEPLOY.md](docs/DEPLOY.md) section 9.
+
+## Connect apps to each other (ShopFront and PayBroker)
+
+An app can declare that ecoctl connects it to a peer once both are up, so nothing is copied by hand and a moved sandbox is followed:
+
+```yaml
+  shopfront:
+    uses: [paybroker]
+    exposes: [shopfront.api, shopfront.read, shopfront.metrics, shopfront.admin]
+    connect:
+      paybroker: {merchant: "ShopFront"}       # exact merchant name, 1-60 characters; unknown keys are refused
+  paybroker:
+    exposes: [paybroker.read, paybroker.metrics, paybroker.admin]
+```
+
+The app must `uses` or `calls` the peer and both `<app>.admin` scopes must be listed under `exposes` (the validator says which one is missing).
+`apply --execute` then registers a service client `ecoctl` for those scopes and, after both apps are up (also at the end of `recreate`), reconciles:
+find or create the merchant, set its allowed origins to exactly the shop's current URL (**managed**: other origins are replaced), keep two keys
+`ecoctl` created (`ecoctl:<app>:secret|publishable`, values only in `.ecosystem/state.json`), set the webhook `<shop>/webhooks/paybroker` (its signing
+secret rotates on every set, so only when the URL changed or the secret is lost), push PayBroker's URL, the keys and the secret to the shop (only fields whose
+fingerprint differs) and run the shop's connection test. A re-run on a connected fleet makes no write call.
+
+```bash
+.venv/bin/ecoctl connect [app] [--dry-run] [--rotate]    # --rotate: new keys and a new signing secret; --dry-run: reads only
+.venv/bin/ecoctl status                                    # ends with a CONNECTIONS table (origin, keys, webhook, test)
+```
+
+Details, rotation and what the state file holds: [docs/DEPLOY.md](docs/DEPLOY.md) section 9b.
 
 ## Limits
 
