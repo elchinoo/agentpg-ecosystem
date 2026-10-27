@@ -75,10 +75,33 @@ class FakeIdentity:
         self.grants: list[dict] = []
         self.requests: list[tuple[str, str]] = []
         self.issuer: str | None = None
+        self.secrets: dict[str, str] = {}               # client id -> its current secret (what the token endpoint accepts)
+        self.token_requests: list[dict] = []            # {client, scope, audience} of every client_credentials request
+        from tests.fakes_connect import FakeConnect
+        self.connect = FakeConnect(self)                # PayBroker's and the shop's admin APIs, behind one client with the token endpoint
+
+    def _token(self, request: httpx.Request) -> httpx.Response:
+        """POST /oauth/token (client_credentials, client_secret_basic): the scope must be one the service client may request."""
+        import base64
+        from urllib.parse import parse_qs
+        form = {k: v[0] for k, v in parse_qs(request.content.decode()).items()}
+        try:
+            cid, _, secret = base64.b64decode(request.headers.get("authorization", "")[6:]).decode().partition(":")
+        except ValueError:
+            cid, secret = "", ""
+        app = self.apps.get(cid)
+        if app is None or app["kind"] != "service" or self.secrets.get(cid) != secret:
+            return httpx.Response(401, json={"error": "invalid_client"})
+        if form.get("grant_type") != "client_credentials" or form.get("scope") not in app["allowed_scopes"] or form.get("audience", "") not in {*app["allowed_audiences"], ""}:
+            return httpx.Response(400, json={"error": "invalid_scope"})
+        self.token_requests.append({"client": cid, "scope": form.get("scope"), "audience": form.get("audience")})
+        return httpx.Response(200, json={"access_token": f"tok.{form['audience']}.{len(self.token_requests)}", "token_type": "Bearer", "expires_in": 300})
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path, method = request.url.path, request.method
         self.requests.append((method, path))
+        if path == "/oauth/token":
+            return self._token(request)
         if request.headers.get("authorization") != "Bearer " + self.admin_key and path not in {"/readyz", "/.well-known/openid-configuration"}:
             return httpx.Response(401, json={"detail": "authentication required"})
         body = json.loads(request.content) if request.content else {}
@@ -95,7 +118,8 @@ class FakeIdentity:
             if body["kind"] in {"web", "public"} and not body["redirect_uris"]:
                 return httpx.Response(422, json={"detail": "a web or public app needs at least one redirect URI"})
             self.apps[body["client_id"]] = {**body, "secret_issued": True}
-            return httpx.Response(201, json={"app": body, "client_secret": f"cs_{body['client_id']}_1"})
+            self.secrets[body["client_id"]] = f"cs_{body['client_id']}_1"
+            return httpx.Response(201, json={"app": body, "client_secret": self.secrets[body["client_id"]]})
         m = re.fullmatch(r"/api/apps/([a-z0-9-]+)(/secret)?", path)
         if m:
             cid = m.group(1)
@@ -103,7 +127,8 @@ class FakeIdentity:
                 return httpx.Response(404, json={"detail": "no such app"})
             if m.group(2):
                 self.apps[cid]["rotations"] = self.apps[cid].get("rotations", 0) + 1
-                return httpx.Response(200, json={"client_secret": f"cs_{cid}_{self.apps[cid]['rotations'] + 1}"})
+                self.secrets[cid] = f"cs_{cid}_{self.apps[cid]['rotations'] + 1}"
+                return httpx.Response(200, json={"client_secret": self.secrets[cid]})
             if method == "PATCH":
                 self.apps[cid].update(body)
                 return httpx.Response(200, json=self.apps[cid])

@@ -20,6 +20,7 @@ def world(tmp_path):
     ctx.http = idp.client(state.admin_key())
     ctx.llm_http = gw.client(state.secret("llmgw", "LLMGW_API_KEY"))
     idp.gateway = gw
+    ctx.connect_http = idp.connect.client()
     return ctx, cli, idp
 
 
@@ -28,6 +29,8 @@ def again(ctx, cli, idp, *, manifest=None, state=None, **kw):
     c = Context(manifest or load(MANIFEST), state or State(ctx.state.dir), AgentPG(run=cli), **kw)
     c.http = idp.client(c.state.admin_key())
     c.llm_http = idp.gateway.client(c.state.secret("llmgw", "LLMGW_API_KEY"))
+    if hasattr(idp, "connect"):
+        c.connect_http = idp.connect.client()
     return c
 
 
@@ -269,6 +272,7 @@ def test_db_command_prints_the_kept_key_and_reset_replaces_it(world, capsys, mon
     from ecoctl import cli as cli_mod
     ctx, cli, idp = world
     apply(ctx)
+    capsys.readouterr()                                                            # the connect steps print their progress
     monkeypatch.setattr(cli_mod, "_ctx", lambda args: ctx)
     kept = ctx.state.app("paybroker")["db_key"]
     assert cli_mod.cmd_db(type("A", (), {"app": "paybroker", "reset": False})()) == 0

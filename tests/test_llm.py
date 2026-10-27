@@ -70,6 +70,7 @@ def test_the_manifest_budget_rpm_and_aliases_reach_the_client(tmp_path):
     ctx = Context(load(path), State(tmp_path / "s"), AgentPG(run=cli))
     ctx.http = idp.client(ctx.state.admin_key())
     ctx.llm_http = idp.gateway.client(ctx.state.secret("llmgw", "LLMGW_API_KEY"))
+    ctx.connect_http = idp.connect.client()
     apply(ctx)
     c = next(c for c in idp.gateway.clients.values() if c["name"] == "trustdesk")
     assert (c["rpm_limit"], c["monthly_token_budget"], c["budget_mode"], c["allowed_aliases"]) == (7, 1000, "soft", ["smart", "vectors"])

@@ -7,6 +7,8 @@ from pathlib import Path
 import httpx
 
 from .agentpg import AgentPG, AgentPGError, token_from
+from .connect import print_status, reconcile
+from .connect_client import ConnectError
 from .identity_client import Identity, IdentityError
 from .llm_client import GatewayError
 from .llm_sync import diff_app, table
@@ -60,7 +62,7 @@ def cmd_apply(args) -> int:
         print(f"[{i}/{len(steps)}] {s.title} ...", flush=True)
         try:
             print(f"      {s.run(ctx)}")
-        except (AgentPGError, IdentityError, GatewayError, httpx.HTTPError) as exc:
+        except (AgentPGError, IdentityError, GatewayError, ConnectError, httpx.HTTPError) as exc:
             ctx.state.save()
             print(f"      FAILED: {exc}\n\nProgress is saved; fix the cause and run the same command again.", file=sys.stderr)
             return 2
@@ -130,6 +132,7 @@ def cmd_status(args) -> int:
         bad += row[0] != "200"
         print(f"{key:<16}{row[0]:<10}{row[1]:<10}{url}")
     bad += _llm_status(ctx)
+    bad += print_status(ctx)
     ident_url = ctx.state.data["apps"].get("identity", {}).get("url")
     if ident_url:
         try:
@@ -261,6 +264,30 @@ def cmd_llm(args) -> int:
     return 0 if ok else 1
 
 
+def cmd_connect(args) -> int:
+    """`ecoctl connect [app] [--rotate] [--dry-run]`: reconcile the connection(s) declared by `connect:` in the manifest (see connect.py)."""
+    ctx = _ctx(args)
+    m = ctx.manifest
+    todo = [(k, p) for k, a in m.apps.items() for p in a.connect if not args.app or k == args.app]
+    if args.app and args.app not in m.apps:
+        print(f"no such app: {args.app}", file=sys.stderr)
+        return 1
+    if not todo:
+        print(f"{args.app or 'no app'} has no `connect:` block in the manifest", file=sys.stderr)
+        return 1
+    for k, p in todo:
+        print(f"{k} -> {p}{' (dry run: nothing is written)' if args.dry_run else ''}")
+        try:
+            changed = reconcile(ctx, k, p, dry_run=args.dry_run, rotate=args.rotate, emit=lambda s: print(f"  {s}", flush=True))
+        except (ConnectError, httpx.HTTPError) as exc:
+            ctx.state.save()
+            print(f"  FAILED: {exc}\n\nProgress is saved; fix the cause and run the same command again.", file=sys.stderr)
+            return 2
+        ctx.state.save()
+        print("  " + (("would change something: run without --dry-run" if args.dry_run else "connected") if changed else "nothing to change"))
+    return 0
+
+
 def cmd_env(args) -> int:
     ctx = _ctx(args)
     app = ctx.manifest.everything().get(args.app)
@@ -325,7 +352,11 @@ def main(argv: list[str] | None = None) -> int:
     db = sub.add_parser("db", help="print the database key (the database password) of an app's instance")
     db.add_argument("app")
     db.add_argument("--reset", action="store_true", help="rotate the instance's default key and keep the new one")
-    sub.add_parser("status", help="health of every app, each LLM client and its test call, and drift from the identity registry")
+    cn = sub.add_parser("connect", help="connect apps by themselves (ShopFront to PayBroker: merchant, origin, keys, webhook, settings); safe to run again")
+    cn.add_argument("app", nargs="?", help="the app whose `connect:` to reconcile (default: every app that has one)")
+    cn.add_argument("--rotate", action="store_true", help="create the merchant keys and the webhook signing secret afresh and push them")
+    cn.add_argument("--dry-run", action="store_true", help="show what would change without writing anything")
+    sub.add_parser("status", help="health of every app, each LLM client and its test call, the connections, and drift from the identity registry")
     en = sub.add_parser("env", help="print the environment an app is created with (secret values are shown as *** unless --reveal)")
     en.add_argument("app")
     en.add_argument("--reveal", action="store_true", help="print secret values too (to configure something that runs elsewhere)")
@@ -339,7 +370,9 @@ def main(argv: list[str] | None = None) -> int:
     ls.add_argument("--prune-aliases", action="store_true", help="also remove aliases the manifest does not list (default: keep and report them)")
     args = p.parse_args(argv)
     try:
-        return {"validate": cmd_validate, "plan": cmd_plan, "apply": cmd_apply, "status": cmd_status, "env": cmd_env, "db": cmd_db, "recreate": cmd_recreate, "llm": cmd_llm}[args.cmd](args)
+        commands = {"validate": cmd_validate, "plan": cmd_plan, "apply": cmd_apply, "status": cmd_status, "env": cmd_env, "db": cmd_db, "recreate": cmd_recreate,
+                    "llm": cmd_llm, "connect": cmd_connect}
+        return commands[args.cmd](args)
     except ManifestError as exc:
         print(f"manifest error: {exc}", file=sys.stderr)
         return 1

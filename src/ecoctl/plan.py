@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 import httpx
 
 from .agentpg import AgentPG, AgentPGError, token_from
+from .connect import connect_step
 from .identity_client import PENDING_REDIRECT, Identity, IdentityError
 from .llm_client import Gateway, GatewayError
 from .manifest import App, Manifest
@@ -30,6 +31,9 @@ class Context:
     rotate: bool = False
     only: set[str] | None = None                            # deploy just these apps (and what they call); None: all
     llm_http: httpx.Client | None = None                    # the LLM gateway's admin and data plane; injected in tests
+    connect_http: httpx.Client | None = None                # the identity token endpoint, PayBroker's and the shop's admin APIs; injected in tests
+    connect_sleep: Callable[[float], None] | None = None    # injected in tests (waiting for a locked vault or a service that is starting)
+    connect_clock: Callable[[], float] | None = None
     _identity: Identity | None = None
 
     def gateway(self) -> Gateway:
@@ -122,6 +126,22 @@ def service_spec(app: App) -> dict:
     scopes = [s for scopes in app.calls.values() for s in scopes]
     return {"client_id": app.service_client_id, "name": f"{app.name} (service)", "kind": "service", "description": f"{app.name} calling other apps",
             "allowed_scopes": scopes, "allowed_audiences": sorted(app.calls), "roles": [], "default_roles": [], "redirect_uris": [], "post_logout_uris": [], "url": ""}
+
+
+def ecoctl_spec(m: Manifest) -> dict:
+    """ecoctl's own service client: the admin scope of both ends of every `connect`, so it can manage merchants and push settings."""
+    scopes, audiences = m.connect_scopes()
+    return {"client_id": "ecoctl", "name": "ecoctl (service)", "kind": "service", "description": "ecoctl connecting apps to each other",
+            "allowed_scopes": scopes, "allowed_audiences": audiences, "roles": [], "default_roles": [], "redirect_uris": [], "post_logout_uris": [], "url": ""}
+
+
+def _register_ecoctl(ctx: Context) -> str:
+    entry = ctx.state.app("ecoctl")
+    r = ctx.identity().ensure_app(ecoctl_spec(ctx.manifest), known_secret=bool(entry.get("service_secret")), rotate=ctx.rotate)
+    if r.secret:
+        entry["service_secret"] = r.secret
+    ctx.state.save()
+    return "service client ecoctl" + (" (secret issued)" if r.secret else "")
 
 
 def _deploy(ctx: Context, app: App) -> str:
@@ -281,6 +301,20 @@ def build(ctx: Context) -> list[Step]:
         if not any(t in selected or (t == "*" and selected) for t in g.grants):
             continue
         steps.append(Step(f"Access: group '{g.name}'", [f"{target}: {role}" for target, role in g.grants.items()], (lambda grp: lambda c: _group(c, grp))(g)))
+    connections = [(a, peer) for a in m.order() if a.key in selected and a.deploy for peer in a.connect]
+    if connections:
+        scopes, audiences = m.connect_scopes()
+        steps.append(Step("ecoctl: register its service client", [f"identity: register service client 'ecoctl' for {', '.join(scopes)} (audiences {', '.join(audiences)})"],
+                          _register_ecoctl))
+    for a, peer in connections:
+        merchant = a.connect[peer].merchant
+        steps.append(Step(f"{a.name}: connect to {m.apps[peer].name}", [
+            f"ecoctl service tokens for {peer}.admin and {a.key}.admin (client_credentials)",
+            f"{peer}: find or create merchant '{merchant}'; managed allowed origins = <{a.key} url> only",
+            f"{peer}: two keys ecoctl created (ecoctl:{a.key}:secret / :publishable); kept in the state file, created again when lost",
+            f"{peer}: webhook <{a.key} url>/webhooks/paybroker (the signing secret rotates only when the URL changed or the secret is lost)",
+            f"{a.key}: push base URL, keys and webhook secret (only fields whose fingerprint differs), then run its connection test"],
+            (lambda ak, pk: lambda c: connect_step(c, ak, pk))(a.key, peer)))
     return steps
 
 

@@ -227,6 +227,7 @@ def test_a_new_client_gets_the_per_app_extra_aliases_and_limits(tmp_path):
     ctx = Context(load(path), State(tmp_path / "s"), AgentPG(run=cli))
     ctx.http = idp.client(ctx.state.admin_key())
     ctx.llm_http = idp.gateway.client(ctx.state.secret("llmgw", "LLMGW_API_KEY"))
+    ctx.connect_http = idp.connect.client()
     apply(ctx)
     c = client(idp.gateway, "trustdesk")
     assert c["allowed_aliases"] == ["chat-default", "embed-default", "smart"] and c["rpm_limit"] == 5 and c["monthly_token_budget"] is None
