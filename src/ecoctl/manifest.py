@@ -60,6 +60,16 @@ class Limits:
     aliases: tuple[str, ...]                  # the two defaults, then the app's extras
 
 
+CONNECT_PEERS = ("paybroker",)               # the apps an app can be connected to (a merchant, its keys and webhook); more can follow
+MERCHANT_NAME = 60
+
+
+@dataclass(frozen=True)
+class Connect:
+    """`apps.<app>.connect.<peer>`: how ecoctl wires the app to the peer after both are up (see connect.py)."""
+    merchant: str                             # the PayBroker merchant the app is: found by this exact name, created when missing
+
+
 @dataclass(frozen=True)
 class App:
     key: str                                  # client id, sandbox name suffix and scope prefix
@@ -84,6 +94,7 @@ class App:
     llm: bool = False                         # uses an LLM: wired to the gateway automatically
     llm_override: LLMOverride = LLMOverride() # limits and extra aliases for this app's gateway client (`llm: {rpm: ...}`)
     uses: tuple[str, ...] = ()                # apps (or `identity`) whose URL is injected without a scope: called by other means (a merchant key, ...)
+    connect: dict[str, Connect] = field(default_factory=dict)      # peer app -> how ecoctl connects this app to it (merchant, keys, webhook)
 
     @property
     def service(self) -> bool:
@@ -134,6 +145,14 @@ class Manifest:
     def url_vars(self, app: App) -> dict[str, str]:
         """callee key -> the environment variable that carries its URL in `app`: every app it calls or uses (`identity` included)."""
         return {callee: app.url_env.get(callee, f"{self.everything()[callee].env_prefix}_URL") for callee in (*app.calls, *app.uses)}
+
+    def connect_scopes(self) -> tuple[list[str], list[str]]:
+        """(scopes, audiences) of ecoctl's own service client: `<app>.admin` of both ends of every connection (empty when nothing is connected)."""
+        scopes: set[str] = set()
+        for key, app in self.apps.items():
+            for peer in app.connect:
+                scopes |= {f"{peer}.admin", f"{key}.admin"}
+        return sorted(scopes), sorted(s.split(".", 1)[0] for s in scopes)
 
     def pause_enabled(self, app: App) -> bool:
         return self.auto_pause if app.auto_pause is None else app.auto_pause
@@ -251,7 +270,7 @@ def _env(raw, where: str) -> dict[str, str]:
 
 def _app(key: str, raw: dict, where: str, *, identity: bool = False) -> App:
     _only(raw, {"name", "description", "image", "port", "extensions", "env", "generate", "health", "web", "roles", "default_roles",
-                "env_prefix", "exposes", "calls", "uses", "url_env", "deploy", "auto_pause", "plan", "llm"}, where)
+                "env_prefix", "exposes", "calls", "uses", "url_env", "deploy", "auto_pause", "plan", "llm", "connect"}, where)
     if not NAME.match(key):
         raise ManifestError(f"{where}: {key!r} must be 2-40 lowercase letters, digits or dashes")
     port = raw.get("port", 8000)
@@ -330,7 +349,8 @@ def _app(key: str, raw: dict, where: str, *, identity: bool = False) -> App:
             raise ManifestError(f"{where}: {', '.join(clash)} is set by ecoctl for an app with `llm: true`; remove them from env/generate")
         if not deploy:
             raise ManifestError(f"{where}: `llm: true` needs a deployed app (deploy: true): there is no sandbox to give the gateway settings to")
-    return App(llm=llm, llm_override=override, deploy=deploy, auto_pause=auto_pause, plan=plan,
+    connect = _connect(raw.get("connect"), f"{where}.connect")
+    return App(llm=llm, llm_override=override, connect=connect, deploy=deploy, auto_pause=auto_pause, plan=plan,
                key=key, name=_text(raw.get("name"), f"{where}.name", key), description=str(raw.get("description", ""))[:300],
                image=_text(raw.get("image"), f"{where}.image", key, 100), port=port, extensions=exts, env=env,
                generate=generate, health=_text(raw.get("health"), f"{where}.health", "/healthz", 100), roles=tuple(roles), default_roles=default_roles,
@@ -341,6 +361,20 @@ def _int(v, where: str, lo: int, hi: int) -> int:
     if isinstance(v, bool) or not isinstance(v, int) or not lo <= v <= hi:
         raise ManifestError(f"{where} must be a whole number from {lo} to {hi}")
     return v
+
+
+def _connect(raw, where: str) -> dict[str, Connect]:
+    out: dict[str, Connect] = {}
+    for peer, spec in _dict(raw, where).items():
+        if peer not in CONNECT_PEERS:
+            raise ManifestError(f"{where}.{peer}: only {', '.join(CONNECT_PEERS)} can be connected")
+        spec = _dict(spec, f"{where}.{peer}")
+        _only(spec, {"merchant"}, f"{where}.{peer}")
+        merchant = spec.get("merchant")
+        if not isinstance(merchant, str) or not merchant.strip() or len(merchant.strip()) > MERCHANT_NAME or any(ord(c) < 32 for c in merchant):
+            raise ManifestError(f"{where}.{peer}.merchant must be a text of 1-{MERCHANT_NAME} characters (the merchant's exact name in PayBroker)")
+        out[peer] = Connect(merchant.strip())
+    return out
 
 
 def _llm_override(raw: dict, where: str) -> LLMOverride:
@@ -419,7 +453,22 @@ def parse(doc: dict) -> Manifest:
     apps = {k: _app(k, _dict(v, f"apps.{k}"), f"apps.{k}") for k, v in apps_raw.items()}
     if "identity" in apps:
         raise ManifestError("apps: 'identity' is reserved for the identity provider (use the identity: section)")
+    if "ecoctl" in apps:
+        raise ManifestError("apps: 'ecoctl' is reserved for ecoctl's own service client (it connects apps to each other)")
     for key, app in apps.items():
+        for peer in app.connect:
+            where = f"apps.{key}.connect.{peer}"
+            if peer == key:
+                raise ManifestError(f"{where}: an app cannot be connected to itself")
+            if peer not in apps:
+                raise ManifestError(f"{where}: {peer!r} is not an app in this manifest")
+            if peer not in app.uses and peer not in app.calls:
+                raise ManifestError(f"{where}: {key} must list {peer!r} under `uses` or `calls` (connecting needs its URL)")
+            for who in (key, peer):
+                if not apps[who].deploy:
+                    raise ManifestError(f"{where}: {who!r} is not deployed (deploy: false), so there is nothing to connect")
+                if f"{who}.admin" not in apps[who].exposes:
+                    raise ManifestError(f"{where}: ecoctl needs the {who}.admin scope: list it under apps.{who}.exposes")
         for callee, scopes in app.calls.items():
             if callee not in apps:
                 raise ManifestError(f"apps.{key}.calls: {callee!r} is not an app in this manifest")
