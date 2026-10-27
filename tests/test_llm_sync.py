@@ -82,7 +82,7 @@ def test_apply_all_fixes_every_app_and_a_second_run_is_clean(deployed, capsys):
         client(gw, n).update(rpm_limit=1)
     client(gw, "trustdesk").update(monthly_token_budget=7)
     assert sync(ctx, all_=True, apply_=True) == 0
-    assert sorted(p.get("rpm_limit") for p in gw.patches) == [60, 60, 60] and {"monthly_token_budget": 5_000_000, "rpm_limit": 60} in gw.patches
+    assert sorted(p.get("rpm_limit") for p in gw.patches) == [60, 60, 60, 60] and {"monthly_token_budget": 5_000_000, "rpm_limit": 60} in gw.patches
     n = len(gw.patches)
     assert sync(ctx) == 0 and sync(ctx, all_=True, apply_=True) == 0 and len(gw.patches) == n
 

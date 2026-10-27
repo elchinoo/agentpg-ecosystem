@@ -43,9 +43,9 @@ def test_apply_creates_everything_in_dependency_order(world):
     ctx, cli, idp = world
     apply(ctx)
     created = [c[c.index("create") + 1] for c in cli.calls if c[1:3] == ["sandbox", "create"]]
-    assert created == ["eco-identity", "eco-llmgw", "eco-pagerlens", "eco-citypulse", "eco-paybroker", "eco-trustdesk", "eco-cpsim"]
+    assert created == ["eco-identity", "eco-llmgw", "eco-pagerlens", "eco-citypulse", "eco-paybroker", "eco-trustdesk", "eco-cpsim", "eco-shopfront"]
     assert set(cli.sandboxes) == set(created) and "eco-pagerlens-agent" not in cli.sandboxes        # registered only, never deployed
-    assert ("inst-3", "vector") in cli.extensions and len(cli.instances) == 7
+    assert ("inst-3", "vector") in cli.extensions and len(cli.instances) == 8
     # an app's environment names the identity provider and the apps it calls, with real URLs
     env = cli.sandboxes["eco-cpsim"]["env"]
     assert env["CPSIM_OIDC_ISSUER"] == "https://eco-identity.sandbox.example"
@@ -134,7 +134,7 @@ def test_a_failure_keeps_progress_and_the_rerun_resumes(world):
     cli.fail_on = None
     assert ctx.state.app("identity").get("instance_id") == "inst-1"                           # saved before the failing step
     apply(ctx)
-    assert len(cli.instances) == 7                                                           # the identity instance was reused
+    assert len(cli.instances) == 8                                                           # the identity instance was reused
 
 
 def test_apply_waits_while_a_sandbox_is_creating(world, monkeypatch):
@@ -235,7 +235,8 @@ def test_a_sandbox_deleted_behind_our_back_is_recreated_by_the_next_apply(world)
 
 def test_dependents_follow_calls_transitively():
     m = load(MANIFEST)
-    assert m.dependents({"pagerlens"}) == {"citypulse", "cpsim", "pagerlens-agent"} and m.dependents({"trustdesk"}) == {"cpsim"} and m.dependents({"paybroker"}) == {"cpsim"}      # `uses` cascades
+    assert m.dependents({"pagerlens"}) == {"citypulse", "cpsim", "pagerlens-agent"} and m.dependents({"trustdesk"}) == {"cpsim"}
+    assert m.dependents({"paybroker"}) == {"cpsim", "shopfront"}      # `uses` cascades
 
 
 def test_recreate_cascades_to_callers_and_resets_the_url(world, monkeypatch):

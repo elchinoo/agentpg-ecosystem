@@ -36,7 +36,7 @@ def test_uses_orders_the_used_app_first_and_pulls_it_into_a_selection():
     order = [a.key for a in m.order()]
     assert order.index("paybroker") < order.index("cpsim")
     assert m.closure({"cpsim"}) >= {"paybroker", "llmgw"} and m.needs("cpsim") >= {"paybroker"} and "identity" not in m.needs("cpsim")
-    assert m.dependents({"paybroker"}) == {"cpsim"} and m.dependents({"llmgw"}) >= {"cpsim", "paybroker"}
+    assert m.dependents({"paybroker"}) == {"cpsim", "shopfront"} and m.dependents({"llmgw"}) >= {"cpsim", "paybroker"}
 
 
 @pytest.mark.parametrize("mutate, message", [

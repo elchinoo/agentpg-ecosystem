@@ -13,7 +13,7 @@ from ecoctl.state import State
 from tests.fakes import FakeGateway
 from tests.test_plan import MANIFEST, again, apply, world  # noqa: F401  (the fixture)
 
-CONSUMERS = ("pagerlens", "paybroker", "trustdesk")
+CONSUMERS = ("pagerlens", "paybroker", "shopfront", "trustdesk")
 
 
 def gateway_of(idp) -> FakeGateway:
@@ -49,8 +49,8 @@ def test_each_app_gets_a_different_key_and_the_state_file_stays_private(world): 
     ctx, cli, idp = world
     apply(ctx)
     keys = [ctx.state.app(k)["llm_key"] for k in CONSUMERS]
-    assert len(set(keys)) == 3
-    assert json.loads(ctx.state.path.read_text())["apps"]["trustdesk"]["llm_key"] == keys[2] and oct(ctx.state.path.stat().st_mode & 0o777) == "0o600"
+    assert len(set(keys)) == 4
+    assert json.loads(ctx.state.path.read_text())["apps"]["trustdesk"]["llm_key"] == keys[3] and oct(ctx.state.path.stat().st_mode & 0o777) == "0o600"
 
 
 def test_the_manifest_budget_rpm_and_aliases_reach_the_client(tmp_path):
@@ -91,7 +91,7 @@ def test_a_second_apply_changes_nothing_in_the_gateway(world):  # noqa: F811
     out = dict(apply(ctx2))
     assert {k: ctx2.state.app(k)["llm_key"] for k in CONSUMERS} == keys
     assert [r for r in gw.requests if r[0] != "GET"] == []                                    # no client created, no key issued or rotated
-    assert len(gw.clients) == 3 and all(len(v) == 1 for v in gw.keys.values()) and not getattr(gw, "rotations", 0)
+    assert len(gw.clients) == 4 and all(len(v) == 1 for v in gw.keys.values()) and not getattr(gw, "rotations", 0)
     assert out["TrustDesk: LLM gateway client and key"] == "gateway client 'trustdesk': kept"
     assert [c for c in cli.calls[calls:] if c[1:3] == ["sandbox", "create"]] == [] and cli.sandboxes == sandboxes
 
@@ -117,7 +117,7 @@ def test_a_lost_key_is_rotated_and_the_operator_is_told_what_to_do(world):  # no
     new = state.app("trustdesk")["llm_key"]
     assert new != old and new.startswith("lg_")
     assert "rotated (the key was lost)" in out["TrustDesk: LLM gateway client and key"] and "ecoctl recreate trustdesk" in out["TrustDesk: LLM gateway client and key"]
-    assert gw.rotations == 1 and len(gw.clients) == 3
+    assert gw.rotations == 1 and len(gw.clients) == 4
     g = Gateway("https://x", "k", gw.client(gw.operator_key))
     assert g.chat_test(old, "chat-default")[0] is False and g.chat_test(new, "chat-default")[0] is True       # the old key is dead
     assert State(ctx.state.dir).app("pagerlens")["llm_key"] == ctx.state.app("pagerlens")["llm_key"]            # the others are untouched
@@ -145,7 +145,7 @@ def test_rotate_replaces_every_apps_key_and_leaves_one_live_key_each(world):  # 
     before = {k: ctx.state.app(k)["llm_key"] for k in CONSUMERS}
     apply(again(ctx, cli, idp, rotate=True))
     after = {k: State(ctx.state.dir).app(k)["llm_key"] for k in CONSUMERS}
-    assert all(after[k] != before[k] for k in CONSUMERS) and gw.rotations == 3
+    assert all(after[k] != before[k] for k in CONSUMERS) and gw.rotations == 4
     assert all(sum(not k["revoked"] for k in ks) == 1 for ks in gw.keys.values())
 
 
@@ -181,7 +181,7 @@ def test_apply_waits_for_a_gateway_that_is_still_starting(world, monkeypatch):  
     import ecoctl.llm_client as lc
     monkeypatch.setattr(lc.time, "sleep", lambda s: None)
     apply(ctx)
-    assert len(gateway_of(idp).clients) == 3
+    assert len(gateway_of(idp).clients) == 4
     slow = Gateway("https://x", "k", httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(503))))
     ticks = iter(range(0, 10000, 100))
     with pytest.raises(GatewayError, match="not ready after"):
@@ -226,18 +226,18 @@ def test_env_command_masks_secrets_unless_asked(world, capsys, monkeypatch):  # 
 def test_recreating_the_gateway_recreates_every_app_that_uses_it_with_the_new_url(world, monkeypatch):  # noqa: F811
     ctx, cli, idp = world
     apply(ctx)
-    before = {k: ctx.state.app(k)["sandbox_id"] for k in ("llmgw", "pagerlens", "citypulse", "cpsim", "trustdesk", "paybroker", "identity")}
+    before = {k: ctx.state.app(k)["sandbox_id"] for k in ("llmgw", "pagerlens", "citypulse", "cpsim", "trustdesk", "paybroker", "shopfront", "identity")}
     keys = {k: ctx.state.app(k)["llm_key"] for k in CONSUMERS}
     monkeypatch.setattr(cli_mod, "_ctx", lambda a: again(ctx, cli, idp))
     ns = argparse.Namespace(apps="llmgw", yes=True, file=str(MANIFEST), state=str(ctx.state.dir), execute=False, only=None, rotate=False)
     assert cli_mod.cmd_recreate(ns) == 0
     after = State(ctx.state.dir)
     changed = {k for k, v in before.items() if after.app(k)["sandbox_id"] != v}
-    assert changed == {"llmgw", "pagerlens", "paybroker", "trustdesk", "citypulse", "cpsim"}            # identity was left alone
+    assert changed == {"llmgw", "pagerlens", "paybroker", "shopfront", "trustdesk", "citypulse", "cpsim"}            # identity was left alone
     new_url = after.app("llmgw")["url"]
     for k in CONSUMERS:
         assert cli.sandboxes[f"eco-{k}"]["env"]["LLM_BASE_URL"] == new_url + "/v1" and after.app(k)["llm_key"] == keys[k]     # same key, kept
-    assert len(gateway_of(idp).clients) == 3                                                           # nothing was created again
+    assert len(gateway_of(idp).clients) == 4                                                           # nothing was created again
 
 
 def test_only_a_consumer_also_deploys_the_gateway(tmp_path):
