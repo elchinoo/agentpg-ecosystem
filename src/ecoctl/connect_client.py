@@ -140,7 +140,11 @@ class PayBroker(_Admin):
     def find_merchant(self, name: str) -> dict | None:
         out = self._call("GET", f"/api/merchants?name={quote(name, safe='')}")
         items = out.get("items", []) if isinstance(out, dict) else out
-        return next((m for m in items if m.get("name") == name), None)          # the exact name, whatever the service matched
+        found = next((m for m in items if m.get("name") == name), None)          # the exact name, whatever the service matched
+        if found is not None and "keys" not in found:                            # PayBroker's list has no keys: the single-merchant call does
+            detail = self._call("GET", f"/api/merchants/{quote(str(found['id']), safe='')}")
+            found = {**found, **detail} if isinstance(detail, dict) else found
+        return found
 
     def create_merchant(self, name: str) -> dict:
         return self._call("POST", "/api/merchants", json={"name": name})

@@ -501,3 +501,20 @@ def test_tokens_are_cached_until_shortly_before_they_expire(world):  # noqa: F81
 
 def test_fingerprints_are_the_first_8_hex_of_sha256():
     assert fingerprint("abc") == "ba7816bf" == fp("abc")
+
+
+def test_duplicate_keys_with_the_same_name_are_cleaned_up_but_the_kept_one_stays(world, monkeypatch, capsys):  # noqa: F811
+    ctx, cli, idp = world
+    apply(ctx)
+    mine = rec(ctx)["keys"]["secret"]["id"]
+    merchant(idp)["keys"].append({"id": "key_dup", "kind": "secret", "name": "ecoctl:shopfront:secret", "last4": "abcd"})
+    idp.connect.pb.secrets[merchant(idp)["id"]]["key_dup"] = "sk_live_dup"
+    capsys.readouterr()
+    assert run(ctx, cli, idp, monkeypatch) == 0
+    out = capsys.readouterr().out
+    assert "delete 1 duplicate" in out and rec(ctx)["keys"]["secret"]["id"] == mine
+    active = [k["id"] for k in merchant(idp)["keys"] if not k.get("revoked_at") and k["name"] == "ecoctl:shopfront:secret"]
+    assert active == [mine]
+    capsys.readouterr()
+    idp.connect.pb.writes.clear()
+    assert run(ctx, cli, idp, monkeypatch) == 0 and idp.connect.pb.writes == []          # converged: nothing left to write

@@ -55,7 +55,9 @@ class FakePayBroker:
             self.writes.append((method, path))
         if path == "/api/merchants" and method == "GET":
             name = request.url.params.get("name")
-            return httpx.Response(200, json=[self.view(m) for m in self.merchants.values() if name is None or m["name"] == name])
+            # like PayBroker: the LIST has no keys (only the single-merchant call does), and wraps the rows in {"items": ...}
+            return httpx.Response(200, json={"items": [{k: v for k, v in self.view(m).items() if k != "keys"}
+                                                       for m in self.merchants.values() if name is None or m["name"] == name]})
         if path == "/api/merchants" and method == "POST":
             if self.race:
                 self.race = False
@@ -66,6 +68,8 @@ class FakePayBroker:
         mm = re.fullmatch(r"/api/merchants/([\w-]+)(/webhook|/keys(?:/([\w-]+))?)?", path)
         if mm and mm.group(1) in self.merchants:
             m = self.merchants[mm.group(1)]
+            if not mm.group(2) and method == "GET":
+                return httpx.Response(200, json=self.view(m))
             if not mm.group(2) and method == "PATCH":
                 m["allowed_origins"] = body["allowed_origins"]
                 return httpx.Response(200, json=self.view(m))

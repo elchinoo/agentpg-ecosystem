@@ -138,7 +138,12 @@ def reconcile(ctx: Context, app_key: str, peer_key: str = "paybroker", *, dry_ru
         kname = f"ecoctl:{app_key}:{kind}"
         mine = (rec.get("keys") or {}).get(kind) or {}
         if mine.get("value") and str(mine.get("id")) in listed and not rotate:
-            emit(f"key {kname}: kept")
+            extra = [k for k in listed.values() if k.get("name") == kname and str(k.get("id")) != str(mine.get("id"))]
+            for k in extra:                                                     # duplicates a failed earlier run left behind
+                changed = True
+                if not dry_run:
+                    c.pb.delete_key(mid, str(k["id"]))
+            emit(f"key {kname}: kept" + (f", {would}delete {len(extra)} duplicate" if extra else ""))
             continue
         why = "rotating" if rotate else "PayBroker no longer lists it" if mine.get("value") else "none kept"
         changed = True
