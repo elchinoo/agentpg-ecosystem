@@ -237,7 +237,7 @@ def test_a_lost_state_value_replaces_the_key_and_deletes_the_stale_one(world, mo
     out = capsys.readouterr().out
     new = rec(ctx)["keys"]["publishable"]
     assert new["id"] != old["id"] and "delete 1 stale" in out
-    assert [k["id"] for k in merchant(idp)["keys"] if k["kind"] == "publishable"] == [new["id"]]
+    assert [k["id"] for k in merchant(idp)["keys"] if k["kind"] == "publishable" and not k.get("revoked_at")] == [new["id"]]
     assert ("DELETE", f"/api/merchants/{merchant(idp)['id']}/keys/{old['id']}") in idp.connect.pb.writes
 
 
@@ -265,7 +265,7 @@ def test_rotate_creates_new_keys_and_a_new_webhook_secret_and_pushes_them(world,
     out = capsys.readouterr().out
     new = rec(ctx)
     assert new["webhook_secret"] != old["webhook_secret"] and all(new["keys"][k]["id"] != old["keys"][k]["id"] for k in new["keys"])
-    assert len(merchant(idp)["keys"]) == 2 and "rotating" in out and "delete 1 stale" in out                     # the old keys are gone, not piled up
+    assert len([k for k in merchant(idp)["keys"] if not k.get("revoked_at")]) == 2 and "rotating" in out and "delete 1 stale" in out                     # the old keys are gone, not piled up
     assert idp.connect.shop.puts[-1] == ["publishable_key", "secret_key", "webhook_secret"] and idp.connect.pb.rotations == 2 and "test: ok" in out
     n = len(idp.connect.all_writes())
     assert run(ctx, cli, idp, monkeypatch) == 0 and len(idp.connect.all_writes()) == n                          # and the next run is quiet again

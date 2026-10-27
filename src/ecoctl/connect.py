@@ -132,7 +132,7 @@ def reconcile(ctx: Context, app_key: str, peer_key: str = "paybroker", *, dry_ru
         emit(f"origins: {would}update to {c.app_url}" + (f" (was: {', '.join(have)})" if have else ""))
 
     # 4. keys
-    listed = {str(k.get("id")): k for k in (merchant or {}).get("keys") or []}
+    listed = {str(k.get("id")): k for k in (merchant or {}).get("keys") or [] if not k.get("revoked_at")}   # PayBroker keeps revoked keys in the list
     fresh: set[str] = set()
     for kind in KINDS:
         kname = f"ecoctl:{app_key}:{kind}"

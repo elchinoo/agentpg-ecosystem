@@ -90,8 +90,10 @@ class FakePayBroker:
                 if mm.group(3) not in self.secrets[m["id"]]:
                     return httpx.Response(404, json={"detail": "no such key"})
                 del self.secrets[m["id"]][mm.group(3)]
-                m["keys"] = [k for k in m["keys"] if k["id"] != mm.group(3)]
-                return httpx.Response(204)
+                for k in m["keys"]:                              # like PayBroker: a revoked key stays listed, with revoked_at set
+                    if k["id"] == mm.group(3):
+                        k["revoked_at"] = "2026-10-27T00:00:00Z"
+                return httpx.Response(200, json={"revoked": mm.group(3)})
         return httpx.Response(404, json={"detail": f"unhandled {method} {path}"})
 
     def live_key(self, merchant_id: str, value: str) -> bool:
