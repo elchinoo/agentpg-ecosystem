@@ -106,6 +106,7 @@ apps:
     description: Sample web shop that takes payments through PayBroker
     extensions: [vector, pg_trgm]
     generate: [SHOPFRONT_ENCRYPTION_KEY]
+    env: {SHOPFRONT_TRUSTED_HOPS: "1"}   # one AgentPG proxy in front: the customer's address is the last X-Forwarded-For entry (0 would show the proxy's private address to PayBroker's fraud engine)
     uses: [paybroker]            # the shop's browser and server talk to PayBroker; its keys are entered once in Settings (vault), not here
     url_env: {paybroker: SHOPFRONT_PAYBROKER_URL}
     roles:
