@@ -30,7 +30,7 @@ This page defines what the showcase must achieve and how we know each goal is me
 | G6 | AI access to the database is safe | Read-only MCP user cannot write, cannot read masked columns from base tables, and the masking survives grants after startup | **Met** 2026-10-28 after kit 0.3.1: 7 of 7 apps deny the base tables; writes refused; durability proven live (a new read-only database user re-opened TrustDesk `employee` at 16:52:39, the app closed it again by 16:55:55 without a restart); `masking_drift_tables` 0 on all apps. Before the fix the tables stayed open until the next restart |
 | G7 | Propose, never auto-apply | PagerLens tuning shows proposals, applies nothing by default | **Met** 2026-10-28 (server settings marked not applicable; apply off) |
 | G8 | Swappable pieces are explicit | Docs and videos say in the first 30 s that identity, gateway and vault are swappable | Docs **met**. Videos **not yet re-recorded** |
-| G9 | Deployable by customers their own way | `ecoctl` (fast) and an Ansible recipe that deploys on AgentPG | Both built. Ansible has run only against fakes: first real `--check` dry run **not yet done** |
+| G9 | Deployable by customers their own way | `ecoctl` (fast) and an Ansible recipe that deploys on AgentPG | `ecoctl` **met**. Ansible: **dry run met** 2026-10-28 against the real `agentpg` CLI (`--check`: ok=126, changed=25, failed=0, nothing created; needs only `ansible-core`). A real apply of the `ecoans` fleet has **not been run** |
 | G10 | Each customer video lands one of three moments | "Look how much easier this is" / "look at this cool thing only EDB can do" / "look at the level of work you should be doing" | **Not yet re-recorded**; storyboard per app is in the video scripts |
 | G11 | Platform gaps become requests | Every limitation we hit is written down with evidence for the AgentPG team | Maintained in `06-edb-and-agentpg-capabilities.md` and `08-two-mcp-routes.md` |
 
@@ -58,5 +58,5 @@ This page defines what the showcase must achieve and how we know each goal is me
 
 - Every row above is **Met**, or has a written reason and an owner.
 - ~~All eight apps run kit 0.3.1 with the masking re-assert, and `masking_drift_tables` is 0 on every app.~~ Done 2026-10-28.
-- The Ansible `--check` dry run has been run once on a real account.
+- ~~The Ansible `--check` dry run has been run once on a real account.~~ Done 2026-10-28. A full apply on a throwaway fleet name is still to do.
 - Customer videos re-recorded against the live behaviour above.
