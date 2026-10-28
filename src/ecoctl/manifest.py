@@ -9,13 +9,22 @@ NAME = re.compile(r"^[a-z0-9][a-z0-9-]{1,39}$")          # also the identity pro
 ENV_NAME = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
 SCOPE = re.compile(r"^[a-z0-9][a-z0-9._:-]{0,59}$")
 ROLE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,39}$")
-# Exactly what `agentpg extensions create <name> <instance>` installed on a throwaway instance (Postgres 18, role without superuser), probed 2026-10-28.
+# What `agentpg extensions create <name> <instance>` installs and what works afterwards, on a throwaway instance (Postgres 18, role without superuser).
+# Two probe rounds, 2026-10-28: the first was incomplete; the second covered every extension the platform lists. A new probe may move a name between sets.
 EXTENSIONS = {"vector", "pg_trgm", "unaccent", "citext", "fuzzystrmatch", "tcn", "btree_gin", "btree_gist", "cube", "tsm_system_rows", "tsm_system_time",
-              "postgis", "edb_stat_monitor", "query_advisor", "edb_pg_tuner", "sql_profiler", "aidb"}
-# Refused by the platform: these need a superuser, which an instance's role is not. Kept out on purpose; a new probe may move one into EXTENSIONS.
-NEEDS_SUPERUSER = {"data_redaction", "pg_prewarm", "pgstattuple", "pgrowlocks", "password_profile", "sslinfo", "earthdistance", "pg_surgery"}
+              "postgis", "postgis_raster", "postgis_sfcgal", "postgis_tiger_geocoder", "postgis_topology",
+              "edb_stat_monitor", "query_advisor", "edb_pg_tuner", "sql_profiler", "anon", "pgcrypto", "hstore", "ltree", "tablefunc", "intarray", "isn", "lo",
+              "seg", "dict_int", "pgfs", "aidb",
+              "refdata", "bluefin", "autocluster"}          # the last three are EDB-specific: they install, usefulness untested
+# Refused by the platform: these need a superuser, which an instance's role is not.
+NEEDS_SUPERUSER = {"amcheck", "autoinc", "bloom", "data_redaction", "dblink", "dict_xsyn", "earthdistance", "file_fdw", "insert_username", "intagg", "moddatetime",
+                   "pageinspect", "password_profile", "pg_buffercache", "pg_freespacemap", "pg_logicalinspect", "pg_prewarm", "pg_surgery", "pg_visibility",
+                   "pg_walinspect", "pgrowlocks", "pgstattuple", "postgres_fdw", "refint", "sslinfo", "xml2"}
 # These install but nothing in them can be used (permission denied on their tables or functions): no app should list them.
 INSTALLS_BUT_UNUSABLE = {"address_standardizer", "address_standardizer_data_us", "system_stats"}
+# pgaa (EDB Analytics Accelerator) installs with its functions, but its core calls need the bdr extension (EDB Postgres Distributed) or an object store.
+# Rejected with its own message rather than accepted: an app listing it would suggest acceleration that cannot run here.
+INSTALLS_NEEDS_BDR_OR_OBJECT_STORE = {"pgaa"}
 PLANS = {"small", "medium", "large"}
 SECRETISH = re.compile(r"(SECRET|PASSWORD|PASSWD|TOKEN|KEY|DSN|CREDENTIAL)", re.I)
 URL_WITH_PASSWORD = re.compile(r"://[^/\s:@]+:[^/\s@]+@")
@@ -290,6 +299,8 @@ def _app(key: str, raw: dict, where: str, *, identity: bool = False) -> App:
             raise ManifestError(f"{where}.extensions: {e} needs superuser on this platform (AgentPG refuses it for an instance's role)")
         if isinstance(e, str) and (e in INSTALLS_BUT_UNUSABLE or e.startswith("address_standardizer")):
             raise ManifestError(f"{where}.extensions: {e} installs but is unusable here (its tables or functions are permission-denied for the instance's role)")
+        if e in INSTALLS_NEEDS_BDR_OR_OBJECT_STORE:
+            raise ManifestError(f"{where}.extensions: {e} installs, but needs bdr (EDB Postgres Distributed) or an object store, neither of which an AgentPG instance has, so it cannot be used here")
         if e == "uuid-ossp":
             raise ManifestError(f"{where}.extensions: uuid-ossp is rejected by the agentpg CLI (the hyphen); use gen_random_uuid(), which Postgres has built in")
         raise ManifestError(f"{where}.extensions: unsupported {e} (allowed: {', '.join(sorted(EXTENSIONS))})")

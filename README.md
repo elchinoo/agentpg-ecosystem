@@ -22,7 +22,7 @@ PayBroker, ShopFront and the LLM gateway all read the same `<PREFIX>_OIDC_*` var
 rotation, the release loop, troubleshooting, the e2e suite, AIDB status, how to add an app). **Tutorial video script:
 [docs/VIDEO-SCRIPT.md](docs/VIDEO-SCRIPT.md)** ("from zero to a running ecosystem with ecoctl"). Documents 01 to 04 under `docs/` are dated reports; GUIDE.md is the current reference.
 
-**EDB and AgentPG capabilities** (which extensions each app lists, what is blocked and why): [GUIDE section 18](docs/GUIDE.md#18-edb-and-agentpg-capabilities-used) and the probe report [docs/06-edb-and-agentpg-capabilities.md](docs/06-edb-and-agentpg-capabilities.md). New commands: `ecoctl insights` (query-advisor recommendations per app database) and `ecoctl mcp users|config|serve|claude|check` (read-only AI access through AgentPG's database MCP server): [GUIDE sections 7.9 and 7.10](docs/GUIDE.md#79-insights-app---all---json).
+**EDB and AgentPG capabilities** (which extensions each app lists, what is blocked and why; probed in two rounds, the first incomplete): [GUIDE section 18](docs/GUIDE.md#18-edb-and-agentpg-capabilities-used) and the probe report [docs/06-edb-and-agentpg-capabilities.md](docs/06-edb-and-agentpg-capabilities.md). New commands: `ecoctl insights` (query-advisor recommendations per app database) and `ecoctl mcp users|config|serve|claude|check` (read-only AI access through AgentPG's database MCP server): [GUIDE sections 7.9 and 7.10](docs/GUIDE.md#79-insights-app---all---json).
 
 ## Use
 

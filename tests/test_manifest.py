@@ -94,7 +94,12 @@ def test_validation_messages(mutate, message):
 
 
 INSTALLABLE = ["vector", "pg_trgm", "unaccent", "citext", "fuzzystrmatch", "tcn", "btree_gin", "btree_gist", "cube", "tsm_system_rows", "tsm_system_time",
-               "postgis", "edb_stat_monitor", "query_advisor", "edb_pg_tuner", "sql_profiler", "aidb"]
+               "postgis", "edb_stat_monitor", "query_advisor", "edb_pg_tuner", "sql_profiler", "aidb",
+               "postgis_raster", "postgis_sfcgal", "postgis_tiger_geocoder", "postgis_topology", "anon", "pgcrypto", "hstore", "ltree", "tablefunc", "intarray",
+               "isn", "lo", "seg", "dict_int", "pgfs", "refdata", "bluefin", "autocluster"]
+SUPERUSER = ["amcheck", "autoinc", "bloom", "data_redaction", "dblink", "dict_xsyn", "earthdistance", "file_fdw", "insert_username", "intagg", "moddatetime",
+             "pageinspect", "password_profile", "pg_buffercache", "pg_freespacemap", "pg_logicalinspect", "pg_prewarm", "pg_surgery", "pg_visibility",
+             "pg_walinspect", "pgrowlocks", "pgstattuple", "postgres_fdw", "refint", "sslinfo", "xml2"]
 
 
 def test_the_allow_list_is_exactly_what_the_platform_installs():
@@ -106,13 +111,27 @@ def test_the_allow_list_is_exactly_what_the_platform_installs():
     ("data_redaction", "needs superuser on this platform"), ("pg_prewarm", "needs superuser"), ("pgstattuple", "needs superuser"), ("pgrowlocks", "needs superuser"),
     ("password_profile", "needs superuser"), ("sslinfo", "needs superuser"), ("earthdistance", "needs superuser"), ("pg_surgery", "needs superuser"),
     ("address_standardizer", "installs but is unusable"), ("address_standardizer_data_us", "installs but is unusable"), ("system_stats", "installs but is unusable"),
-    ("uuid-ossp", "hyphen"), ("pgcrypto", "unsupported"), ("hstore", "unsupported"), ("pgfs", "unsupported"), ("anon", "unsupported"),
+    ("uuid-ossp", "hyphen"), ("pgaa", "needs bdr"), ("pg_nonexistent", "unsupported"),
 ])
 def test_refused_and_unusable_extensions_say_why(ext, message):
     d = doc()
     d["apps"]["trustdesk"]["extensions"] = ["vector", ext]
     with pytest.raises(ManifestError, match=message):
         parse(d)
+
+
+@pytest.mark.parametrize("ext", SUPERUSER)
+def test_every_refused_extension_needs_superuser(ext):
+    d = doc()
+    d["apps"]["trustdesk"]["extensions"] = ["vector", ext]
+    with pytest.raises(ManifestError, match="needs superuser on this platform"):
+        parse(d)
+
+
+def test_the_groups_do_not_overlap():
+    from ecoctl.manifest import EXTENSIONS, INSTALLS_BUT_UNUSABLE, INSTALLS_NEEDS_BDR_OR_OBJECT_STORE, NEEDS_SUPERUSER
+    assert not (EXTENSIONS & NEEDS_SUPERUSER) and not (EXTENSIONS & INSTALLS_BUT_UNUSABLE) and not (EXTENSIONS & INSTALLS_NEEDS_BDR_OR_OBJECT_STORE)
+    assert NEEDS_SUPERUSER == set(SUPERUSER)
 
 
 @pytest.mark.parametrize("ext", INSTALLABLE)
