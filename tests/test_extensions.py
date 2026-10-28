@@ -7,7 +7,7 @@ from ecoctl.plan import build, installed_extensions, missing_extensions
 from ecoctl.state import State
 from tests.test_plan import MANIFEST, again, apply, world  # noqa: F401  (the fixture)
 
-BASE = {"query_advisor", "edb_stat_monitor"}
+BASE = {"query_advisor", "edb_stat_monitor", "edb_pg_tuner"}
 EXPECTED = {
     "identity": BASE, "llmgw": BASE, "cpsim": BASE,
     "trustdesk": BASE | {"vector", "pg_trgm", "unaccent", "tcn"},
@@ -45,7 +45,7 @@ def test_an_existing_instance_gets_only_the_missing_extensions(world):  # noqa: 
     assert "extensions create unaccent" in plan_text
     apply(ctx2)
     sf = cli.instances["eco-shopfront-db"]
-    assert {e for i, e in cli.extensions} == {"query_advisor", "edb_stat_monitor", "unaccent", "fuzzystrmatch"} and {i for i, _ in cli.extensions} == {sf}
+    assert {e for i, e in cli.extensions} == {"query_advisor", "edb_stat_monitor", "edb_pg_tuner", "unaccent", "fuzzystrmatch"} and {i for i, _ in cli.extensions} == {sf}
     calls = len(cli.calls)
     apply(again(ctx, cli, idp))
     assert [c for c in cli.calls[calls:] if c[1] == "extensions"] == []                           # a third run creates nothing
@@ -60,7 +60,7 @@ def test_the_plan_of_an_existing_instance_shows_only_what_is_missing(world):  # 
     ctx2 = again(ctx, cli, idp, state=State(ctx.state.dir))
     step = next(s for s in build(ctx2) if s.title == "CityPulse: database and sandbox")
     lines = [d for d in step.detail if "extensions create" in d]
-    assert sorted(ln.split()[3] for ln in lines) == ["edb_stat_monitor", "postgis"]
+    assert sorted(ln.split()[3] for ln in lines) == ["edb_pg_tuner", "edb_stat_monitor", "postgis"]
     assert any("wait until it is running" in d for d in step.detail)
     paybroker = next(s for s in build(ctx2) if s.title == "PayBroker: database and sandbox")
     assert any("already created" in d for d in paybroker.detail)
@@ -106,4 +106,4 @@ def test_a_state_from_before_the_list_is_read_as_vector_and_pg_trgm(world):  # n
     st = State(ctx.state.dir / "legacy")
     st.app("trustdesk")["extensions_done"] = True
     assert installed_extensions(st, m.apps["trustdesk"]) == ["vector", "pg_trgm"]
-    assert missing_extensions(st, m.apps["trustdesk"]) == ["query_advisor", "edb_stat_monitor", "unaccent", "tcn"]
+    assert missing_extensions(st, m.apps["trustdesk"]) == ["query_advisor", "edb_stat_monitor", "edb_pg_tuner", "unaccent", "tcn"]

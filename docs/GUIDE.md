@@ -428,13 +428,13 @@ characters (the merchant's exact name in PayBroker). Section 7.8 says what it do
 
 | App | `llm` | `calls` (scopes) | `uses` | `exposes` | Other |
 |---|---|---|---|---|---|
-| `trustdesk` | yes | | | `trustdesk.requests.write`, `.kb.read`, `.metrics` | `extensions: [vector, pg_trgm, query_advisor, edb_stat_monitor, unaccent, tcn]`, `AUTO_SEED=true`, roles admin, approver, viewer |
-| `pagerlens` | yes | | | `pagerlens.ingest`, `.read`, `.metrics` | `extensions: [vector, pg_trgm, query_advisor, edb_stat_monitor, tcn]`, roles admin, responder, viewer |
-| `citypulse` | | `pagerlens`: `pagerlens.ingest` | | `citypulse.ingest`, `.read`, `.metrics` | `extensions: [query_advisor, edb_stat_monitor, postgis]`, `CITYPULSE_ROLE=api` |
-| `cpsim` | yes | `citypulse`: `.ingest`; `trustdesk`: `.requests.write`; `pagerlens`: `.ingest`; `llmgw`: `llmgw.use`; `shopfront`: `.api` | `paybroker`, `identity` | `cpsim.read`, `.metrics` | `extensions: [query_advisor, edb_stat_monitor]`, `env_prefix: CPSIM`, image `citypulsesimulator` |
-| `paybroker` | yes | | | `paybroker.read`, `.metrics`, `.admin` | `extensions: [vector, query_advisor, edb_stat_monitor, fuzzystrmatch]`; five roles |
-| `shopfront` | yes | | `paybroker` | `shopfront.api`, `.read`, `.metrics`, `.admin` | `extensions: [vector, pg_trgm, query_advisor, edb_stat_monitor, unaccent, fuzzystrmatch]`, `connect.paybroker.merchant: ShopFront`, `SHOPFRONT_TRUSTED_HOPS=1`, `url_env.paybroker=SHOPFRONT_PAYBROKER_URL` |
-| `llmgw` | (is the gateway) | | | `llmgw.use`, `.read`, `.metrics` | `extensions: [query_advisor, edb_stat_monitor]`, `env_prefix: LLMGW`, image `llm-gateway` |
+| `trustdesk` | yes | | | `trustdesk.requests.write`, `.kb.read`, `.metrics` | `extensions: [vector, pg_trgm, query_advisor, edb_stat_monitor, edb_pg_tuner, unaccent, tcn]`, `AUTO_SEED=true`, roles admin, approver, viewer |
+| `pagerlens` | yes | | | `pagerlens.ingest`, `.read`, `.metrics` | `extensions: [vector, pg_trgm, query_advisor, edb_stat_monitor, edb_pg_tuner, tcn]`, roles admin, responder, viewer |
+| `citypulse` | | `pagerlens`: `pagerlens.ingest` | | `citypulse.ingest`, `.read`, `.metrics` | `extensions: [query_advisor, edb_stat_monitor, edb_pg_tuner, postgis]`, `CITYPULSE_ROLE=api` |
+| `cpsim` | yes | `citypulse`: `.ingest`; `trustdesk`: `.requests.write`; `pagerlens`: `.ingest`; `llmgw`: `llmgw.use`; `shopfront`: `.api` | `paybroker`, `identity` | `cpsim.read`, `.metrics` | `extensions: [query_advisor, edb_stat_monitor, edb_pg_tuner]`, `env_prefix: CPSIM`, image `citypulsesimulator` |
+| `paybroker` | yes | | | `paybroker.read`, `.metrics`, `.admin` | `extensions: [vector, query_advisor, edb_stat_monitor, edb_pg_tuner, fuzzystrmatch]`; five roles |
+| `shopfront` | yes | | `paybroker` | `shopfront.api`, `.read`, `.metrics`, `.admin` | `extensions: [vector, pg_trgm, query_advisor, edb_stat_monitor, edb_pg_tuner, unaccent, fuzzystrmatch]`, `connect.paybroker.merchant: ShopFront`, `SHOPFRONT_TRUSTED_HOPS=1`, `url_env.paybroker=SHOPFRONT_PAYBROKER_URL` |
+| `llmgw` | (is the gateway) | | | `llmgw.use`, `.read`, `.metrics` | `extensions: [query_advisor, edb_stat_monitor, edb_pg_tuner]`, `env_prefix: LLMGW`, image `llm-gateway` |
 | `pagerlens-agent` | | `pagerlens`: `pagerlens.ingest` | | | `web: false`, `deploy: false`, `url_env.pagerlens=PAGERLENS_URL` |
 
 ## 7. Commands

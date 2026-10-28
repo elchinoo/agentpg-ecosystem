@@ -26,14 +26,14 @@ identity:
   image: identity
   auto_pause: false              # everything signs in through it: never let it sleep
   generate: [IDENTITY_ENCRYPTION_KEY]
-  extensions: [query_advisor, edb_stat_monitor]
+  extensions: [query_advisor, edb_stat_monitor, edb_pg_tuner]
 
 apps:
   trustdesk:
     name: TrustDesk
     llm: true                    # wired to the LLM gateway: LLM_BASE_URL, LLM_API_KEY, LLM_CHAT_MODEL, EMBEDDING_MODEL, EMBEDDING_DIM
     description: Compliance workspace
-    extensions: [vector, pg_trgm, query_advisor, edb_stat_monitor, unaccent, tcn]
+    extensions: [vector, pg_trgm, query_advisor, edb_stat_monitor, edb_pg_tuner, unaccent, tcn]
     generate: [TRUSTDESK_ENCRYPTION_KEY]
     env: {AUTO_SEED: "true"}
     roles:
@@ -46,7 +46,7 @@ apps:
     name: PagerLens
     llm: true                    # wired to the LLM gateway: LLM_BASE_URL, LLM_API_KEY, LLM_CHAT_MODEL, EMBEDDING_MODEL, EMBEDDING_DIM
     description: Observability and incident investigation
-    extensions: [vector, pg_trgm, query_advisor, edb_stat_monitor, tcn]
+    extensions: [vector, pg_trgm, query_advisor, edb_stat_monitor, edb_pg_tuner, tcn]
     generate: [PAGERLENS_ENCRYPTION_KEY]
     roles:
       - {name: admin, description: "Everything"}
@@ -57,7 +57,7 @@ apps:
   citypulse:
     name: CityPulse
     description: Smart-city IoT sample
-    extensions: [query_advisor, edb_stat_monitor, postgis]
+    extensions: [query_advisor, edb_stat_monitor, edb_pg_tuner, postgis]
     generate: []
     env:
       CITYPULSE_ROLE: api            # no built-in simulator: the data comes from CityPulse Simulator, one city per source
@@ -73,7 +73,7 @@ apps:
     name: CityPulse Simulator
     image: citypulsesimulator          # the image is named after the repository
     description: Simulated sensors and companies that generate load
-    extensions: [query_advisor, edb_stat_monitor]
+    extensions: [query_advisor, edb_stat_monitor, edb_pg_tuner]
     env_prefix: CPSIM
     llm: true                            # a gateway client named cpsim: LLM_API_KEY etc. for the llmgw workload
     generate: [CPSIM_ENCRYPTION_KEY]     # unlocks the credential store (Settings > Credentials) after a restart
@@ -94,7 +94,7 @@ apps:
     name: PayBroker
     llm: true                    # wired to the LLM gateway: LLM_BASE_URL, LLM_API_KEY, LLM_CHAT_MODEL, EMBEDDING_MODEL, EMBEDDING_DIM
     description: Payment broker with a three-tier fraud engine
-    extensions: [vector, query_advisor, edb_stat_monitor, fuzzystrmatch]
+    extensions: [vector, query_advisor, edb_stat_monitor, edb_pg_tuner, fuzzystrmatch]
     generate: [PAYBROKER_ENCRYPTION_KEY]
     roles:
       - {name: admin, description: "Everything"}
@@ -108,7 +108,7 @@ apps:
     name: ShopFront
     llm: true                    # wired to the LLM gateway: semantic search and the order-support assistant
     description: Sample web shop that takes payments through PayBroker
-    extensions: [vector, pg_trgm, query_advisor, edb_stat_monitor, unaccent, fuzzystrmatch]
+    extensions: [vector, pg_trgm, query_advisor, edb_stat_monitor, edb_pg_tuner, unaccent, fuzzystrmatch]
     generate: [SHOPFRONT_ENCRYPTION_KEY]
     env: {SHOPFRONT_TRUSTED_HOPS: "1"}   # one AgentPG proxy in front: the customer's address is the last X-Forwarded-For entry (0 would show the proxy's private address to PayBroker's fraud engine)
     uses: [paybroker]            # the shop's browser and server talk to PayBroker; its keys and webhook secret are pushed into Settings (vault) by `connect`, not set here
@@ -125,7 +125,7 @@ apps:
     name: LLM gateway
     image: llm-gateway
     description: One place for model provider keys, budgets and usage
-    extensions: [query_advisor, edb_stat_monitor]
+    extensions: [query_advisor, edb_stat_monitor, edb_pg_tuner]
     env_prefix: LLMGW
     generate: [LLMGW_ENCRYPTION_KEY]
     roles:
