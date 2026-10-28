@@ -1,5 +1,7 @@
 # Making the ecosystem a showcase
 
+> **Dated report, 2026-10-25.** This is a snapshot of the showcase plan as of that date and is not updated. The current reference is [GUIDE.md](GUIDE.md) (see its section on differences); where the two disagree, GUIDE.md wins.
+
 Goal: each project is something EDB can put in front of a customer or a conference audience as proof of **AIDB** and **AgentPG**. "State of the art" is not a feeling; this plan turns it into checkable work. Companion to [01](01-state-of-the-projects.md), [02](02-deployment-operations-integration.md) and [03](03-aidb-integration.md).
 
 ## 1. Where we are against that bar (honest assessment)

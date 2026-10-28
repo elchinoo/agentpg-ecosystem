@@ -1,0 +1,157 @@
+## 1 am_michael
+Welcome to the first video in this series, about the AgentPG ecosystem.
+
+It is a set of small sample apps for EDB AIDB and AgentPG. Each one runs in its own sandbox, with its own Postgres database.
+
+One tool, ecoctl, deploys the whole fleet from a single file.
+
+TrustDesk checks requests against company policy. PagerLens investigates incidents. CityPulse watches a smart city.
+
+A simulator feeds it. PayBroker routes payments. ShopFront is a web shop that pays through it.
+
+Two shared services sit underneath. Identity handles sign-in, and issues short-lived service tokens. The LLM gateway is the one door to models, with its own key and limits for each app.
+
+Now the connections. The simulator sends readings to CityPulse, and CityPulse reports trouble to PagerLens.
+
+ShopFront sends payments to PayBroker, which sends a signed webhook back. TrustDesk asks the gateway to check requests against policy.
+
+That makes eight sandboxes. In this video we plan a deployment, run it, and watch the apps talk. The data is synthetic, and the cards are test cards.
+
+## 2 am_michael
+First, what you need.
+
+The AgentPG command line tool, logged in. Then uv, with Python 3.11. And public container images.
+
+Installing ecoctl is two commands. Then run validate.
+
+It lists eight apps after identity, with the gateway first, because the others depend on it. The PagerLens agent is only registered. It runs outside AgentPG.
+
+That order is worked out for you. It is not written down anywhere.
+
+## 3 af_heart
+Now the manifest: the whole fleet, in one file. Each app has a name, its database extensions, and its roles.
+
+Exposes lists the scopes an app offers. Calls lists the scopes it may ask of other apps.
+
+CityPulse may call PagerLens, and nothing else. A typo here fails validation, not production.
+
+Uses gives an app another app's address, with no scope. The simulator uses PayBroker, with a merchant key.
+
+And llm true wires an app to the gateway.
+
+Secrets never appear here. A name that looks like a secret is refused. List it under generate, and ecoctl creates the value.
+
+Groups at the bottom map people to roles across the fleet. So access is one line, not a round of clicking.
+
+## 4 af_heart
+Before anything runs, ask for a plan.
+
+Asking for TrustDesk alone pulls in what it needs: the identity provider, and the gateway.
+
+The plan lists every real command and every identity call. Secrets are masked.
+
+Each app is registered for sign-on, gets its own gateway key, then a database and a sandbox.
+
+Last, its sign-in points at its real address, and two access groups are set.
+
+Plan changes nothing, and calls nothing. Run it as often as you like.
+
+## 5 am_eric
+Now, applying. Without execute, apply is the same dry run, and it ends by saying nothing was changed.
+
+Add execute, and it shows the plan, then asks before it spends anything on your account.
+
+[pause 1.5]
+
+We answer no, and nothing is created.
+
+Apply is safe to run again. It finds what exists by name, and never rotates a secret unless you ask.
+
+If a step fails, progress is saved. Run the same command again.
+
+Everything is named after the fleet prefix, so one account can hold several fleets. A deleted sandbox is simply noticed, and created again.
+
+## 6 am_eric
+Creating real databases takes minutes.
+
+So for the next part, we follow one real run on a demo account, sped up.
+
+## 7 am_eric
+We run apply with execute, for TrustDesk only.
+
+Identity comes first, because its address is the issuer every app trusts. Then the gateway, because TrustDesk uses a model through it.
+
+For TrustDesk, ecoctl registers the app and creates its own gateway key, with a rate limit and a monthly token budget.
+
+Then it creates the sandbox, with that key in its environment. No one pastes a secret.
+
+On a real run, you see one line per step, each ending with what happened. At the end come the addresses, and a reminder to join a group.
+
+Secrets live in one private file next to the manifest. It is the only copy, so back it up.
+
+## 8 am_eric
+Status is the check you will use most.
+
+First, every app answers health and readiness. The real output is a table, with one row per app.
+
+Second, the gateway. Each client exists, its limits match the manifest, and a tiny chat call with its own key goes through.
+
+Third, the identity registry matches what is deployed.
+
+Exit code zero means green, so it works in a script.
+
+If a limit was changed by hand, status warns about drift. One sync command shows it, or restores the manifest.
+
+## 9 af_bella
+Now the apps themselves, starting with the first sign-in. This step is you.
+
+In the identity console, create yourself as a user. Then add yourself to the group ecosystem admins. ecoctl created that group, with the admin role in every app.
+
+Open the launcher. It has one tile per app, and one sign-in.
+
+Roles are per app. Someone in the risk team is a risk manager in PayBroker, and read-only in PagerLens. Google or GitHub login is optional.
+
+## 10 af_bella
+Now watch the apps work together.
+
+The simulator starts a city, and sends readings to CityPulse with a short-lived identity token. Not a copied secret.
+
+Press burst, and CityPulse degrades and reports to PagerLens.
+
+PagerLens opens an incident, gathers evidence, and ranks likely causes. Each one has the data that supports or refutes it.
+
+To reason, it asks a model through the gateway.
+
+The simulator also sends payments and policy requests. So the fraud engine, and TrustDesk, run under load.
+
+Every call is limited to the scope the manifest granted.
+
+## 11 af_bella
+A request arrives in TrustDesk. A model checks it against policy, and the app verifies every quote word for word.
+
+A person still decides.
+
+Now ShopFront. A customer pays with a test card. It is tokenized in the browser, so it never touches the shop's server.
+
+PayBroker scores the payment, and signs a webhook back to the shop.
+
+ecoctl wired that pair itself: the merchant, the allowed origin, the keys, and the webhook. Run connect any time to repair it.
+
+The model behind all of this is one alias in the gateway. Repoint it once, and every app follows.
+
+## 12 am_michael
+To wrap up: when you ship a new image, you recreate the app.
+
+A sandbox's address contains its id. So apps that depend on it are recreated too, and the connection is repaired.
+
+ecoctl lists that cascade, and asks first.
+
+[pause 1.2]
+
+We answer no, and nothing is deleted.
+
+That is the whole loop. One manifest, one state file, one guide.
+
+Add an app with a few lines. Rotating every secret is one flag, then a recreate. The state file is your backup target.
+
+Thanks for watching. The full guide is linked below, and the other videos in this series go deeper into each part.

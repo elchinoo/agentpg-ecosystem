@@ -1,15 +1,20 @@
 # Deploying the ecosystem on AgentPG
 
-This guide takes you from nothing to a running fleet you can test live: an **identity provider**, six apps that sign in through it, and the
-shared **LLM gateway**, every one a sandbox with its own Postgres database on [AgentPG](https://www.agentpg.dev/). It uses `ecoctl`
+This guide takes you from nothing to a running fleet you can test live: an **identity provider**, seven apps that sign in through it (one of them the
+shared **LLM gateway**), every one a sandbox with its own Postgres database on [AgentPG](https://www.agentpg.dev/). It uses `ecoctl`
 (this repository) for the repetitive parts and tells you exactly what is manual.
 
-> **Status of this procedure.** Run end to end on a live AgentPG account on 2026-10-22: all seven sandboxes came up healthy, single sign-on
-> worked on every app (scripted browser flow against the real identity provider, role `<app>:admin` and `*` permissions), the Simulator fed
+> **Current state (2026-10-27).** The fleet is eight sandboxes (identity, six apps and the LLM gateway, with ShopFront the newest), four apps use the
+> LLM gateway (TrustDesk, PagerLens, PayBroker, ShopFront), and the shipped `ecosystem.yaml` sets `embed_dimensions: 1536` (text-embedding-3-small).
+> This is the click-by-click procedure; [GUIDE.md](GUIDE.md) is the current reference for everything else (manifest and command reference,
+> how the apps interact, release loop, AIDB status).
+>
+> **Status of the procedure.** First run end to end on a live AgentPG account on 2026-10-22, with the seven sandboxes that existed then: all came up healthy,
+> single sign-on worked on every app (scripted browser flow against the real identity provider, role `<app>:admin` and `*` permissions), the Simulator fed
 > CityPulse with a minted service token (93 readings sent, 0 failures), CityPulse reported to PagerLens (3 services healthy), the Simulator's
 > companies created 14 requests in TrustDesk, PayBroker processed 60 demo payments (62% approved, p95 137 ms with simulated connector latency), and
-> TrustDesk called the model through the gateway as an ordinary account. **Not seen live:** the UIs in a browser (the author's browser pane could not
-> open these URLs), Google/GitHub login, and any real model provider. The first live run found six problems, all fixed (see the end of section 12).
+> TrustDesk called the model through the gateway as an ordinary account. ShopFront and its connection to PayBroker (section 9b) were added later; the
+> UIs were first seen in a real browser on 2026-10-25 (see doc 01). **Not seen live:** Google/GitHub login. The first live run found six problems, all fixed (see the end of section 14).
 
 ## Contents
 1. [What you will create](#1-what-you-will-create)
@@ -40,9 +45,10 @@ shared **LLM gateway**, every one a sandbox with its own Postgres database on [A
 | `eco-citypulse` | `.../citypulse` | Smart-city IoT sample that reports to PagerLens | identity, pagerlens |
 | `eco-cpsim` | `.../citypulsesimulator` | Simulated sensors and companies that generate load | identity, citypulse, trustdesk, pagerlens |
 | `eco-paybroker` | `.../paybroker` | Payment broker with a three-tier fraud engine | identity |
+| `eco-shopfront` | `.../shopfront` | Sample web shop that pays through PayBroker, with an order-support assistant | identity, paybroker |
 | `eco-llmgw` | `.../llm-gateway` | One place for model provider keys, budgets and usage | identity |
 
-Each sandbox gets its **own database instance** (`eco-<app>-db`): that is **seven instances and seven sandboxes**. If your AgentPG plan
+Each sandbox gets its **own database instance** (`eco-<app>-db`): that is **eight instances and eight sandboxes**. If your AgentPG plan
 allows fewer, deploy a subset (section 5): `ecoctl apply --only trustdesk` creates the identity provider, TrustDesk and nothing else.
 
 What `ecoctl` does for you, in order: creates the databases and sandboxes; registers every app in the identity provider (its roles, a
@@ -59,7 +65,7 @@ CityPulse and TrustDesk) fetch short-lived service tokens from the provider inst
 
 - **AgentPG account and CLI.** `agentpg login` (opens a browser flow). Check with `agentpg account`; if it says "Invalid or expired token",
   log in again. The CLI creates instances (`agentpg create`) and sandboxes (`agentpg sandbox create`).
-- **Capacity.** Seven instances and seven sandboxes for the full fleet (see above). Free tiers have allowed one sandbox in the past; check
+- **Capacity.** Eight instances and eight sandboxes for the full fleet (see above). Free tiers have allowed one sandbox in the past; check
   your plan before you start, and deploy in stages if needed.
 - **A machine to run `ecoctl` from**: Python 3.11+ and [uv](https://docs.astral.sh/uv/). It keeps secrets in `.ecosystem/` there
   (git-ignored, mode 0600): treat that directory like a password file and back it up somewhere private. Secrets reach the sandboxes as
@@ -73,13 +79,13 @@ CityPulse and TrustDesk) fetch short-lived service tokens from the provider inst
 AgentPG pulls the image anonymously, so each package must be public. **GitHub offers no API for this; it is a click per package.**
 
 1. Wait for the builds: `gh run list -R elchinoo/<repo> -w "Build and publish image" -L 1` should say `completed success` for `identity`,
-   `TrustDesk`, `PagerLens`, `CityPulse`, `CityPulseSimulator`, `PayBroker` and `llm-gateway`.
+   `TrustDesk`, `PagerLens`, `CityPulse`, `CityPulseSimulator`, `PayBroker`, `llm-gateway` and `shopfront`.
 2. Open <https://github.com/elchinoo?tab=packages>. For **each** package: open it → **Package settings** → **Danger Zone** →
    **Change visibility** → **Public**. (If a package is missing, its first build has not finished.)
 3. Verify from your machine, with no login:
 
 ```bash
-for i in identity trustdesk pagerlens citypulse citypulsesimulator paybroker llm-gateway; do
+for i in identity trustdesk pagerlens citypulse citypulsesimulator paybroker llm-gateway shopfront; do
   tok=$(curl -s "https://ghcr.io/token?scope=repository:elchinoo/$i:pull" | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')
   code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $tok" -H 'Accept: application/vnd.oci.image.index.v1+json' "https://ghcr.io/v2/elchinoo/$i/manifests/latest")
   echo "$i: $code"        # 200 = public and present; 401/404 = still private or not built
@@ -117,7 +123,7 @@ Always look before you leap:
 ```
 
 Then deploy a small slice first. `--only` takes a comma-separated list and automatically adds what those apps **call** (the simulator pulls
-in CityPulse, TrustDesk, PagerLens and PayBroker), and the identity provider is always included.
+in CityPulse, TrustDesk, PagerLens, PayBroker and the gateway), and the identity provider is always included.
 
 ```bash
 # Stage 1: identity + TrustDesk + the LLM gateway TrustDesk uses (3 instances, 3 sandboxes). Prove sign-in and the LLM wiring work (ecoctl status) before adding more.
@@ -126,7 +132,7 @@ in CityPulse, TrustDesk, PagerLens and PayBroker), and the identity provider is 
 # Stage 2: the observability trio plus the load generator
 .venv/bin/ecoctl apply --only cpsim --execute        # adds pagerlens, citypulse and paybroker (the simulator `uses` it; llmgw, trustdesk: already there)
 
-# Stage 3: the rest
+# Stage 3: the rest (ShopFront, which also connects itself to PayBroker, section 9b)
 .venv/bin/ecoctl apply --execute                     # anything not pulled in yet
 ```
 
@@ -187,6 +193,7 @@ with your **roles in that app**. What to expect:
 | CityPulse | `admin`, `operator`, `viewer` | the same |
 | CityPulse Simulator | `admin`, `operator`, `viewer` | the same |
 | PayBroker | `admin`, `risk_manager`, `analyst`, `operator`, `viewer` | the same |
+| ShopFront | `admin`, `staff`, `viewer` | the same |
 | LLM gateway | `admin`, `operator`, `viewer` | the same |
 
 Check that **a role really limits what you can do**: add a test user to `viewer` only, sign in as them, and confirm the app hides or refuses
@@ -232,11 +239,10 @@ Do these in order; each takes a few minutes. Use `agentpg sandbox logs <id>` whe
 
 ## 9. The LLM gateway is wired to the apps for you
 
-Nothing to paste. Every app with `llm: true` in `ecosystem.yaml` (TrustDesk, PagerLens, PayBroker) is wired by `ecoctl apply --execute`:
+Nothing to paste. Every app with `llm: true` in `ecosystem.yaml` (TrustDesk, PagerLens, PayBroker, ShopFront) is wired by `ecoctl apply --execute`:
 
 1. The gateway sandbox is created with a static **operator key** (`LLMGW_API_KEY`, generated, kept in `.ecosystem/state.json`) and with
-   the names of the **default aliases** it seeds on its built-in echo provider: `chat-default` (chat) and `embed-default` (embeddings, 768
-   numbers, what TrustDesk and PagerLens expect).
+   the names of the **default aliases** it seeds on its built-in echo provider: `chat-default` (chat) and `embed-default` (embeddings, `llm.embed_dimensions` numbers: 1536 in the shipped manifest, 768 is the code default and the size of the built-in echo model; the apps and the gateway are given the same value).
 2. Before each consuming app is created, `ecoctl` uses that key to create **one gateway client per app** (named after the app, allowed
    only those two aliases (plus any extras listed for the app), 60 requests/minute and 5,000,000 tokens/month by default, from `llm:` in the manifest, optionally overridden per app) and keeps its `lg_` key.
    The gateway shows a key once; `ecoctl` keeps it so the next run changes nothing.
@@ -248,9 +254,9 @@ Nothing to paste. Every app with `llm: true` in `ecosystem.yaml` (TrustDesk, Pag
 | `LLM_API_KEY` | the app's own client key (secret: shown as `***` in plans and by `ecoctl env`) |
 | `LLM_CHAT_MODEL` | `chat-default` |
 | `EMBEDDING_MODEL` | `embed-default` |
-| `EMBEDDING_DIM` | `768` |
+| `EMBEDDING_DIM` | `llm.embed_dimensions` (1536 in the shipped manifest) |
 
-   (`EMBEDDING_*` are the names TrustDesk and PagerLens read; PayBroker is given the same contract. Settings from the environment are trusted by the apps,
+   (`EMBEDDING_*` are the names TrustDesk and PagerLens read; PayBroker and ShopFront are given the same contract. Settings from the environment are trusted by the apps,
    so the gateway's public https URL needs no allow-private-URLs switch.)
 
 Check it: `ecoctl status` lists each app's gateway client and the result of one tiny chat call made with that app's own key;
@@ -259,7 +265,7 @@ Check it: `ecoctl status` lists each app's gateway client and the result of one 
 **Add a real provider (once, for every app).** In the gateway console (admin): **Providers → Add** (name, base URL such as
 `https://api.openai.com/v1`, the API key, stored encrypted; then **Test**). Then **Models**: open `chat-default`, change its target to that
 provider and model (for example `gpt-4o-mini`; a second target gives failover) and save; do the same for `embed-default` with an embedding model
-that returns **768** numbers (or set the alias's size to match what the apps were created with). **No app, client or key changes**: the next
+that returns **1536** numbers, the manifest's `embed_dimensions` (or set the alias's size to match what the apps were created with). **No app, client or key changes**: the next
 request of every app goes to the new model. Add prices to see cost estimates. To switch the default model later, repoint the alias again.
 `LLMGW_ENCRYPTION_KEY` (already set by `ecoctl`) lets the gateway unlock the provider key after a restart.
 
@@ -401,7 +407,7 @@ from AgentPG) and saves the new one.
 | Rotate the shop's PayBroker keys and webhook secret | `ecoctl connect --rotate` (section 9b); `ecoctl connect --dry-run` shows what would change |
 | Check the LLM wiring | `ecoctl status` (client + one real call per app), `ecoctl llm test <app>` |
 | Add a person or change roles | Identity console → Users or Groups. Takes effect at their next sign-in |
-| Forgot an app's local admin password | `agentpg sandbox console <id>`, then `trustdesk reset-admin` (or `pagerlens`, `citypulse`, `cpsim`, `paybroker`, `llmgw`, `identity`); for apps that store provider keys this erases them |
+| Forgot an app's local admin password | `agentpg sandbox console <id>`, then `trustdesk reset-admin` (or `pagerlens`, `citypulse`, `cpsim`, `paybroker`, `shopfront`, `llmgw`, `identity`); for apps that store provider keys this erases them |
 | Rotate the identity signing key | Identity console → Keys → Rotate (the old key stays published for 24 h) |
 | Back up | Each app's data is in its instance; use AgentPG's instance tools. Also keep `.ecosystem/state.json`: it is the only copy of the client secrets and of each instance's database key |
 

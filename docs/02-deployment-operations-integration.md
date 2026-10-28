@@ -1,5 +1,7 @@
 # Deployment, operations, integration and AI use
 
+> **Dated report, 2026-10-25.** This is a snapshot of the deployment and operations as of that date and is not updated. The current reference is [GUIDE.md](GUIDE.md) (see its section on differences); where the two disagree, GUIDE.md wins.
+
 Companion to [01-state-of-the-projects.md](01-state-of-the-projects.md). The click-by-click first deployment, with troubleshooting from the first live run, is [DEPLOY.md](DEPLOY.md); this document is the whole picture in one place and points to it for detail.
 
 ## 1. Deployment

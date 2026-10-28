@@ -1,5 +1,7 @@
 # State of the projects
 
+> **Dated report, 2026-10-25.** This is a snapshot of the state of the projects as of that date and is not updated. The current reference is [GUIDE.md](GUIDE.md) (see its section on differences); where the two disagree, GUIDE.md wins.
+
 Report date: 2026-10-25. Written from the repositories' READMEs and code, the live deployment checks done in this project, and the test suites.
 Everything marked **verified** was observed (a test passed, an HTTP check returned, a log line was read). Everything marked **not verified** was built but never observed in the real environment.
 

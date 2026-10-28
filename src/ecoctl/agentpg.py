@@ -64,6 +64,22 @@ class AgentPG:
         return Command(("extensions", "create", ext, instance_id))      # name first, then the instance id
 
     @staticmethod
+    def recommend(instance_id: str) -> Command:
+        return Command(("recommend", "all", instance_id, "--json"))      # needs query_advisor on the instance
+
+    @staticmethod
+    def db_user_create(instance_id: str, username: str, permission: str) -> Command:
+        return Command(("db-users", "create", instance_id, "--username", username, "--permission", permission, "--json"))      # the answer carries the password, shown once
+
+    @staticmethod
+    def db_users(instance_id: str) -> Command:
+        return Command(("db-users", "list", instance_id, "--json"))
+
+    @staticmethod
+    def connect_info(instance_id: str) -> Command:
+        return Command(("connect", instance_id, "--json"))
+
+    @staticmethod
     def create_sandbox(name: str, image: str, instance_id: str, port: int, env: dict[str, str], secret_names: set[str], *, auto_pause: bool = True,
                        plan: str | None = None) -> Command:
         args = ["sandbox", "create", name, "--image", image, "--instance", instance_id, "--port", str(port)]
@@ -138,6 +154,17 @@ class AgentPG:
 
     def sandbox_url(self, sandbox_id: str) -> str | None:
         return self.sandbox_state(sandbox_id)[1]
+
+
+def parse_json(text: str):
+    """The JSON in a CLI answer, or None. Tolerates text before the first brace or bracket (a banner line) but nothing else."""
+    for i, ch in enumerate(text):
+        if ch in "{[":
+            try:
+                return json.loads(text[i:])
+            except ValueError:
+                return None
+    return None
 
 
 def token_from(output: str) -> str | None:

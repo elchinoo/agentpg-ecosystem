@@ -56,7 +56,7 @@ def test_apply_needs_apps_or_all_and_only_known_consumers(deployed, capsys):
     ctx, cli, idp = deployed
     client(gateway_of(idp), "paybroker").update(rpm_limit=1)
     assert sync(ctx, apply_=True) == 1 and "--apply needs" in capsys.readouterr().err
-    assert sync(ctx, "cpsim") == 1 and "not an app with `llm: true`" in capsys.readouterr().err
+    assert sync(ctx, "citypulse") == 1 and "not an app with `llm: true`" in capsys.readouterr().err
     assert sync(ctx, "paybroker", all_=True, apply_=True) == 1
     assert gateway_of(idp).patches == [] and client(gateway_of(idp), "paybroker")["rpm_limit"] == 1
 
@@ -82,7 +82,7 @@ def test_apply_all_fixes_every_app_and_a_second_run_is_clean(deployed, capsys):
         client(gw, n).update(rpm_limit=1)
     client(gw, "trustdesk").update(monthly_token_budget=7)
     assert sync(ctx, all_=True, apply_=True) == 0
-    assert sorted(p.get("rpm_limit") for p in gw.patches) == [60, 60, 60, 60] and {"monthly_token_budget": 5_000_000, "rpm_limit": 60} in gw.patches
+    assert sorted(p.get("rpm_limit") for p in gw.patches) == [60] * len(CONSUMERS) and {"monthly_token_budget": 5_000_000, "rpm_limit": 60} in gw.patches
     n = len(gw.patches)
     assert sync(ctx) == 0 and sync(ctx, all_=True, apply_=True) == 0 and len(gw.patches) == n
 

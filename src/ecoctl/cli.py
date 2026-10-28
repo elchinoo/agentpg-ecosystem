@@ -1,4 +1,4 @@
-"""ecoctl: validate, plan, apply, status, env."""
+"""ecoctl: validate, plan, apply, status, env, insights, mcp."""
 import argparse
 import json
 import sys
@@ -6,6 +6,8 @@ from pathlib import Path
 
 import httpx
 
+from . import insights as insights_mod
+from . import mcp as mcp_mod
 from .agentpg import AgentPG, AgentPGError, token_from
 from .connect import print_status, reconcile
 from .connect_client import ConnectError
@@ -13,7 +15,7 @@ from .identity_client import Identity, IdentityError
 from .llm_client import GatewayError
 from .llm_sync import diff_app, table
 from .manifest import ManifestError, load
-from .plan import Context, app_env, build
+from .plan import Context, app_env, build, installed_extensions
 from .state import DEFAULT_DIR, State
 
 
@@ -131,6 +133,7 @@ def cmd_status(args) -> int:
                 row.append("down")
         bad += row[0] != "200"
         print(f"{key:<16}{row[0]:<10}{row[1]:<10}{url}")
+    bad += _features_status(ctx)
     bad += _llm_status(ctx)
     bad += print_status(ctx)
     ident_url = ctx.state.data["apps"].get("identity", {}).get("url")
@@ -154,6 +157,25 @@ def cmd_status(args) -> int:
                 print(f"  {cid:<26}{r['kind'] if r else '-':<9}{drift or 'ok'}")
                 bad += bool(drift)
     return 1 if bad else 0
+
+
+def _features_status(ctx) -> int:
+    """Database features per app: the extensions ecoctl has created (from the state file, no call) against the manifest. Missing ones are a warning
+    that `apply` fixes, not a failure of the app."""
+    rows = []
+    for key, app in ctx.manifest.everything().items():
+        if not app.deploy or not ctx.state.app(key).get("instance_id"):
+            continue
+        have = installed_extensions(ctx.state, app)
+        missing = [e for e in app.extensions if e not in have]
+        rows.append((key, ", ".join(e for e in app.extensions if e in have) or "-", ", ".join(missing)))
+    if not rows:
+        return 0
+    print("\ndatabase features (extensions ecoctl created, from the state file)")
+    print(f"  {'app':<16}{'installed':<60}missing")
+    for key, got, miss in rows:
+        print(f"  {key:<16}{got:<60}{miss and miss + '  (run `ecoctl apply --execute`)'}")
+    return 0
 
 
 def _llm_status(ctx) -> int:
@@ -333,6 +355,70 @@ def cmd_db(args) -> int:
     return 0
 
 
+def cmd_insights(args) -> int:
+    """`ecoctl insights [app ...|--all] [--json]`: the query advisor's index and statistics recommendations per app database. Read-only."""
+    ctx = _ctx(args)
+    known = ctx.manifest.everything()
+    if args.apps and args.all:
+        print("name apps or use --all, not both", file=sys.stderr)
+        return 1
+    bad = [a for a in args.apps if a not in known]
+    if bad:
+        print(f"no such app: {', '.join(bad)}", file=sys.stderr)
+        return 1
+    apps = list(dict.fromkeys(args.apps)) or [k for k, a in known.items() if a.deploy and ctx.state.app(k).get("instance_id")]
+    if not apps:
+        print("no app with a database yet (run `ecoctl apply --execute`)", file=sys.stderr)
+        return 1
+    results = insights_mod.collect(ctx, apps)
+    if args.json:
+        print(json.dumps([r.as_dict() for r in results], indent=2))
+    else:
+        print(insights_mod.render(results))
+    return 1 if any(r.error for r in results) else 0
+
+
+def cmd_mcp(args) -> int:
+    ctx = _ctx(args)
+    try:
+        return _mcp(ctx, args)
+    except (mcp_mod.McpError, AgentPGError) as exc:
+        print(f"mcp: {exc}", file=sys.stderr)
+        return 2
+
+
+def _mcp(ctx, args) -> int:
+    act = args.action
+    apps = mcp_mod.select(ctx, args.apps, args.all, need_user=act != "users", emit=lambda s: print(s, file=sys.stderr))
+    if act == "users":
+        return mcp_mod.users(ctx, apps)
+    if act == "config":
+        path = mcp_mod.write_config(ctx, apps, args.config_file)
+        print(f"wrote {path} (mode 0600, contains database credentials) for {', '.join(apps)}: restricted mode, read-only user {mcp_mod.DB_USER}, {mcp_mod.MAX_CONNECTIONS} connections each")
+        print(f"run it with `agentpg mcp serve --config {path}` or `ecoctl mcp serve`")
+        return 0
+    if act == "serve":
+        return mcp_mod.serve(ctx, apps, args.transport, args.port, args.host, args.config_file)
+    if act == "claude":
+        if args.write and not args.project:
+            print("--write updates the project's .mcp.json: add --project", file=sys.stderr)
+            return 1
+        entries = mcp_mod.claude_entries(ctx, apps)
+        scope = "project" if args.project else None
+        if args.project:
+            print(json.dumps({"mcpServers": entries}, indent=2))
+        for name, entry in entries.items():
+            print(mcp_mod.claude_add_command(name, entry, scope), file=sys.stderr if args.project else sys.stdout)
+        if args.write:
+            target = Path(".mcp.json")
+            mcp_mod.merge_mcp_json(target, entries)
+            print(f"updated {target.resolve()}: do not commit it (it names a local config path); the credentials stay in {ctx.state.dir}", file=sys.stderr)
+        else:
+            print("# the config files hold the credentials (0600, in the state directory); the stanza only names them", file=sys.stderr)
+        return 0
+    return mcp_mod.check(ctx, apps)
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="ecoctl", description="Describe, register and provision a fleet of apps on AgentPG.")
     p.add_argument("-f", "--file", default="ecosystem.yaml")
@@ -368,10 +454,32 @@ def main(argv: list[str] | None = None) -> int:
     ls.add_argument("--all", action="store_true", help="with --apply: every app that uses an LLM")
     ls.add_argument("--apply", action="store_true", help="PATCH the differing fields (without it nothing changes; exit 1 if there is drift)")
     ls.add_argument("--prune-aliases", action="store_true", help="also remove aliases the manifest does not list (default: keep and report them)")
+    ins = sub.add_parser("insights", help="index and statistics recommendations of AgentPG's query advisor per app database (read-only)")
+    ins.add_argument("apps", nargs="*", metavar="APP", help="apps to look at (default: every deployed app)")
+    ins.add_argument("--all", action="store_true", help="every deployed app (the default when none is named)")
+    ins.add_argument("--json", action="store_true", help="machine-readable output")
+    mc = sub.add_parser("mcp", help="read-only AI access to the app databases through AgentPG's database MCP server").add_subparsers(dest="action", required=True)
+    for name, text in (("users", "create (once) a read-only database user per app instance; credentials go to the state file only"),
+                       ("config", "write an AgentPG MCP config (restricted mode, read-only user) into the state directory"),
+                       ("serve", "run `agentpg mcp serve` with that config (http always with a generated secret)"),
+                       ("claude", "print (or with --project --write, merge) the Claude Code server entries: one stdio server per app"),
+                       ("check", "start the server, list its tools, run `select current_user` and prove a write is refused")):
+        sp = mc.add_parser(name, help=text)
+        sp.add_argument("apps", nargs="*", metavar="APP", help="apps (default: all; for everything but `users`, those that have a read-only user)")
+        sp.add_argument("--all", action="store_true", help="every app (identity is left out of --all: name it to include it)")
+        if name in {"config", "serve"}:
+            sp.add_argument("--file", dest="config_file", default=mcp_mod.DEFAULT_FILE, help="config file name inside the state directory (default databases.yaml)")
+        if name == "serve":
+            sp.add_argument("--transport", choices=["stdio", "http"], default="stdio")
+            sp.add_argument("--port", type=int, default=8080, help="http only")
+            sp.add_argument("--host", default="127.0.0.1", help="http only: address to bind (default loopback; AgentPG's own default is 0.0.0.0)")
+        if name == "claude":
+            sp.add_argument("--project", action="store_true", help="project scope: print the .mcp.json content")
+            sp.add_argument("--write", action="store_true", help="with --project: merge the entries into ./.mcp.json")
     args = p.parse_args(argv)
     try:
         commands = {"validate": cmd_validate, "plan": cmd_plan, "apply": cmd_apply, "status": cmd_status, "env": cmd_env, "db": cmd_db, "recreate": cmd_recreate,
-                    "llm": cmd_llm, "connect": cmd_connect}
+                    "llm": cmd_llm, "connect": cmd_connect, "insights": cmd_insights, "mcp": cmd_mcp}
         return commands[args.cmd](args)
     except ManifestError as exc:
         print(f"manifest error: {exc}", file=sys.stderr)

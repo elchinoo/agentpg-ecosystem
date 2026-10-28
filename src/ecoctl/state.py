@@ -36,6 +36,13 @@ class State:
             self.data["identity_admin_key"] = secrets.token_urlsafe(32)
         return self.data["identity_admin_key"]
 
+    def mcp_jwt_secret(self) -> str:
+        """The secret `ecoctl mcp serve --transport http` gives AgentPG's MCP server (A1P_JWT_SECRET): generated once, kept here, never printed."""
+        mcp = self.data.setdefault("mcp", {})
+        if not mcp.get("jwt_secret"):
+            mcp["jwt_secret"] = secrets.token_urlsafe(48)
+        return mcp["jwt_secret"]
+
     def save(self) -> None:
         self.dir.mkdir(mode=0o700, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=self.dir, prefix=".state-")

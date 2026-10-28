@@ -5,6 +5,8 @@ import re
 
 import httpx
 
+from ecoctl.agentpg import AgentPGError
+
 
 class FakeAgentPG:
     def __init__(self):
@@ -17,6 +19,9 @@ class FakeAgentPG:
         self._ids = itertools.count(1)
         self.creating_polls = 0                  # how many `status` calls answer `creating` before `running`
         self.failed: set[str] = set()
+        self.db_users: dict[str, dict[str, dict]] = {}      # instance id -> username -> {password, permission}
+        self.recommendations: dict[str, str] = {}           # instance id -> the text `recommend all` prints (missing: query_advisor is not installed)
+        self.connect_text = '{"connection_string": "postgresql://admin:x@db.example.test:5432/appdb?sslmode=require"}'
         self.url_with_id = False                 # like the real platform: the sandbox id is part of its URL, so a recreated sandbox gets a new one
 
     def __call__(self, args: list[str]) -> str:
@@ -38,6 +43,18 @@ class FakeAgentPG:
             return json.dumps({"id": k["id"], "token": k["token"]})
         if a[:2] == ["instances", "list"]:
             return "ID NAME SIZE VERSION STATUS\n-- ---- ---- ------- ------\n" + "".join(f"{i} {n} small 18 running\n" for n, i in self.instances.items())
+        if a[:2] == ["recommend", "all"]:
+            if a[2] not in self.recommendations:
+                raise AgentPGError("query_advisor extension is not installed")
+            return self.recommendations[a[2]]
+        if a[:2] == ["db-users", "list"]:
+            return json.dumps({"users": [{"username": u, "permission": v["permission"]} for u, v in self.db_users.get(a[2], {}).items()]})
+        if a[:2] == ["db-users", "create"]:
+            user, perm = a[a.index("--username") + 1], a[a.index("--permission") + 1]
+            self.db_users.setdefault(a[2], {})[user] = {"password": f"pw-{user}-{a[2]}", "permission": perm}
+            return json.dumps({"username": user, "password": f"pw-{user}-{a[2]}", "permission": perm})
+        if a[0] == "connect":
+            return self.connect_text
         if a[:2] == ["extensions", "create"]:
             self.extensions.append((a[3], a[2]))          # recorded as (instance, extension); the CLI takes the name first
             return "ok\n"

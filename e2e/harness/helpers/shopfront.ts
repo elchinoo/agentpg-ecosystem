@@ -3,9 +3,10 @@ import * as path from 'node:path';
 import { PG_BIN } from '../util';
 
 /**
- * Make a customer look established to PayBroker: ShopFront derives the account age from the e-mail's first order, so the
- * first order of a new shopper always scores as "new account" (about 600: 3-D Secure). Back-dating that order in the
- * run's THROWAWAY database lets a later purchase take the plain approval path.
+ * Make a customer look established to PayBroker. ShopFront derives the account age from the e-mail's first PAID order. By default
+ * (SHOPFRONT_NEW_GUEST_AGE=omit) a guest it has never seen pay is sent with no account age, so PayBroker assumes an established account;
+ * only in mode `zero` does a first-time buyer score as a "new account" (about 600: 3-D Secure). Back-dating the paid order in the
+ * run's THROWAWAY database makes the age real (30 days), so a later purchase takes the plain approval path whatever the mode.
  */
 export function backdateCustomer(email: string, days = 30) {
   const port = process.env.E2E_PG_PORT;

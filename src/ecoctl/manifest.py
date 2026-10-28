@@ -9,7 +9,13 @@ NAME = re.compile(r"^[a-z0-9][a-z0-9-]{1,39}$")          # also the identity pro
 ENV_NAME = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
 SCOPE = re.compile(r"^[a-z0-9][a-z0-9._:-]{0,59}$")
 ROLE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,39}$")
-EXTENSIONS = {"vector", "pg_trgm", "pgcrypto", "hstore", "citext", "uuid-ossp", "btree_gin", "btree_gist"}
+# Exactly what `agentpg extensions create <name> <instance>` installed on a throwaway instance (Postgres 18, role without superuser), probed 2026-10-28.
+EXTENSIONS = {"vector", "pg_trgm", "unaccent", "citext", "fuzzystrmatch", "tcn", "btree_gin", "btree_gist", "cube", "tsm_system_rows", "tsm_system_time",
+              "postgis", "edb_stat_monitor", "query_advisor", "edb_pg_tuner", "sql_profiler", "aidb"}
+# Refused by the platform: these need a superuser, which an instance's role is not. Kept out on purpose; a new probe may move one into EXTENSIONS.
+NEEDS_SUPERUSER = {"data_redaction", "pg_prewarm", "pgstattuple", "pgrowlocks", "password_profile", "sslinfo", "earthdistance", "pg_surgery"}
+# These install but nothing in them can be used (permission denied on their tables or functions): no app should list them.
+INSTALLS_BUT_UNUSABLE = {"address_standardizer", "address_standardizer_data_us", "system_stats"}
 PLANS = {"small", "medium", "large"}
 SECRETISH = re.compile(r"(SECRET|PASSWORD|PASSWD|TOKEN|KEY|DSN|CREDENTIAL)", re.I)
 URL_WITH_PASSWORD = re.compile(r"://[^/\s:@]+:[^/\s@]+@")
@@ -277,9 +283,16 @@ def _app(key: str, raw: dict, where: str, *, identity: bool = False) -> App:
     if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
         raise ManifestError(f"{where}.port must be a port number")
     exts = tuple(_list(raw.get("extensions"), f"{where}.extensions"))
-    bad = [e for e in exts if e not in EXTENSIONS]
-    if bad:
-        raise ManifestError(f"{where}.extensions: unsupported {', '.join(map(str, bad))} (allowed: {', '.join(sorted(EXTENSIONS))})")
+    for e in exts:
+        if e in EXTENSIONS:
+            continue
+        if e in NEEDS_SUPERUSER:
+            raise ManifestError(f"{where}.extensions: {e} needs superuser on this platform (AgentPG refuses it for an instance's role)")
+        if isinstance(e, str) and (e in INSTALLS_BUT_UNUSABLE or e.startswith("address_standardizer")):
+            raise ManifestError(f"{where}.extensions: {e} installs but is unusable here (its tables or functions are permission-denied for the instance's role)")
+        if e == "uuid-ossp":
+            raise ManifestError(f"{where}.extensions: uuid-ossp is rejected by the agentpg CLI (the hyphen); use gen_random_uuid(), which Postgres has built in")
+        raise ManifestError(f"{where}.extensions: unsupported {e} (allowed: {', '.join(sorted(EXTENSIONS))})")
     generate = tuple(_list(raw.get("generate"), f"{where}.generate"))
     for g in generate:
         if not isinstance(g, str) or not ENV_NAME.match(g):

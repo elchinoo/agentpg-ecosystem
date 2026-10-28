@@ -46,7 +46,7 @@ def test_apply_creates_everything_in_dependency_order(world):
     ctx, cli, idp = world
     apply(ctx)
     created = [c[c.index("create") + 1] for c in cli.calls if c[1:3] == ["sandbox", "create"]]
-    assert created == ["eco-identity", "eco-llmgw", "eco-pagerlens", "eco-citypulse", "eco-paybroker", "eco-trustdesk", "eco-cpsim", "eco-shopfront"]
+    assert created == ["eco-identity", "eco-llmgw", "eco-pagerlens", "eco-citypulse", "eco-paybroker", "eco-shopfront", "eco-trustdesk", "eco-cpsim"]
     assert set(cli.sandboxes) == set(created) and "eco-pagerlens-agent" not in cli.sandboxes        # registered only, never deployed
     assert ("inst-3", "vector") in cli.extensions and len(cli.instances) == 8
     # an app's environment names the identity provider and the apps it calls, with real URLs
@@ -68,8 +68,8 @@ def test_the_registry_ends_up_pointing_at_the_real_urls(world):
     assert td["post_logout_uris"] == ["https://eco-trustdesk.sandbox.example/"]
     assert [r["name"] for r in td["roles"]] == ["admin", "approver", "viewer"]
     svc = idp.apps["cpsim-service"]
-    assert svc["kind"] == "service" and svc["allowed_audiences"] == ["citypulse", "llmgw", "pagerlens", "trustdesk"]
-    assert set(svc["allowed_scopes"]) == {"citypulse.ingest", "trustdesk.requests.write", "pagerlens.ingest", "llmgw.use"}
+    assert svc["kind"] == "service" and svc["allowed_audiences"] == ["citypulse", "llmgw", "pagerlens", "shopfront", "trustdesk"]
+    assert set(svc["allowed_scopes"]) == {"citypulse.ingest", "trustdesk.requests.write", "pagerlens.ingest", "llmgw.use", "shopfront.api"}
     assert "pagerlens-agent-service" in idp.apps and "pagerlens-agent" not in idp.apps          # service only
     assert idp.issuer == "https://eco-identity.sandbox.example"
 
@@ -201,7 +201,8 @@ def test_only_deploys_a_subset_with_what_it_calls(tmp_path):
     state = State(tmp_path / "eco")
     ctx = again(None, cli, idp, state=state, only={"cpsim"})
     apply(ctx)
-    assert set(cli.sandboxes) == {"eco-identity", "eco-llmgw", "eco-pagerlens", "eco-citypulse", "eco-trustdesk", "eco-paybroker", "eco-cpsim"}      # + citypulse -> pagerlens, + paybroker (used)
+    # + citypulse -> pagerlens, + paybroker (used), + shopfront (called)
+    assert set(cli.sandboxes) == {"eco-identity", "eco-llmgw", "eco-pagerlens", "eco-citypulse", "eco-trustdesk", "eco-paybroker", "eco-shopfront", "eco-cpsim"}
     assert "paybroker" in idp.apps and "pagerlens-agent" not in idp.apps          # a used app is deployed and registered
     granted = {(g["client_id"]) for g in idp.grants}
     assert "paybroker" in granted and "trustdesk" in granted

@@ -1,5 +1,7 @@
 # Integrating the ecosystem with AIDB
 
+> **Dated report, 2026-10-25.** This is a snapshot of the AIDB design as of that date and is not updated. The current reference is [GUIDE.md](GUIDE.md) (see its section on differences); where the two disagree, GUIDE.md wins.
+
 Status of this document: a **design**, not an implementation. Nothing in the repositories uses AIDB today (a search of all repos finds no reference). The AIDB facts below come from EDB's current documentation (AIDB 7.8.0, released 12 Oct 2026, read on 2026-10-25). Statements about how our apps would use it are proposals to be proven in the spike in section 7. The AgentPG CLI's own help lists `aidb` ("AI embeddings and inference") among the extensions it can enable, but I could not check which AIDB version a sandbox's database offers (the CLI login had expired); that is the first thing to verify.
 
 > **Update 2026-10-25:** `agentpg extensions list <instance> -s aidb` shows AIDB **7.8.0 available**, and `agentpg extensions create aidb <instance>` installs it. On the spike instance the instance's own login role (`pg-<id>`, member of `a1p_readwrite` only) gets `permission denied for schema aidb`, and `agentpg db-users create` only offers `read` and `read_write`. The platform has to grant `aidb_users` (and `aidb_governance`) to that role, or provide an admin user, before any step below can run. pgfs 3.2.1 is available too.

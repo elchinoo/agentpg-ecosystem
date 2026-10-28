@@ -93,6 +93,35 @@ def test_validation_messages(mutate, message):
         parse(d)
 
 
+INSTALLABLE = ["vector", "pg_trgm", "unaccent", "citext", "fuzzystrmatch", "tcn", "btree_gin", "btree_gist", "cube", "tsm_system_rows", "tsm_system_time",
+               "postgis", "edb_stat_monitor", "query_advisor", "edb_pg_tuner", "sql_profiler", "aidb"]
+
+
+def test_the_allow_list_is_exactly_what_the_platform_installs():
+    from ecoctl.manifest import EXTENSIONS
+    assert EXTENSIONS == set(INSTALLABLE)
+
+
+@pytest.mark.parametrize("ext,message", [
+    ("data_redaction", "needs superuser on this platform"), ("pg_prewarm", "needs superuser"), ("pgstattuple", "needs superuser"), ("pgrowlocks", "needs superuser"),
+    ("password_profile", "needs superuser"), ("sslinfo", "needs superuser"), ("earthdistance", "needs superuser"), ("pg_surgery", "needs superuser"),
+    ("address_standardizer", "installs but is unusable"), ("address_standardizer_data_us", "installs but is unusable"), ("system_stats", "installs but is unusable"),
+    ("uuid-ossp", "hyphen"), ("pgcrypto", "unsupported"), ("hstore", "unsupported"), ("pgfs", "unsupported"), ("anon", "unsupported"),
+])
+def test_refused_and_unusable_extensions_say_why(ext, message):
+    d = doc()
+    d["apps"]["trustdesk"]["extensions"] = ["vector", ext]
+    with pytest.raises(ManifestError, match=message):
+        parse(d)
+
+
+@pytest.mark.parametrize("ext", INSTALLABLE)
+def test_agentpg_extensions_are_allowed(ext):
+    d = doc()
+    d["apps"]["trustdesk"]["extensions"] = ["vector", ext]
+    assert ext in parse(d).apps["trustdesk"].extensions
+
+
 def test_unreadable_files_are_manifest_errors(tmp_path):
     with pytest.raises(ManifestError):
         load(tmp_path / "missing.yaml")
@@ -104,12 +133,12 @@ def test_unreadable_files_are_manifest_errors(tmp_path):
 # ---- the LLM gateway wiring -------------------------------------------------------------------------------------------
 def test_llm_defaults_and_the_apps_that_use_it():
     m = load(REPO_MANIFEST)
-    assert m.consumers() == ["pagerlens", "paybroker", "shopfront", "trustdesk"]
+    assert m.consumers() == ["cpsim", "pagerlens", "paybroker", "shopfront", "trustdesk"]
     assert (m.llm.gateway, m.llm.chat_alias, m.llm.embed_alias, m.llm.embed_dimensions) == ("llmgw", "chat-default", "embed-default", 1536)
-    assert not m.apps["cpsim"].llm and not m.apps["llmgw"].llm
+    assert m.apps["cpsim"].llm and not m.apps["citypulse"].llm and not m.apps["llmgw"].llm
     d = doc()
     del d["llm"]
-    assert parse(d).llm == parse(d).llm.__class__() and parse(d).consumers() == ["pagerlens", "paybroker", "shopfront", "trustdesk"]      # every key is optional
+    assert parse(d).llm == parse(d).llm.__class__() and parse(d).consumers() == ["cpsim", "pagerlens", "paybroker", "shopfront", "trustdesk"]      # every key is optional
 
 
 def test_consumers_come_after_the_gateway_and_the_cascade_follows_them():
@@ -196,7 +225,7 @@ def test_an_app_llm_can_be_true_or_a_mapping_and_overrides_the_global_limits():
     assert m.limits("trustdesk") == Limits(5, None, "soft", ("chat-default", "embed-default", "extra"))      # null = no budget; default repeated once
     assert m.limits("pagerlens") == Limits(60, 99, "hard", ("chat-default", "embed-default"))                # only the named key overrides
     assert m.limits("paybroker") == Limits(60, 5_000_000, "hard", ("chat-default", "embed-default"))
-    assert m.apps["trustdesk"].llm and m.apps["paybroker"].llm and m.consumers() == ["pagerlens", "paybroker", "shopfront", "trustdesk"]
+    assert m.apps["trustdesk"].llm and m.apps["paybroker"].llm and m.consumers() == ["cpsim", "pagerlens", "paybroker", "shopfront", "trustdesk"]
     d = doc()
     d["apps"]["trustdesk"]["llm"] = True
     assert parse(d).limits("trustdesk") == parse(doc()).limits("trustdesk")

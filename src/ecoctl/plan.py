@@ -2,6 +2,7 @@
 registers apps with the identity provider. Every step checks what already exists, so a second run converges."""
 import hashlib
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -144,6 +145,36 @@ def _register_ecoctl(ctx: Context) -> str:
     return "service client ecoctl" + (" (secret issued)" if r.secret else "")
 
 
+ALREADY = re.compile(r"already (exists|installed|enabled)", re.I)
+LEGACY_EXTENSIONS = {"vector", "pg_trgm"}      # before the state kept the list, a flag `extensions_done` meant the manifest's extensions of that day were created: these two
+
+
+def installed_extensions(st: State, app: App) -> list[str]:
+    """The extensions ecoctl has created on the app's instance. A state written before the list existed (`extensions_done`) is read as
+    'vector and pg_trgm, where the app lists them', which is all the manifest asked for then."""
+    entry = st.app(app.key)
+    if "extensions" not in entry and entry.get("extensions_done"):
+        entry["extensions"] = [e for e in app.extensions if e in LEGACY_EXTENSIONS]
+    return list(entry.get("extensions", []))
+
+
+def missing_extensions(st: State, app: App) -> list[str]:
+    have = set(installed_extensions(st, app))
+    return [e for e in app.extensions if e not in have]
+
+
+def _extension_detail(ctx: Context, app: App) -> list[str]:
+    """The `extensions create` lines of the plan: all of them for a new instance, only the missing ones for one that exists."""
+    st = ctx.state
+    if not st.app(app.key).get("instance_id"):
+        return [AgentPG.extension("<instance-id>", e).display() for e in app.extensions]
+    todo = missing_extensions(st, app)
+    if not todo:
+        return [f"(instance exists: its {len(app.extensions)} extension(s) are already created)"] if app.extensions else []
+    return ["(instance exists: wait until it is running, then create only the missing extensions)",
+            *[AgentPG.extension(st.app(app.key)["instance_id"], e).display() for e in todo]]
+
+
 def _deploy(ctx: Context, app: App) -> str:
     """Instance, extensions, sandbox, URL. Existing instances and sandboxes are kept; a changed environment is reported, not applied."""
     m, st, cli = ctx.manifest, ctx.state, ctx.agentpg
@@ -158,12 +189,17 @@ def _deploy(ctx: Context, app: App) -> str:
         if not entry["instance_id"]:
             raise AgentPGError(f"created instance {m.instance_name(app.key)} but could not find its id in `agentpg instances list`")
         st.save()
-    if not entry.get("extensions_done"):
+    missing = missing_extensions(st, app)
+    if missing:
         cli.wait_instance(entry["instance_id"])
-        for ext in app.extensions:
-            cli.run(AgentPG.extension(entry["instance_id"], ext))
-        entry["extensions_done"] = True
-        st.save()
+        for ext in missing:
+            try:
+                cli.run(AgentPG.extension(entry["instance_id"], ext))
+            except AgentPGError as exc:
+                if not ALREADY.search(str(exc)):
+                    raise
+            entry.setdefault("extensions", []).append(ext)         # one at a time: a failure keeps what was done and the next run does the rest
+            st.save()
     if entry.get("sandbox_id") and entry["sandbox_id"] not in cli.sandbox_ids():           # deleted behind our back: start over
         for k in ("sandbox_id", "url", "env_hash"):
             entry.pop(k, None)
@@ -241,7 +277,7 @@ def build(ctx: Context) -> list[Step]:
     cmd_env = dict(ident.env)
     steps.append(Step("Identity provider: database and sandbox",
                       [AgentPG.create_instance(m.instance_name("identity"), m.size).display(),
-                       *[AgentPG.extension("<instance-id>", e).display() for e in ident.extensions],
+                       *_extension_detail(ctx, ident),
                        AgentPG.create_sandbox(m.sandbox_name("identity"), m.image(ident), "<instance-id>", ident.port,
                                               {**cmd_env, "IDENTITY_API_KEY": "<generated>"}, {"IDENTITY_API_KEY"},
                                               auto_pause=m.pause_enabled(ident), plan=m.plan_for(ident)).display()],
@@ -289,7 +325,7 @@ def build(ctx: Context) -> list[Step]:
         if m.consumers() and app.key == m.llm.gateway:
             placeholders[llm_admin_name(m)] = "<generated>"
         deploy = [AgentPG.create_instance(m.instance_name(app.key), m.size).display(),
-                  *[AgentPG.extension("<instance-id>", e).display() for e in app.extensions],
+                  *_extension_detail(ctx, app),
                   AgentPG.create_sandbox(m.sandbox_name(app.key), m.image(app), "<instance-id>", app.port, placeholders,
                                          {k for k, v in placeholders.items() if v == "<generated>"}, auto_pause=m.pause_enabled(app),
                                          plan=m.plan_for(app)).display()]

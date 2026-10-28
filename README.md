@@ -14,9 +14,15 @@ to the sandboxes as environment variables. **No secret is ever written in the ma
 looks like one and tells you to list it under `generate:`.
 
 Apps are built on [agentpg-kit](https://github.com/elchinoo/agentpg-kit): TrustDesk, PagerLens, CityPulse, CityPulse Simulator,
-PayBroker and the LLM gateway all read the same `<PREFIX>_OIDC_*` variables.
+PayBroker, ShopFront and the LLM gateway all read the same `<PREFIX>_OIDC_*` variables.
 
-**Full walkthrough for a first live deployment: [docs/DEPLOY.md](docs/DEPLOY.md).**
+**Full walkthrough for a first live deployment (eight sandboxes): [docs/DEPLOY.md](docs/DEPLOY.md).**
+
+**Everything in one place: [docs/GUIDE.md](docs/GUIDE.md)** (every project, how they interact, the manifest and command reference, secrets and
+rotation, the release loop, troubleshooting, the e2e suite, AIDB status, how to add an app). **Tutorial video script:
+[docs/VIDEO-SCRIPT.md](docs/VIDEO-SCRIPT.md)** ("from zero to a running ecosystem with ecoctl"). Documents 01 to 04 under `docs/` are dated reports; GUIDE.md is the current reference.
+
+**EDB and AgentPG capabilities** (which extensions each app lists, what is blocked and why): [GUIDE section 18](docs/GUIDE.md#18-edb-and-agentpg-capabilities-used) and the probe report [docs/06-edb-and-agentpg-capabilities.md](docs/06-edb-and-agentpg-capabilities.md). New commands: `ecoctl insights` (query-advisor recommendations per app database) and `ecoctl mcp users|config|serve|claude|check` (read-only AI access through AgentPG's database MCP server): [GUIDE sections 7.9 and 7.10](docs/GUIDE.md#79-insights-app---all---json).
 
 ## Use
 
@@ -76,15 +82,16 @@ scope can carry) and still need its address, and its address changes whenever th
 
 ```yaml
   cpsim:
-    calls: {citypulse: [citypulse.ingest], trustdesk: [trustdesk.requests.write], pagerlens: [pagerlens.ingest], llmgw: [llmgw.use]}
+    llm: true
+    calls: {citypulse: [citypulse.ingest], trustdesk: [trustdesk.requests.write], pagerlens: [pagerlens.ingest], llmgw: [llmgw.use], shopfront: [shopfront.api]}
     uses: [paybroker, identity]     # PAYBROKER_URL and IDENTITY_URL; no service client, no scope
 ```
 
 Each listed app (or `identity`, the provider) gets its URL injected as `<PREFIX>_URL` (override per app with `url_env`), is deployed **before**
 this app, is pulled in by `--only`, and **`recreate` cascades**: `ecoctl recreate paybroker` also recreates cpsim so its environment
 names PayBroker's new URL (recreating `identity` already recreates everything). Validated: an existing deployed app other than this one, not
-listed twice, not also under `calls`, no cycles. With `calls` and `uses` together the simulator holds all six fleet addresses
-(`CITYPULSE_URL`, `PAYBROKER_URL`, `TRUSTDESK_URL`, `PAGERLENS_URL`, `LLMGW_URL`, `IDENTITY_URL`), which is what lets its cities, companies
+listed twice, not also under `calls`, no cycles. With `calls` and `uses` together the simulator holds all seven fleet addresses
+(`CITYPULSE_URL`, `PAYBROKER_URL`, `TRUSTDESK_URL`, `PAGERLENS_URL`, `LLMGW_URL`, `SHOPFRONT_URL`, `IDENTITY_URL`), which is what lets its cities, companies
 and workloads follow the fleet with `${CITYPULSE_URL}`-style targets (see the simulator's README). A deployed sandbox's environment cannot change in place:
 after adding `uses` to a running fleet, `ecoctl recreate cpsim` once.
 
@@ -97,7 +104,7 @@ llm:                          # optional; these are the defaults
   gateway: llmgw              # the app that runs the gateway; deployed before the apps that use it
   chat_alias: chat-default    # aliases the gateway seeds on its built-in echo provider
   embed_alias: embed-default
-  embed_dimensions: 768       # what TrustDesk and PagerLens expect (EMBEDDING_DIM)
+  embed_dimensions: 1536      # EMBEDDING_DIM of the apps = size of the real embedding model behind embed-default (text-embedding-3-small); the code default is 768, the built-in echo model's size
   rpm: 60                     # requests/minute of each app's gateway client
   budget: 5000000             # tokens/month of each app's client (null: none)
   budget_mode: hard           # or soft
