@@ -11,9 +11,9 @@ from .agentpg import AgentPG, AgentPGError, parse_json
 STATEMENT = re.compile(r"\b(CREATE\s+(?:UNIQUE\s+)?INDEX|CREATE\s+STATISTICS|ANALYZE|ALTER\s+TABLE|VACUUM)\b[^;|]*;?", re.I)
 SIZE = re.compile(r"Size:\s*([^|]+?)\s*(?:\||$)", re.I)
 COST = re.compile(r"Cost\s+reduction:\s*([-\d.]+)\s*%", re.I)
-STATEMENT_KEYS = ("statement", "sql", "ddl", "recommendation", "command", "query", "action", "description")
-SIZE_KEYS = ("size", "index_size", "estimated_size")
-COST_KEYS = ("cost_reduction", "cost_reduction_percent", "cost_reduction_pct", "improvement", "benefit")
+STATEMENT_KEYS = ("statement", "index", "statistics", "sql", "ddl", "recommendation", "command", "query", "action", "description")
+SIZE_KEYS = ("size", "index_size", "estimated_size", "estimated_size_in_bytes")
+COST_KEYS = ("cost_reduction", "cost_reduction_percent", "cost_reduction_pct", "estimated_pct_cost_reduction", "improvement", "benefit")
 
 
 @dataclass(frozen=True)
@@ -45,6 +45,25 @@ def _from_text(text: str) -> list[Recommendation]:
     return out
 
 
+def _human_size(value) -> str:
+    """`estimated_size_in_bytes` arrives as a number: show it like the CLI's text output (8 KB, 1.2 MB)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return str(value)
+    size = float(value)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f} {unit}" if size >= 100 or size == int(size) else f"{size:.1f} {unit}"
+        size /= 1024
+    return str(value)
+
+
+def _percent(value) -> str:
+    """A float percentage to one decimal ('12.3'); text such as '36.3%' keeps its number."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return f"{value:.1f}"
+    return str(value).rstrip("%")
+
+
 def _first(d: dict, keys) -> object:
     return next((d[k] for k in keys if d.get(k) not in (None, "")), "")
 
@@ -62,8 +81,8 @@ def _walk(node, found: list[Recommendation]) -> None:
             size, cost = _first(node, SIZE_KEYS), _first(node, COST_KEYS)
             rec = _from_text(line)
             base = rec[0] if rec else Recommendation(_kind(stmt), stmt)
-            cost_text = str(cost).rstrip("%") if cost != "" else base.cost_reduction
-            found.append(Recommendation(base.kind, base.statement, str(size) if size != "" else base.size, cost_text))
+            cost_text = _percent(cost) if cost != "" else base.cost_reduction
+            found.append(Recommendation(base.kind, base.statement, _human_size(size) if size != "" else base.size, cost_text))
         else:
             for v in node.values():
                 _walk(v, found)

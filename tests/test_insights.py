@@ -70,3 +70,20 @@ def test_unknown_app_and_no_database(monkeypatch, world, capsys):  # noqa: F811
     assert rc == 1 and "no such app" in out.err
     rc, out = run(monkeypatch, world, capsys)
     assert rc == 1 and "no app with a database" in out.err
+
+
+def test_the_real_recommend_json_shape_gives_size_and_cost():
+    """Captured from `agentpg recommend all <instance> --json` on 2026-10-28: the keys are index/statistics, estimated_size_in_bytes, estimated_pct_cost_reduction."""
+    real = json.dumps({
+        "index_count": 1,
+        "index_recommendations": [{
+            "abs_benefit": 622.7, "benefited_queryids": ["-7037269306000499593"], "estimated_pct_cost_reduction": 12.298286437988281,
+            "estimated_size_in_bytes": 49152, "index": "CREATE INDEX ON public.alert USING btree (incident_id);",
+            "relative_benefit": 0.12, "total_cost": 5063.49}],
+        "statistics_count": 1,
+        "statistics_recommendations": [{
+            "benefited_queryids": ["-5342016440299271783"], "weight": 1175.4,
+            "statistics": "CREATE STATISTICS metric_point_service_id_ts ON service_id, ts FROM public.metric_point;"}],
+        "total_recommendations": 2})
+    recs = parse_recommendations(real)
+    assert [(r.kind, r.size, r.cost_reduction) for r in recs] == [("index", "48 KB", "12.3"), ("stats", "", "")]
