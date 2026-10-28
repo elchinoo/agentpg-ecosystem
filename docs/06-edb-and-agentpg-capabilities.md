@@ -82,3 +82,40 @@ AgentPG's URLs (`*.code.run`, `*.addon.code.run`) show it runs on Northflank. No
 **What does not map to a primitive:** the identity provider. Northflank offers [SSO for logging in to Northflank itself](https://northflank.com/docs/v1/application/collaborate/manage-an-organisation) (SAML and OpenID Connect through WorkOS, an enterprise feature) and mentions workload identities in passing; I found nothing for authenticating the end users of an app you deploy, so identity stays reference scaffolding. The same for the LLM gateway: no equivalent primitive. A related opening: AgentPG's compute plans include GPUs (`gpu-l4`, `gpu-a100-*`), so a sandbox could host an OpenAI-compatible model server as the gateway's backend: untested.
 
 Sources: Northflank docs pages linked above, and [northflank.com/features/templates](https://northflank.com/features/templates).
+
+
+## 8. What we can use out of the box on AgentPG today
+
+Checked on the real CLI and account (2026-10-28). "Used" means an app or `ecoctl` uses it now.
+
+| AgentPG feature | State | Use |
+|---|---|---|
+| Instances (Postgres 18), `databases`, several databases per instance | works | Used: one instance per app. An instance can hold several databases, so a smaller footprint is possible if instance count becomes a limit |
+| Sandboxes: image, plan, linked instance, one HTTPS port, auto-pause, `--env`, `--file`, command override, console, logs, pause, resume | works | Used by `ecoctl`. GPU plans (`gpu-l4`, `gpu-a100-*`) exist and are untried |
+| `sandbox status` live metrics (CPU, memory, network in and out) | works | **Not used yet.** Cheap win: show them in `ecoctl status`, and feed them to PagerLens as real platform telemetry |
+| Extensions through `agentpg extensions create` | works for 17 (see section 2) | Used by `ecoctl apply` |
+| `agentpg recommend` (index and statistics advice from `query_advisor`) | works | Used: `ecoctl insights` |
+| `db-users` with `read` or `read_write` | works | Used: `ecoctl mcp users` creates the read-only user |
+| `agentpg mcp serve` (restricted mode with a read-only user) | works | Used: `ecoctl mcp ...`. The hosted endpoint is not read-only (section 3) |
+| `agentpg import` / `upload` (CSV only) | works | **Not used yet.** The way to load a large demo dataset (for example the PayBroker transactions) |
+| `agentpg query "..."` (natural language to SQL) | exists | **Not tried.** It sends the question and schema to a model service we have not checked; try on demo data only |
+| `keys` (instance MCP keys) | works | Not used by the apps |
+| Platform keys (`platform-keys create`, account-wide) | exist, **the CLI has no documented way to use one** (no flag or environment variable; `agentpg login` is browser-only) | Blocks non-interactive use: `ecoctl` in CI, unattended re-runs |
+| `agentpg memory` | **not implemented** | |
+| AIDB | installs, **no access** (section 3 and request 1) | The TrustDesk centerpiece, blocked |
+
+## 9. Suggestions for the AgentPG developers
+
+Ordered by how much each one hurt while building and operating this fleet. Each item names the incident behind it.
+
+1. **Stable addresses.** A sandbox URL contains the sandbox id, so every recreate changes the URL. For us that meant: identity's issuer changed and every app was recreated, OIDC redirect URIs, webhooks and CORS origins had to be re-registered (`ecoctl connect` exists only to repair this), and recorded demos and screenshots went stale. Ask: a stable per-sandbox hostname or custom domains (Northflank supports both), and private service-to-service addresses so apps need not call each other over the public internet.
+2. **Non-interactive authentication.** Platform keys exist but the CLI cannot use one; `agentpg login` is browser-only and the session expired twice mid-work. Ask: `AGENTPG_API_KEY` (or `--api-key`), so `ecoctl` and CI can deploy unattended.
+3. **AIDB access and the superuser-only extensions.** One grant (`GRANT aidb_users ...`) blocks the best EDB story; `data_redaction`, `pg_prewarm`, `pgstattuple` and others are refused. Ask: grant AIDB roles automatically when the extension is created, and offer an allow-list of extra extensions to enable per instance (request 1 and 2 in section 6).
+4. **Hosted MCP read-only mode.** The hosted MCP session started with `agentpg token` is read-write (it created a table), and keys are not accepted as bearer tokens. Ask: a read-only hosted mode and a scoped token for server-to-server use.
+5. **Declarative multi-sandbox definitions** (Northflank templates). `ecoctl` is a small version of this: ordering, idempotent re-apply, wiring outputs (URLs) into other sandboxes' environment, extension lists. Ask: `agentpg apply -f`.
+6. **Secret groups** instead of plain `--env`: rotate the platform key and OIDC secrets in one place and reference them by name; today a rotation means recreating every sandbox.
+7. **Wake on request.** A paused sandbox answers an empty 503 and does not wake; we keep `auto-pause=false` everywhere. Ask: wake on the first request (scale to zero).
+8. **Build from a repository.** We need a CI pipeline and a public container registry image for every app. Ask: build and deploy from a Git repository (Northflank build services).
+9. **Jobs and cron** next to sandboxes (workers, the simulator, re-embedding).
+10. **Ingress security policies** per port (IP allow list, basic auth) so admin consoles need not be public. Rate limiting is not a Northflank ingress feature, so the gateway and app limits stay ours.
+11. **Smaller papercuts.** `extensions create uuid-ossp` rejects the hyphen; `a1p_readonly` receives SELECT on every new table by default privileges (an opt-out for masking would help); `connect --json` and `db-users create --json` field names are undocumented; `agentpg memory` is documented but not implemented; expose sandbox metrics in the API as a Prometheus endpoint.
