@@ -28,7 +28,8 @@ class AppDiff:
 
     @property
     def drift(self) -> bool:
-        return bool(self.rows)
+        """Extra aliases that `sync` keeps are informational (an operator's harmless addition); anything else is a real difference."""
+        return any(r.action != "extra, kept" for r in self.rows)
 
 
 def _budget(v) -> str:

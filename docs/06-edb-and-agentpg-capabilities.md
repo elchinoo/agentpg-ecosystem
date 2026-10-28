@@ -56,8 +56,29 @@ Result for a read-only user (and for an AI agent using AgentPG's restricted MCP)
 
 ## 6. Requests to the platform team (draft, not sent)
 
-1. Grant our instance role access to `aidb` (membership in `aidb_users`, and `aidb_governance` if possible).
+1. **AIDB access (the blocker for the TrustDesk showcase).** `agentpg extensions create aidb <instance>` installs AIDB 7.8.0 and creates the roles `aidb_users`, `aidb_governance` and `aidb_admins`, but nobody can use it: our instance login role has no `USAGE` on schema `aidb`, and the MCP role (`k_mcp_rw_*`) is not a member either (checked 2026-10-28; neither is a superuser). AIDB's own install page says access is granted by membership, so the fix is one statement run by a platform superuser, ideally automatically when the extension is created:
+   `GRANT aidb_users TO "<instance login role>";` and `GRANT aidb_governance TO "<instance login role>";`
+   and, so that read-write database users and the hosted MCP session can use AIDB functions too, `GRANT aidb_users TO a1p_readwrite;` (and whichever group should read the governance traces). Whether `aidb_admins` is needed to create pipelines and knowledge bases is not documented on the pages we read: please confirm.
 2. Allow, or pre-install for our instances, the superuser-only extensions we want: `data_redaction`, `pg_prewarm`, `pgstattuple`, `pgrowlocks`, `password_profile`, `sslinfo`, `earthdistance`, `pg_surgery`; and grant execute on `system_stats` functions and read on the `address_standardizer` lookup tables.
 3. Security report: the hosted MCP session started with `agentpg token` runs as `k_mcp_rw_*` (read-write) although the tool description says restricted mode uses a read-only role; please confirm whether this is intended and offer a read-only hosted mode (and accept API keys or a scoped token for server-to-server use).
 4. `agentpg extensions create uuid-ossp` rejects the hyphen.
 5. `agentpg memory` is documented but not implemented.
+
+
+## 7. Northflank primitives and what AgentPG exposes of them
+
+AgentPG's URLs (`*.code.run`, `*.addon.code.run`) show it runs on Northflank. Northflank facts below come from its public documentation (2026-10-28, search results, not hands-on); what AgentPG exposes comes from the CLI (`agentpg sandbox create --help`). Whether AgentPG can expose more is the AgentPG team's call: this is a list of asks.
+
+**What `agentpg sandbox create` exposes today:** image, compute plan (small to large, plus GPU plans), a linked instance, one public HTTPS port, auto-pause, plain `--env` variables, injected files (`--file`), command and entrypoint overrides, a console, logs, pause and resume. Nothing else: no secret groups, no jobs or cron, no volumes, no templates, no network policies.
+
+| Northflank primitive | What it is | Which of our pieces it would help | Ask for AgentPG |
+|---|---|---|---|
+| [Secret groups](https://northflank.com/docs/v1/application/secure/manage-secret-groups) | Named collections of runtime variables or build arguments that services and jobs inherit, scoped to services, jobs, tags or environments; values can be overridden per service; secret files; enterprise accounts can bring their own KMS | The vault's platform key (`<PREFIX>_ENCRYPTION_KEY`) and the OIDC client secrets. Today they travel as plain `--env` values visible in the sandbox definition | Let a sandbox reference a secret group by name instead of carrying values; rotation then touches one place |
+| [Templates (infrastructure as code)](https://northflank.com/docs/v1/application/infrastructure-as-code/template-nodes) | Declarative project definitions with services, jobs, addons and volumes, run in ordered workflows, stored in Git (GitOps), shareable | This is what `ecoctl` re-implements for AgentPG (the manifest, ordering, idempotent re-apply, extensions, wiring). A customer would not build `ecoctl`; they would want this from the platform | An `agentpg apply -f` for a multi-sandbox, multi-instance definition, with outputs (URLs) usable as inputs; `ecoctl` would shrink to the identity and gateway registration |
+| [Jobs (cron and manual)](https://northflank.com/docs/v1/application/infrastructure-as-code/template-nodes) | One-off and scheduled workloads | The Simulator's runs, webhook retries and re-embedding. Sandboxes auto-pause when idle and do not wake on a request, which is awkward for workers | Scheduled and manual jobs next to sandboxes |
+| [Ingress security policies](https://northflank.com/docs/v1/application/network/create-path-based-security-policies) | IP allow and deny lists, basic auth, path-based rules per port. **No ingress rate limiting** (load balancers do not provide it) | Keeping admin consoles (identity, gateway) off the public internet, basic auth for demos | Expose policies per sandbox port; keep rate limiting in the gateway and apps (it is not a platform feature there) |
+| Volumes, addons | Persistent disks and managed databases | Not needed here: the instance is the database | none |
+
+**What does not map to a primitive:** the identity provider. Northflank offers [SSO for logging in to Northflank itself](https://northflank.com/docs/v1/application/collaborate/manage-an-organisation) (SAML and OpenID Connect through WorkOS, an enterprise feature) and mentions workload identities in passing; I found nothing for authenticating the end users of an app you deploy, so identity stays reference scaffolding. The same for the LLM gateway: no equivalent primitive. A related opening: AgentPG's compute plans include GPUs (`gpu-l4`, `gpu-a100-*`), so a sandbox could host an OpenAI-compatible model server as the gateway's backend: untested.
+
+Sources: Northflank docs pages linked above, and [northflank.com/features/templates](https://northflank.com/features/templates).

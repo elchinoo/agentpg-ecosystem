@@ -54,6 +54,55 @@ fleet on AgentPG: one database instance and one sandbox per app (through the `ag
 provider, the LLM gateway client for each app that uses a model, the groups and role grants, and the wiring between ShopFront and PayBroker.
 It is idempotent: running the same command again converges and never rotates a secret unless asked.
 
+## 1.1 What is the platform, what is scaffolding, what is a sample
+
+Every box in this ecosystem is exactly one of three things. Read the diagrams and the videos with this key.
+
+| Category | What it is | Items |
+|---|---|---|
+| **Platform** (AgentPG and EDB Postgres) | What a customer gets from the platform itself | The Postgres instance and its extensions (pgvector, pg_trgm, `edb_stat_monitor`, `edb_pg_tuner`, `query_advisor`, PostGIS, `unaccent`, `fuzzystrmatch`, `tcn`; AIDB once access is granted), sandboxes with an exposed HTTPS port, `agentpg db-users`, `agentpg recommend`, AgentPG's MCP server |
+| **Reference scaffolding** (useful, swappable) | Plumbing we built so the samples work end to end | identity (OpenID Connect provider), llm-gateway, the shared kit (including its vault), the labelled demo stand-in model, `ecoctl` |
+| **Sample apps** | Customer-shaped stories that show what you can build | TrustDesk, PayBroker, PagerLens, ShopFront, CityPulse, the CityPulse Simulator (test traffic) |
+
+```mermaid
+flowchart LR
+  subgraph PLATFORM["PLATFORM: AgentPG + EDB Postgres"]
+    pg[("Postgres instance per app<br/>pgvector, pg_trgm, edb_stat_monitor,<br/>query_advisor, PostGIS, tcn ...")]
+    sbx["Sandboxes (HTTPS)"]
+    mcp["AgentPG restricted MCP<br/>+ read-only db-users"]
+  end
+  subgraph SCAFFOLD["REFERENCE SCAFFOLDING (swappable)"]
+    idp["identity: OpenID Connect"]
+    gw["llm-gateway: OpenAI-compatible"]
+    kit["shared kit + vault"]
+    eco["ecoctl: deploys the fleet"]
+  end
+  subgraph SAMPLES["SAMPLE APPS"]
+    td["TrustDesk"]
+    pb["PayBroker"]
+    pl["PagerLens"]
+    sf["ShopFront"]
+    cp["CityPulse"]
+    sim["Simulator (test traffic)"]
+  end
+  SAMPLES --> sbx
+  SAMPLES --> pg
+  SAMPLES -. "sign-in" .-> idp
+  SAMPLES -. "models" .-> gw
+  SAMPLES -. "built on" .-> kit
+  mcp --> pg
+  eco -. "creates" .-> sbx
+```
+
+**What is swappable, exactly** (checked against the code, not assumed):
+
+| Scaffolding | How to swap it | The real condition |
+|---|---|---|
+| identity | Point `<PREFIX>_OIDC_ISSUER`, `_CLIENT_ID`, `_CLIENT_SECRET` at another provider | It must speak standard OpenID Connect (discovery, JWKS, PKCE) **and** be configured to emit a `roles` claim with app-namespaced role names (for example `trustdesk:admin`) and, for service clients, a `scope` claim. Only our own identity has been tested. |
+| llm-gateway | Point `LLM_BASE_URL` and `LLM_API_KEY` at any OpenAI-compatible endpoint | Embedding size must match `EMBEDDING_DIM`; budgets and per-app limits are a gateway feature you give up with a plain provider endpoint. |
+| vault | One module of the kit (`apgkit.vault`): replace it, or replace where its key comes from | Not a setting. The key comes from `<PREFIX>_ENCRYPTION_KEY` (platform-managed) or the admin password. |
+| ecoctl | Not needed to run any app; it only deploys the fleet | Any other way of creating the instances and sandboxes works. |
+
 ## 2. The projects
 
 All sibling directories live next to `ecosystem/` under `/Users/charly.batista/proj/edb/dev-cloud`. Each has its own README; this is the

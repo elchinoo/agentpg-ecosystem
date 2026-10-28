@@ -252,3 +252,10 @@ def test_status_warns_about_drift_without_failing_and_points_to_sync(deployed, c
     assert "warning:" in out and "paybroker, trustdesk" in out and "ecoctl llm sync" in out
     assert "model_not_allowed" in out or "HTTP 403" in out                                   # the live chat test still runs (and shows the lockout)
     assert [c["client"] for c in gw.chat_calls].count("paybroker") == 2                      # once per status run
+
+
+def test_extra_aliases_that_sync_keeps_are_not_drift_but_a_real_difference_is():
+    from ecoctl.llm_sync import AppDiff, Row
+    assert AppDiff("trustdesk", rows=[Row("trustdesk", "aliases", "embed, qwen", "(not listed)", "extra, kept")]).drift is False
+    assert AppDiff("trustdesk", rows=[Row("trustdesk", "rpm", "10", "60", "set")]).drift is True
+    assert AppDiff("trustdesk", rows=[Row("trustdesk", "aliases", "a", "a, b", "add b"), Row("trustdesk", "aliases", "x", "(not listed)", "extra, kept")]).drift is True
