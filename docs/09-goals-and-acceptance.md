@@ -27,7 +27,7 @@ This page defines what the showcase must achieve and how we know each goal is me
 | G3 | One Postgres, five models | One SQL answers a district question across relational, time series, JSON, geo and vector | **Met** 2026-10-28 (`/api/districts/{id}/explain`, 5 models, 1 round trip) |
 | G4 | DB-layer security and audit | PayBroker audit chain verifies; a tampered row is named; row-level security is effective | Chain intact and RLS effective **met** 2026-10-28. Tamper-and-verify demo **not yet shown live** |
 | G5 | AI that cites and can be checked | TrustDesk quotes are verified against source rows; PagerLens Ask marks each citation verified | **Met** 2026-10-28 (REQ-000015; Ask answered with two verified incident citations) |
-| G6 | AI access to the database is safe | Read-only MCP user cannot write, cannot read masked columns from base tables, and the masking survives grants after startup | Read-only and write-refused **met** (7 of 7, 2026-10-28). Masking durability **was broken** (base tables reopened by `db-users create`); fix in kit 0.3.1 is built, not yet deployed |
+| G6 | AI access to the database is safe | Read-only MCP user cannot write, cannot read masked columns from base tables, and the masking survives grants after startup | **Met** 2026-10-28 after kit 0.3.1: 7 of 7 apps deny the base tables; writes refused; durability proven live (a new read-only database user re-opened TrustDesk `employee` at 16:52:39, the app closed it again by 16:55:55 without a restart); `masking_drift_tables` 0 on all apps. Before the fix the tables stayed open until the next restart |
 | G7 | Propose, never auto-apply | PagerLens tuning shows proposals, applies nothing by default | **Met** 2026-10-28 (server settings marked not applicable; apply off) |
 | G8 | Swappable pieces are explicit | Docs and videos say in the first 30 s that identity, gateway and vault are swappable | Docs **met**. Videos **not yet re-recorded** |
 | G9 | Deployable by customers their own way | `ecoctl` (fast) and an Ansible recipe that deploys on AgentPG | Both built. Ansible has run only against fakes: first real `--check` dry run **not yet done** |
@@ -57,6 +57,6 @@ This page defines what the showcase must achieve and how we know each goal is me
 ## Definition of done for this phase
 
 - Every row above is **Met**, or has a written reason and an owner.
-- All eight apps run kit 0.3.1 with the masking re-assert, and `masking_drift_tables` is 0 on every app.
+- ~~All eight apps run kit 0.3.1 with the masking re-assert, and `masking_drift_tables` is 0 on every app.~~ Done 2026-10-28.
 - The Ansible `--check` dry run has been run once on a real account.
 - Customer videos re-recorded against the live behaviour above.
