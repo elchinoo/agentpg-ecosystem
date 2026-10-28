@@ -22,6 +22,8 @@ class FakeAgentPG:
         self.db_users: dict[str, dict[str, dict]] = {}      # instance id -> username -> {password, permission}
         self.recommendations: dict[str, str] = {}           # instance id -> the text `recommend all` prints (missing: query_advisor is not installed)
         self.connect_text = '{"connection_string": "postgresql://admin:x@db.example.test:5432/appdb?sslmode=require"}'
+        self.metrics: dict[str, dict] = {}       # sandbox name -> the `metrics` object of `sandbox status --json`
+        self.metrics_fail = False                # an old CLI that rejects --json
         self.url_with_id = False                 # like the real platform: the sandbox id is part of its URL, so a recreated sandbox gets a new one
 
     def __call__(self, args: list[str]) -> str:
@@ -70,6 +72,11 @@ class FakeAgentPG:
         if a[:2] == ["sandbox", "list"]:
             return "ID NAME IMAGE PLAN STATUS INSTANCE ERROR\n-- ---- ----- ---- ------ -------- -----\n" + "".join(
                 f"{s['id']} {n} {s['image']} small running {s['instance']} -\n" for n, s in self.sandboxes.items())
+        if a[:2] == ["sandbox", "status"] and "--json" in a:
+            if self.metrics_fail:
+                raise AgentPGError("unknown flag: --json")
+            name = next(n for n, s in self.sandboxes.items() if s["id"] == a[2])
+            return json.dumps({"id": a[2], "name": name, "status": "running", "metrics": self.metrics.get(name, {})})
         if a[:2] == ["sandbox", "status"]:
             name = next(n for n, s in self.sandboxes.items() if s["id"] == a[2])
             sb = self.sandboxes[name]

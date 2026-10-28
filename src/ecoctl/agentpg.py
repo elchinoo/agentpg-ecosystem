@@ -29,9 +29,9 @@ class Command:
         return "agentpg " + " ".join(out)
 
 
-def _run(args: list[str]) -> str:
+def _run(args: list[str], timeout: float = 300) -> str:
     try:
-        r = subprocess.run(args, capture_output=True, text=True, timeout=300, check=False)
+        r = subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise AgentPGError(f"could not run {args[0]}: {exc}") from exc
     if r.returncode != 0:
@@ -42,6 +42,8 @@ def _run(args: list[str]) -> str:
 class AgentPG:
     def __init__(self, run: Callable[[list[str]], str] = _run, binary: str = "agentpg"):
         self._run, self.bin = run, binary
+        # Optional reads (live metrics) must never make a command slow: with the real CLI they get a short timeout.
+        self._quick = (lambda args: _run(args, 15)) if run is _run else run
 
     def run(self, command: Command) -> str:
         return self._run([self.bin, *command.args])
@@ -154,6 +156,44 @@ class AgentPG:
 
     def sandbox_url(self, sandbox_id: str) -> str | None:
         return self.sandbox_state(sandbox_id)[1]
+
+    def sandbox_metrics(self, sandbox_id: str) -> dict[str, str]:
+        """The latest point of each live metric from `sandbox status --json`, as display text keyed cpu, memory, network_in, network_out
+        (units as the platform reports them). Tolerant by design: a missing metric, an empty series, a paused sandbox, an old CLI that rejects
+        --json, a timeout or odd output all give fewer keys, or {}. Never raises."""
+        try:
+            data = parse_json(self._quick([self.bin, "sandbox", "status", sandbox_id, "--json"]))
+        except Exception:                                       # noqa: BLE001 - optional telemetry must not fail a command
+            return {}
+        metrics = data.get("metrics") if isinstance(data, dict) else None
+        if not isinstance(metrics, dict):
+            return {}
+        out = {}
+        for key, name in (("cpu", "cpu"), ("memory", "memory"), ("networkIngress", "network_in"), ("networkEgress", "network_out")):
+            text = _latest(metrics.get(key))
+            if text:
+                out[name] = text
+        return out
+
+
+def _latest(metric) -> str | None:
+    """'0.5%' or '1 kbps' from the newest numeric point across the series of one metric, or None."""
+    if not isinstance(metric, dict) or not isinstance(metric.get("series"), list):
+        return None
+    best = None                                                 # (timestamp text, value)
+    for series in metric["series"]:
+        for pt in (series.get("points") if isinstance(series, dict) else None) or []:
+            v = pt.get("value") if isinstance(pt, dict) else None
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or v != v:
+                continue
+            ts = str(pt.get("ts") or "")
+            if best is None or ts >= best[0]:
+                best = (ts, v)
+    if best is None:
+        return None
+    num = f"{best[1]:.1f}".removesuffix(".0")
+    unit = str(metric.get("unit") or "").strip()
+    return f"{num}%" if unit.lower() in {"pct", "percent", "%"} else f"{num} {unit}".strip()
 
 
 def parse_json(text: str):

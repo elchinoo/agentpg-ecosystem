@@ -2,6 +2,7 @@
 import argparse
 import json
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import httpx
@@ -117,13 +118,14 @@ def cmd_recreate(args) -> int:
 def cmd_status(args) -> int:
     ctx = _ctx(args)
     bad = 0
-    print(f"{'app':<16}{'health':<10}{'ready':<10}url")
+    live = _live_metrics(ctx)
+    print(f"{'app':<16}{'health':<10}{'ready':<10}{'cpu':<8}{'mem':<8}{'net in/out':<26}url")
     for key, app in ctx.manifest.everything().items():
         url = ctx.state.data["apps"].get(key, {}).get("url")
         if not app.deploy:
             continue
         if not url:
-            print(f"{key:<16}{'-':<10}{'-':<10}(not deployed)")
+            print(f"{key:<16}{'-':<10}{'-':<10}{'-':<8}{'-':<8}{'-':<18}(not deployed)")
             continue
         row = []
         for path in (app.health, "/readyz"):
@@ -132,7 +134,9 @@ def cmd_status(args) -> int:
             except httpx.HTTPError:
                 row.append("down")
         bad += row[0] != "200"
-        print(f"{key:<16}{row[0]:<10}{row[1]:<10}{url}")
+        m = live.get(key, {})
+        net = f"{m.get('network_in', '-')} / {m.get('network_out', '-')}" if "network_in" in m or "network_out" in m else "-"
+        print(f"{key:<16}{row[0]:<10}{row[1]:<10}{m.get('cpu', '-'):<8}{m.get('memory', '-'):<8}{net:<26}{url}")
     bad += _features_status(ctx)
     bad += _llm_status(ctx)
     bad += print_status(ctx)
@@ -157,6 +161,16 @@ def cmd_status(args) -> int:
                 print(f"  {cid:<26}{r['kind'] if r else '-':<9}{drift or 'ok'}")
                 bad += bool(drift)
     return 1 if bad else 0
+
+
+def _live_metrics(ctx) -> dict[str, dict[str, str]]:
+    """Latest sandbox metrics per deployed app: one `sandbox status --json` call each, run concurrently. Any failure gives {} for that app."""
+    todo = {k: v["sandbox_id"] for k, v in ctx.state.data["apps"].items() if v.get("url") and v.get("sandbox_id")}
+    if not todo:
+        return {}
+    with ThreadPoolExecutor(max_workers=min(8, len(todo))) as pool:
+        futures = {k: pool.submit(ctx.agentpg.sandbox_metrics, sid) for k, sid in todo.items()}
+        return {k: f.result() for k, f in futures.items()}
 
 
 def _features_status(ctx) -> int:

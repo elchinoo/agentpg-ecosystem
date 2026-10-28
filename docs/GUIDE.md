@@ -519,7 +519,7 @@ Allow a couple of minutes per app (section 12).
 
 Read-only. Prints one table and three sections, and exits 1 if anything is wrong.
 
-1. **Apps**: for each deployed app, the HTTP status of its `health` path and of `/readyz` (`down` on a connection error). `not deployed` when the state has no URL.
+1. **Apps**: for each deployed app, the HTTP status of its `health` path and of `/readyz` (`down` on a connection error), then the platform's live sandbox metrics: `cpu` and `mem` (latest point, percent) and `net in / out` (latest point, shown with the unit the platform reports, for example `1 kbps`). The metrics come from one `agentpg sandbox status <id> --json` call per app, run concurrently with a 15 s timeout. Anything unavailable (no metrics, empty series, paused sandbox, an older CLI that rejects `--json`, a failed or slow call) shows `-` and never fails `status`. `not deployed` when the state has no URL. The metrics columns are covered by fake-CLI tests; the `--json` shape was verified against the platform, but `status` itself was not run live with this feature.
 2. **LLM gateway**: for each LLM app that has a sandbox, whether its gateway client exists, whether its limits match the manifest (`ok` or `DRIFT`), and one tiny chat
    completion made with the app's own key (this call is metered like any other, about one token). A drift is a warning that points to `llm sync`, not a failure.
 3. **CONNECTIONS**: for each connected pair, merchant, origin, keys, webhook and the shop's own connection test. Read-only calls.
@@ -527,8 +527,8 @@ Read-only. Prints one table and three sections, and exits 1 if anything is wrong
 5. **identity registry**: for every client the deployment holds, whether it is registered, its kind, and `launcher URL differs` drift.
 
 ```
-app             health    ready     url
-identity        200       200       https://...
+app             health    ready     cpu     mem     net in/out        url
+identity        200       200       0.5%    12.6%   1 kbps / 1 kbps   https://...
 ```
 
 The first column holds manifest keys, identity first. The sample row is illustrative of the layout in `cmd_status`, not captured output.

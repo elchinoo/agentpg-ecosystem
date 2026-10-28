@@ -32,7 +32,7 @@ uv venv && uv pip install -e ".[dev]"
 .venv/bin/ecoctl plan                    # show every command and API call; changes nothing
 .venv/bin/ecoctl apply                   # the same, as a dry run
 .venv/bin/ecoctl apply --execute         # asks first, then creates and registers; safe to run again
-.venv/bin/ecoctl status                  # health of each app, each LLM client + one real call, and drift from the identity registry
+.venv/bin/ecoctl status                  # health and live CPU/memory/network of each app, each LLM client + one real call, and drift from the identity registry
 .venv/bin/ecoctl llm test trustdesk      # one tiny chat call through the LLM gateway with that app's own key
 .venv/bin/ecoctl connect --dry-run       # what connecting ShopFront to PayBroker would change (apply does it for you)
 .venv/bin/ecoctl env trustdesk           # the environment an app is created with (secrets shown as ***; --reveal prints them)

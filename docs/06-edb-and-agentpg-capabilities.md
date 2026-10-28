@@ -92,7 +92,7 @@ Checked on the real CLI and account (2026-10-28). "Used" means an app or `ecoctl
 |---|---|---|
 | Instances (Postgres 18), `databases`, several databases per instance | works | Used: one instance per app. An instance can hold several databases, so a smaller footprint is possible if instance count becomes a limit |
 | Sandboxes: image, plan, linked instance, one HTTPS port, auto-pause, `--env`, `--file`, command override, console, logs, pause, resume | works | Used by `ecoctl`. GPU plans (`gpu-l4`, `gpu-a100-*`) exist and are untried |
-| `sandbox status` live metrics (CPU, memory, network in and out) | works | **Not used yet.** Cheap win: show them in `ecoctl status`, and feed them to PagerLens as real platform telemetry |
+| `sandbox status` live metrics (CPU, memory, network in and out) | works | **Used: `ecoctl status`** (columns cpu, mem, net in/out, from `sandbox status --json`). Still open: feed them to PagerLens as real platform telemetry |
 | Extensions through `agentpg extensions create` | works for 17 (see section 2) | Used by `ecoctl apply` |
 | `agentpg recommend` (index and statistics advice from `query_advisor`) | works | Used: `ecoctl insights` |
 | `db-users` with `read` or `read_write` | works | Used: `ecoctl mcp users` creates the read-only user |
