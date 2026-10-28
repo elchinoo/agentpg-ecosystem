@@ -1,0 +1,24 @@
+---
+# The part of `common` that only reads: the manifest and the fleet. destroy.yml uses it alone (no secrets are generated to tear a fleet down).
+- name: Read ecosystem.yaml
+  ansible.builtin.include_vars:
+    file: "{{ eco_manifest_path }}"
+    name: eco_manifest
+  tags: always
+
+- name: Derive the fleet (defaults, creation order, URL variables, gateway limits)
+  ansible.builtin.set_fact:
+    eco_fleet: >-
+      {{ eco_manifest
+         | combine({'agentpg': (eco_manifest.agentpg | default({}))
+                    | combine({'registry': eco_image_registry} if eco_image_registry else {})
+                    | combine({'tag': eco_image_tag} if eco_image_tag else {})}, recursive=true)
+         | eco_fleet(eco_only) }}
+  tags: always
+
+- name: What this recipe creates, in creation order (identity first)
+  ansible.builtin.set_fact:
+    eco_run_list: >-
+      {{ (['identity'] if eco_identity_mode == 'managed' else [])
+         + (eco_fleet.deployed | reject('equalto', eco_fleet.llm.gateway) | list if eco_llm_mode != 'managed' else eco_fleet.deployed) }}
+  tags: always

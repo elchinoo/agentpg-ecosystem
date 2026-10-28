@@ -99,6 +99,44 @@ A sandbox's URL contains its id, so recreating a sandbox gives it a new URL and 
   The new URLs flow into the dependents' environments in the same run.
 - A new image is picked up the same way (AgentPG pulls on creation): recreate.
 
+## 6a. Tear down, and the throwaway-fleet workflow
+
+`destroy.yml` removes a fleet: its sandboxes, then its instances (**a database and its data are gone for good**). Nothing else.
+
+```bash
+cd ecosystem/ansible
+.venv/bin/ansible-playbook destroy.yml --check -e eco_manifest_path=/tmp/ecosystem-ansible-test.yaml -e eco_destroy_confirm=ecoans   # prints the list, deletes nothing
+.venv/bin/ansible-playbook destroy.yml         -e eco_manifest_path=/tmp/ecosystem-ansible-test.yaml -e eco_destroy_confirm=ecoans   # deletes
+```
+
+Safety rails (each is tested):
+
+- **Confirmation.** It refuses unless `eco_destroy_confirm` equals the manifest's `fleet:` exactly, and only for `eco_target: agentpg`. It checks this before it reads the secrets directory or calls `agentpg`.
+- **Exact names only.** It deletes the sandboxes `<fleet>-<app>` and the instances `<fleet>-<app>-db` of the apps this recipe creates, nothing matched by prefix: with fleet `ecoans`, an instance
+  called `eco-trustdesk-db` or `ecoans-trustdesk-db-old` is never touched. Every deletion carries the list of allowed names and the module refuses any other.
+- **Ids come from AgentPG, not the state file.** Each object is resolved by name from `agentpg sandbox list` / `agentpg instances list` at run time; a different id in the state file is only mentioned.
+- **Order.** Sandboxes first, reverse of creation (the apps that call others, then the callees, identity last), then the instances.
+- **Prints first.** The full list, then what exists now; in `--check` that is all it does.
+- **Idempotent.** An object already gone is reported (`already gone`) and is not a change; a second run changes nothing.
+- `-e '{"eco_destroy_only": ["trustdesk"]}'` deletes just those apps (identity only if you list `identity`).
+
+What it does **not** delete: anything outside the fleet name; the local `ansible/.secrets/<fleet>/` (generated keys, client secrets, the database keys), unless you add `-e eco_destroy_secrets=true`
+(it then removes that directory, and only when it is named after the fleet; the default prints a reminder); the apps' `ghcr.io` images; anything created by hand in the sandboxes. The state
+of an app (`agentpg/<app>.json`) is removed together with its instance, since it describes an instance that no longer exists. `eco_target: hosts` has no teardown (remove the containers and databases yourself).
+
+**Recommended throwaway-fleet workflow** (separate fleet name `ecoans`, so a fleet `ecoctl` runs is never involved):
+
+```bash
+cd ecosystem/ansible
+sed 's/^fleet: eco /fleet: ecoans /' ../ecosystem.yaml > /tmp/ecosystem-ansible-test.yaml
+M="-e eco_manifest_path=/tmp/ecosystem-ansible-test.yaml"
+.venv/bin/ansible-playbook site.yml --check $M                                  # 1. dry run (reads only)
+.venv/bin/ansible-playbook site.yml $M                                          # 2. apply
+.venv/bin/ansible-playbook verify.yml $M                                        # 3. verify
+.venv/bin/ansible-playbook destroy.yml --check $M -e eco_destroy_confirm=ecoans # 4. what a teardown would delete
+.venv/bin/ansible-playbook destroy.yml $M -e eco_destroy_confirm=ecoans -e eco_destroy_secrets=true   # 5. drop everything, local secrets included
+```
+
 ## 6. How it maps to platform, scaffolding and samples
 
 The three labels of [GUIDE section 1.1](GUIDE.md#11-what-is-the-platform-what-is-scaffolding-what-is-a-sample), and the variables that swap the swappable ones:
@@ -175,7 +213,7 @@ on a shared terminal. Check mode still creates missing generated secrets (sectio
 - Rotation on request: delete a file under `.secrets/` and re-run (the lost secret is re-issued); there is no `--rotate`.
 - Confirmation prompt and parallel metric reads. Ansible runs what you tell it to.
 - Recovering a database key that was not saved: if the instance exists but `agentpg/<app>.json` has no key, the recipe cannot reset it (`ecoctl db --reset` can).
-- Teardown (neither tool has a destroy command; [DEPLOY section 14](DEPLOY.md#14-tear-it-all-down)).
+- Teardown: the recipe has one (`destroy.yml`, section 6a); `ecoctl` deliberately has none ([DEPLOY section 14](DEPLOY.md#14-tear-it-all-down)).
 - `--check` is not `plan`: it shows what would be created or changed on AgentPG, not the identity, gateway and connect calls (they need running apps).
 - A new image tag alone does not recreate a sandbox (the environment hash does not include it, as in `ecoctl`): use `eco_recreate`.
 
@@ -184,7 +222,7 @@ AgentPG's whichever tool created the fleet.
 
 ## 9. Tags, files
 
-`ansible/`: `site.yml` (the stages), `infra_hosts.yml` (hosts target only), `verify.yml`, `library/agentpg_{instance,extension,sandbox}.py` with `module_utils/eco_agentpg.py`
+`ansible/`: `site.yml` (the stages), `destroy.yml` (teardown), `infra_hosts.yml` (hosts target only), `verify.yml`, `library/agentpg_{instance,extension,sandbox}.py` with `module_utils/eco_agentpg.py`
 (the CLI wrapper; `ansible-doc -M library agentpg_sandbox` shows each module), `plugins/filter/eco.py` (reads the manifest), `roles/` (`common`, `identity`, `llm_gateway`, `app`,
 `connect`, `verify`; for hosts also `container_host`, `postgres_db`, `proxy`), `inventories/agentpg` (default), `inventories/own-infra`, `inventories/own-infra-local`.
 All variables and their defaults: `roles/common/defaults/main.yml`.
@@ -194,7 +232,7 @@ All variables and their defaults: `roles/common/defaults/main.yml`.
 | Check | Result |
 |---|---|
 | `ansible-playbook --syntax-check`, `ansible-inventory --graph`, `ansible-lint`, `yamllint`, `ansible-doc` of the modules | pass |
-| `tests/test_ansible_recipe.py` (manifest sync, env of every app equal to `ecoctl.plan.app_env` for both targets, order, specs, command arguments equal to `ecoctl.agentpg.AgentPG`, the modules' behaviour against ecoctl's in-memory fake CLI: create, converge, changed environment, recreate, deleted sandbox, existing sandbox, check mode, wait loops, state mode 0600) | pass |
+| `tests/test_ansible_recipe.py` (manifest sync, env of every app equal to `ecoctl.plan.app_env` for both targets, order, specs, command arguments equal to `ecoctl.agentpg.AgentPG`, the modules' behaviour against ecoctl's in-memory fake CLI (plus an `instances delete`): teardown leaves the fake account empty, a second one changes nothing, wrong confirmation refused, a similarly named foreign instance untouched, check mode deletes nothing; create, converge, changed environment, recreate, deleted sandbox, existing sandbox, check mode, wait loops, state mode 0600) | pass |
 | The **whole AgentPG-target playbook** against a **stand-in `agentpg` executable** (ecoctl's fake CLI, with state kept between calls) and ecoctl's in-memory identity, gateway, PayBroker and ShopFront fakes served over HTTP: create, no-op re-run (0 mutating calls), `--check` (only `instances list` and `sandbox list`), `eco_recreate` of the gateway (sandbox deleted and created again for it and its dependents, instances and extensions untouched), changed environment reported then applied, interrupted run resumed | ran |
 | The AgentPG path in a **clean venv with only `ansible-core`** and no collections visible (`ANSIBLE_COLLECTIONS_PATH=/nonexistent`): syntax check, inventory, `--check` and apply | ran |
 | The real `agentpg` CLI, a real AgentPG account, the real identity, gateway, PayBroker and ShopFront servers | **not run** |

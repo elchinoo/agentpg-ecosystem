@@ -6,7 +6,8 @@ DOCUMENTATION = r"""
 module: agentpg_sandbox
 short_description: Ensure an AgentPG sandbox runs an image with an environment (through the agentpg CLI)
 description:
-  - Creates the sandbox (C(agentpg sandbox create NAME --image I --instance ID --port P [--auto-pause=false] [--plan X] --env K=V ...)) when missing and waits for its URL.
+  - "With I(state=absent) deletes the sandbox named I(name) (C(agentpg sandbox delete ID --force)). The id is resolved by name from C(agentpg sandbox list) at run time. A name not in I(allowed_names) is refused. Already gone is not a change. Only I(name), I(state_file) and I(allowed_names) are used then."
+  - With I(state=present), creates the sandbox (C(agentpg sandbox create NAME --image I --instance ID --port P [--auto-pause=false] [--plan X] --env K=V ...)) when missing and waits for its URL.
   - An existing sandbox is kept. When its environment differs from the one it was created with (compared by hash, kept in I(state_file)) the module reports
     it (C(env_differs)); with I(on_change=recreate), or I(recreate=true), it deletes the sandbox and creates it again on the same database.
   - A sandbox's URL contains its id, so a recreated sandbox has a new URL and the apps that use it need their environment (and so a recreation) too.
@@ -14,11 +15,13 @@ description:
   - All values pass through the process list of this machine for a moment, as with ecoctl.
   - Check mode only reads and reports.
 options:
+  state: {description: Whether the sandbox should exist., choices: [present, absent], default: present, type: str}
+  allowed_names: {description: With state=absent, the only names that may be deleted; any other name is refused., type: list, elements: str}
   name: {description: Sandbox name., required: true, type: str}
-  image: {description: Image reference., required: true, type: str}
-  instance_id: {description: The instance id (empty in check mode when the instance does not exist yet)., required: true, type: str}
+  image: {description: Image reference (state=present)., type: str}
+  instance_id: {description: The instance id (state=present; empty in check mode when the instance does not exist yet)., type: str}
   port: {description: Port the app listens on., default: 8000, type: int}
-  env: {description: Non-secret environment., required: true, type: dict}
+  env: {description: Non-secret environment (state=present)., type: dict}
   secret_env: {description: Environment values that are secrets (generated keys, client secrets, API keys)., default: {}, type: dict, no_log: true}
   auto_pause: {description: Pause the sandbox when idle., default: true, type: bool}
   plan: {description: Compute plan (small, medium, large)., type: str}
@@ -38,16 +41,24 @@ recreated: {returned: always, type: bool, description: This run deleted it for r
 """
 
 from ansible.module_utils.basic import AnsibleModule  # noqa: E402
-from ansible.module_utils.eco_agentpg import AgentPGError, Cli, State, ensure_sandbox  # noqa: E402
+from ansible.module_utils.eco_agentpg import AgentPGError, Cli, State, ensure_sandbox, ensure_sandbox_absent  # noqa: E402
 
 
 def main():
-    m = AnsibleModule(argument_spec=dict(name=dict(required=True), image=dict(required=True), instance_id=dict(required=True), port=dict(type="int", default=8000),
-                                         env=dict(type="dict", required=True), secret_env=dict(type="dict", default={}, no_log=True), auto_pause=dict(type="bool", default=True), plan=dict(),
+    m = AnsibleModule(argument_spec=dict(state=dict(default="present", choices=["present", "absent"]), allowed_names=dict(type="list", elements="str"),
+                                         name=dict(required=True), image=dict(), instance_id=dict(), port=dict(type="int", default=8000),
+                                         env=dict(type="dict"), secret_env=dict(type="dict", default={}, no_log=True), auto_pause=dict(type="bool", default=True), plan=dict(),
                                          recreate=dict(type="bool", default=False), on_change=dict(default="report", choices=["report", "recreate"]),
                                          state_file=dict(type="path", required=True), agentpg_bin=dict(default="agentpg"),
-                                         poll_interval=dict(type="float", default=5), timeout=dict(type="int", default=420)), supports_check_mode=True)
+                                         poll_interval=dict(type="float", default=5), timeout=dict(type="int", default=420)),
+                      required_if=[("state", "present", ("image", "instance_id", "env"))], supports_check_mode=True)
     p = m.params
+    if p["state"] == "absent":
+        try:
+            m.exit_json(**ensure_sandbox_absent(Cli(binary=p["agentpg_bin"], interval=p["poll_interval"], timeout=p["timeout"]), State(p["state_file"]), p["name"],
+                                                p["allowed_names"], m.check_mode))
+        except AgentPGError as exc:
+            m.fail_json(msg=str(exc))
     env = {k: str(v) for k, v in {**p["env"], **p["secret_env"]}.items()}
     try:
         out = ensure_sandbox(Cli(binary=p["agentpg_bin"], interval=p["poll_interval"], timeout=p["timeout"]), State(p["state_file"]), p["name"], p["image"],

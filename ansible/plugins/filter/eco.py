@@ -200,6 +200,13 @@ def eco_recreate_set(fleet: dict, keys) -> list[str]:
     return [k for k in fleet["deployed"] if k in set(keys) | set(eco_dependents(fleet, keys))]
 
 
+def eco_destroy_plan(fleet: dict, run_list: list, only=None) -> list[dict]:
+    """What a teardown may delete, in deletion order: the reverse of creation (callers before callees, identity last). Names are exactly the ones the recipe
+    creates, `<fleet>-<app>` and `<fleet>-<app>-db`, for apps of the manifest only; `only` narrows the list (it never widens it)."""
+    keys = [k for k in reversed(run_list) if not only or k in only]
+    return [{"key": k, "sandbox": eco_get(fleet, k)["sandbox_name"], "instance": eco_get(fleet, k)["instance_name"]} for k in keys]
+
+
 def eco_db_name(fleet: dict, key: str) -> str:
     """Database and login role of an app: `<fleet>_<key>` with dashes turned into underscores (one of each per app, like ecoctl's instance per app)."""
     return f"{fleet['fleet']}_{key}".replace("-", "_")

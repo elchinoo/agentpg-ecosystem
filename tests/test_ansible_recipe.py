@@ -363,3 +363,129 @@ def test_the_agentpg_path_needs_only_ansible_core():
     # the hosts target is where the collection belongs, and requirements.yml says so
     assert "community.postgresql" in (ANSIBLE / "requirements.yml").read_text()
     assert "hosts" in (ANSIBLE / "requirements.yml").read_text().lower()
+
+
+# ---- teardown (destroy.yml) ----------------------------------------------------------------------------------------------------
+class FakeWithDelete(FakeAgentPG):
+    """ecoctl's fake CLI plus `instances delete`, which (like the platform, assumed) refuses an instance that still has sandboxes."""
+
+    def __call__(self, args):
+        if args[1:3] == ["instances", "delete"]:
+            self.calls.append(args)
+            name = next((n for n, i in self.instances.items() if i == args[3]), None)
+            if name is None:
+                raise ap.AgentPGError("instance not found")
+            if any(s["instance"] == args[3] for s in self.sandboxes.values()):
+                raise ap.AgentPGError("instance still has sandboxes")
+            del self.instances[name]
+            return "deleted\n"
+        return super().__call__(args)
+
+
+def _fleet_on(fake, tmp_path, fleet_name="ecoans", keys=("identity", "llmgw", "trustdesk")):
+    plan = eco.eco_destroy_plan(eco.eco_fleet({**yaml.safe_load(MANIFEST.read_text()), "fleet": fleet_name}), list(keys))      # reverse order: build in reverse of it
+    states = {}
+    for item in reversed(plan):
+        st = ap.State(str(tmp_path / "agentpg" / f"{item['key']}.json"))
+        inst = ap.ensure_instance(_cli(fake), st, item["instance"], "small")
+        ap.ensure_extensions(_cli(fake), st, inst["instance_id"], ["vector"])
+        ap.ensure_sandbox(_cli(fake), st, item["sandbox"], "img", inst["instance_id"], 8000, {"A": "1"})
+        states[item["key"]] = st
+    return plan, states
+
+
+def _destroy(fake, plan, tmp_path, check=False):
+    names_s, names_i = [p["sandbox"] for p in plan], [p["instance"] for p in plan]
+    out = []
+    for p in plan:
+        out.append(ap.ensure_sandbox_absent(_cli(fake), ap.State(str(tmp_path / "agentpg" / f"{p['key']}.json")), p["sandbox"], names_s, check))
+    for p in plan:
+        out.append(ap.ensure_instance_absent(_cli(fake), ap.State(str(tmp_path / "agentpg" / f"{p['key']}.json")), p["instance"], names_i, check))
+    return out
+
+
+def test_destroy_plan_uses_exact_names_in_reverse_creation_order(manifest):
+    fleet = eco.eco_fleet({**yaml.safe_load(MANIFEST.read_text()), "fleet": "ecoans"})
+    run = ["identity", *fleet["deployed"]]
+    plan = eco.eco_destroy_plan(fleet, run)
+    assert [p["key"] for p in plan] == list(reversed(run)) and plan[-1]["key"] == "identity"
+    assert all(p["sandbox"] == f"ecoans-{p['key']}" and p["instance"] == f"ecoans-{p['key']}-db" for p in plan)
+    assert [p["key"] for p in eco.eco_destroy_plan(fleet, run, ["trustdesk", "nosuch"])] == ["trustdesk"]          # only narrows, never widens
+    assert "pagerlens-agent" not in {p["key"] for p in plan}                                                      # deploy: false is never created, never deleted
+
+
+def test_destroy_empties_the_fleet_and_touches_nothing_else(tmp_path):
+    fake = FakeWithDelete()
+    fake("agentpg create --name eco-trustdesk-db --size small --json".split())                   # someone else's fleet 'eco', same app names
+    fake("agentpg sandbox create eco-trustdesk --image foreign --instance inst-1 --port 8000".split())
+    fake("agentpg create --name ecoans-trustdesk-db-old --size small --json".split())            # a similar name that is not ours: never matched by prefix
+    plan, _ = _fleet_on(fake, tmp_path)
+    before = set(fake.instances), set(fake.sandboxes)
+    out = _destroy(fake, plan, tmp_path)
+    assert [o["changed"] for o in out] == [True] * len(out)
+    assert set(fake.instances) == {"eco-trustdesk-db", "ecoans-trustdesk-db-old"} and set(fake.sandboxes) == {"eco-trustdesk"}, before
+    deletes = fake.commands("sandbox", "delete") + fake.commands("instances", "delete")
+    assert len(deletes) == 2 * len(plan)
+    order = [c[1] for c in fake.calls if c[2] == "delete"]
+    assert order == ["sandbox"] * len(plan) + ["instances"] * len(plan)                       # sandboxes first, then instances
+    assert not list((tmp_path / "agentpg").glob("*.json"))                                     # no state describing a deleted instance is left
+    assert "a1p_sk" not in str(out)                                                           # no database key in any result
+
+
+def test_a_second_destroy_changes_nothing(tmp_path):
+    fake = FakeWithDelete()
+    plan, _ = _fleet_on(fake, tmp_path)
+    _destroy(fake, plan, tmp_path)
+    fake.calls.clear()
+    out = _destroy(fake, plan, tmp_path)
+    assert not any(o["changed"] for o in out) and all("already gone" in o["msg"] for o in out)
+    assert not [c for c in fake.calls if c[2:3] == ["delete"]]
+
+
+def test_destroy_in_check_mode_deletes_nothing(tmp_path):
+    fake = FakeWithDelete()
+    plan, _ = _fleet_on(fake, tmp_path)
+    n_inst, n_sbx = len(fake.instances), len(fake.sandboxes)
+    out = _destroy(fake, plan, tmp_path, check=True)
+    assert all(o["changed"] and o["msg"].startswith("would delete") for o in out)
+    assert (len(fake.instances), len(fake.sandboxes)) == (n_inst, n_sbx) and not [c for c in fake.calls if c[2:3] == ["delete"]]
+    assert len(list((tmp_path / "agentpg").glob("*.json"))) == len(plan)
+
+
+def test_destroy_refuses_a_name_that_is_not_in_the_plan_and_ids_come_from_the_listing(tmp_path):
+    fake = FakeWithDelete()
+    fake("agentpg create --name eco-trustdesk-db --size small --json".split())
+    st = ap.State(str(tmp_path / "x.json"))
+    with pytest.raises(ap.AgentPGError, match="not one of this fleet's objects"):
+        ap.ensure_instance_absent(_cli(fake), st, "eco-trustdesk-db", ["ecoans-trustdesk-db"])
+    with pytest.raises(ap.AgentPGError, match="not one of this fleet's objects"):
+        ap.ensure_sandbox_absent(_cli(fake), st, "eco-trustdesk", ["ecoans-trustdesk"])
+    assert "eco-trustdesk-db" in fake.instances
+    ap.State(str(tmp_path / "y.json"))
+    plan, _ = _fleet_on(fake, tmp_path)
+    p = ap.State(str(tmp_path / "agentpg" / "trustdesk.json"))
+    p.data["instance_id"], p.data["sandbox_id"] = "inst-999", "sbx-999"                         # a stale state file: its ids must not be used
+    p.save()
+    out = ap.ensure_sandbox_absent(_cli(fake), p, "ecoans-trustdesk", ["ecoans-trustdesk"])
+    assert out["changed"] and "sbx-999" in out["msg"] and "AgentPG's id is used" in out["msg"]
+    assert ["sandbox", "delete", out["sandbox_id"], "--force"] == fake.commands("sandbox", "delete")[-1][1:]
+    assert ap.delete_instance_args("inst-1") == ["instances", "delete", "inst-1", "--force"]
+
+
+def test_destroy_playbook_guards_before_it_touches_anything():
+    play = yaml.safe_load((ANSIBLE / "destroy.yml").read_text())[0]
+    tasks = play["tasks"]
+    names = [t["name"] for t in tasks]
+    guard = next(i for i, t in enumerate(tasks) if "ansible.builtin.assert" in t)
+    assert guard == 1 and "include_role" in " ".join(tasks[0])                                  # the manifest is read, then the guard, then everything else
+    cond = " ".join(tasks[guard]["ansible.builtin.assert"]["that"])
+    assert "eco_destroy_confirm" in cond and "eco_fleet.fleet" in cond and "agentpg" in cond
+    assert "eco_destroy_confirm" in tasks[guard]["ansible.builtin.assert"]["fail_msg"]
+    for t in tasks[guard + 1:]:
+        for mod in ("agentpg_sandbox", "agentpg_instance"):
+            if mod in t:
+                assert t[mod]["state"] == "absent" and "allowed_names" in t[mod], t["name"]       # only deletions, each with its allow-list
+    text = (ANSIBLE / "destroy.yml").read_text()
+    assert "eco_destroy_secrets" in text and "basename == eco_fleet.fleet" in text and names
+    assert "common" not in " ".join(str(r) for r in play.get("roles", []))                    # the `common` role would generate secrets for a fleet being dropped
+    assert not yaml.safe_load((ANSIBLE / "roles/common/defaults/main.yml").read_text())["eco_destroy_confirm"]      # no default confirmation

@@ -1,21 +1,8 @@
 ---
 # Read the manifest and derive everything the other roles share. Runs at the top of every play (it only reads; the secret files
 # are created once by the first play, so parallel hosts never race on them).
-- name: Read ecosystem.yaml
-  ansible.builtin.include_vars:
-    file: "{{ eco_manifest_path }}"
-    name: eco_manifest
-  tags: always
-
-- name: Derive the fleet (defaults, creation order, URL variables, gateway limits)
-  ansible.builtin.set_fact:
-    eco_fleet: >-
-      {{ eco_manifest
-         | combine({'agentpg': (eco_manifest.agentpg | default({}))
-                    | combine({'registry': eco_image_registry} if eco_image_registry else {})
-                    | combine({'tag': eco_image_tag} if eco_image_tag else {})}, recursive=true)
-         | eco_fleet(eco_only) }}
-  tags: always
+- name: The manifest and the fleet
+  ansible.builtin.import_tasks: fleet.yml
 
 - name: URLs, hosts target - https://<app>.<domain>
   ansible.builtin.set_fact:
@@ -39,9 +26,6 @@
          | combine({'identity': eco_identity_url} if eco_identity_mode != 'managed' else {})
          | combine({eco_fleet.llm.gateway: (eco_llm_gateway_url if eco_llm_mode == 'existing' else eco_llm_base_url | regex_replace('/v1/?$', ''))}
                    if eco_llm_mode != 'managed' else {}) }}
-    eco_run_list: >-
-      {{ (['identity'] if eco_identity_mode == 'managed' else [])
-         + (eco_fleet.deployed | reject('equalto', eco_fleet.llm.gateway) | list if eco_llm_mode != 'managed' else eco_fleet.deployed) }}
     eco_recreate_set: "{{ eco_fleet | eco_recreate_set(eco_recreate) }}"
     eco_http: "{{ eco_target == 'hosts' or not ansible_check_mode }}"
   tags: always

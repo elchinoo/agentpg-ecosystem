@@ -49,6 +49,10 @@ def delete_sandbox_args(sandbox_id: str) -> list[str]:
     return ["sandbox", "delete", sandbox_id, "--force"]
 
 
+def delete_instance_args(instance_id: str) -> list[str]:
+    return ["instances", "delete", instance_id, "--force"]               # --force skips the confirmation prompt; the data is gone for good
+
+
 def env_hash(env: dict[str, str]) -> str:
     return hashlib.sha256(json.dumps(env, sort_keys=True).encode()).hexdigest()[:12]
 
@@ -250,3 +254,61 @@ def ensure_sandbox(cli: Cli, st: State, name: str, image: str, instance_id: str,
         st.save()
     return {"changed": changed, "sandbox_id": d["sandbox_id"], "url": url, "env_hash": d.get("env_hash", want), "env_differs": differs,
             "created": "created" in outcome, "recreated": recreated, "msg": f"{url} ({', '.join(outcome) or 'unchanged'})"}
+
+
+# ---- removal (destroy.yml) ----------------------------------------------------------------------------------------------------
+def _expect(name: str, allowed: list[str] | None) -> None:
+    """Refuse a name that is not one of the fleet's own (the playbook passes exactly `<fleet>-<app>` / `<fleet>-<app>-db` of the manifest's apps)."""
+    if allowed is not None and name not in allowed:
+        raise AgentPGError(f"refusing to delete '{name}': it is not one of this fleet's objects ({', '.join(sorted(allowed)) or 'none'})")
+
+
+def _wait_gone(cli: Cli, find, name: str) -> None:
+    deadline = cli.clock() + cli.timeout
+    while find(name):
+        if cli.clock() > deadline:
+            raise AgentPGError(f"'{name}' is still listed after {int(cli.timeout)} s")
+        cli.sleep(cli.interval)
+
+
+def ensure_sandbox_absent(cli: Cli, st: State, name: str, allowed: list[str] | None = None, check: bool = False) -> dict:
+    """Delete the sandbox NAMED `name`. Its id is resolved from `agentpg sandbox list` now, never taken from the state file (which is only compared)."""
+    _expect(name, allowed)
+    sid = cli.sandbox_id(name)
+    kept = st.data.get("sandbox_id")
+    if not sid:
+        if kept and not check:
+            for k in ("sandbox_id", "url", "env_hash"):
+                st.data.pop(k, None)
+            st.save()
+        return {"changed": False, "sandbox_id": "", "msg": f"sandbox {name} is already gone"}
+    note = f" (the state file said {kept}: AgentPG's id is used)" if kept and kept != sid else ""
+    if check:
+        return {"changed": True, "sandbox_id": sid, "msg": f"would delete sandbox {name} ({sid}){note}"}
+    cli.run(delete_sandbox_args(sid))
+    _wait_gone(cli, cli.sandbox_id, name)
+    for k in ("sandbox_id", "url", "env_hash"):
+        st.data.pop(k, None)
+    if st.data or os.path.exists(st.path):
+        st.save()
+    return {"changed": True, "sandbox_id": sid, "msg": f"deleted sandbox {name} ({sid}){note}"}
+
+
+def ensure_instance_absent(cli: Cli, st: State, name: str, allowed: list[str] | None = None, check: bool = False) -> dict:
+    """Delete the instance NAMED `name` (its data and keys go with it), resolved from `agentpg instances list` now. The state file of the app is removed
+    afterwards: its instance id, database key and extension list describe an instance that no longer exists."""
+    _expect(name, allowed)
+    iid = cli.instance_id(name)
+    kept = st.data.get("instance_id")
+    if not iid:
+        if kept and not check:
+            os.remove(st.path)
+        return {"changed": False, "instance_id": "", "msg": f"instance {name} is already gone"}
+    note = f" (the state file said {kept}: AgentPG's id is used)" if kept and kept != iid else ""
+    if check:
+        return {"changed": True, "instance_id": iid, "msg": f"would delete instance {name} ({iid}) and its data{note}"}
+    cli.run(delete_instance_args(iid))
+    _wait_gone(cli, cli.instance_id, name)
+    if os.path.exists(st.path):
+        os.remove(st.path)
+    return {"changed": True, "instance_id": iid, "msg": f"deleted instance {name} ({iid}) and its data{note}"}

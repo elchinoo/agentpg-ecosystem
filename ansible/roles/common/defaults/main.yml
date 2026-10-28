@@ -12,6 +12,10 @@ eco_poll_interval: 5               # seconds between polls while an instance or 
 eco_env_change: report             # a sandbox whose environment changed: report (as `ecoctl apply`) | recreate (delete and create it again on the same database)
 eco_recreate: []                   # app keys to delete and create again, with the apps that depend on them (as `ecoctl recreate`); `identity` recreates all
 
+eco_destroy_confirm: ""            # destroy.yml: must equal the manifest's fleet name exactly, or it refuses
+eco_destroy_only: []               # destroy.yml: delete just these apps (identity only if listed); empty: the whole fleet
+eco_destroy_secrets: false         # destroy.yml: also remove ansible/.secrets/<fleet>/
+
 eco_container_engine: docker       # docker (default) or podman: same CLI, one code path
 eco_become: true                   # become root on app hosts (false for a user that can run the engine, as the local demo)
 eco_data_dir: /opt/eco             # env files, proxy data on app hosts
