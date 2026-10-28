@@ -35,8 +35,9 @@ Pick a different `fleet:` name (it prefixes every instance and sandbox) when you
 - **AgentPG account and CLI**, logged in as the user who runs Ansible: `agentpg login`, then `agentpg account` (if it says "Invalid or expired token", log in again).
   Capacity for eight instances and eight sandboxes ([DEPLOY section 2](DEPLOY.md#2-prerequisites)); deploy a slice with `eco_only` if your plan allows fewer.
 - **Public images.** AgentPG pulls them anonymously, so the packages must be public ([DEPLOY section 3](DEPLOY.md#3-make-the-images-public)).
-- **Control node:** `ansible-core` (written and checked with 2.21; older versions are untested) and Python 3.9+. It runs everything, needs no SSH hosts, and must
-  reach the sandboxes' https URLs. Nothing else to install for this target.
+- **Control node, AgentPG target: `ansible-core` only** (written and checked with 2.21; older versions are untested) and Python 3.9+. No collections, no extra Python packages, no
+  SSH hosts. It runs everything and must reach the sandboxes' https URLs. (A test fails if a collection module, filter or lookup creeps into this path.) `requirements.yml` (the
+  `community.postgresql` collection) is for the hosts target only.
 - A machine you trust: secrets reach sandboxes as `--env` values on the `agentpg` command line, so they pass through that machine's process list for a moment
   (the same as `ecoctl`), and `ansible/.secrets/` holds every secret (section 7).
 
@@ -195,6 +196,7 @@ All variables and their defaults: `roles/common/defaults/main.yml`.
 | `ansible-playbook --syntax-check`, `ansible-inventory --graph`, `ansible-lint`, `yamllint`, `ansible-doc` of the modules | pass |
 | `tests/test_ansible_recipe.py` (manifest sync, env of every app equal to `ecoctl.plan.app_env` for both targets, order, specs, command arguments equal to `ecoctl.agentpg.AgentPG`, the modules' behaviour against ecoctl's in-memory fake CLI: create, converge, changed environment, recreate, deleted sandbox, existing sandbox, check mode, wait loops, state mode 0600) | pass |
 | The **whole AgentPG-target playbook** against a **stand-in `agentpg` executable** (ecoctl's fake CLI, with state kept between calls) and ecoctl's in-memory identity, gateway, PayBroker and ShopFront fakes served over HTTP: create, no-op re-run (0 mutating calls), `--check` (only `instances list` and `sandbox list`), `eco_recreate` of the gateway (sandbox deleted and created again for it and its dependents, instances and extensions untouched), changed environment reported then applied, interrupted run resumed | ran |
+| The AgentPG path in a **clean venv with only `ansible-core`** and no collections visible (`ANSIBLE_COLLECTIONS_PATH=/nonexistent`): syntax check, inventory, `--check` and apply | ran |
 | The real `agentpg` CLI, a real AgentPG account, the real identity, gateway, PayBroker and ShopFront servers | **not run** |
 | The `hosts` target: its `db` stage against a real scratch Postgres 17, the rest against a stand-in `docker` | ran; real Docker, Caddy and TLS **not run** |
 

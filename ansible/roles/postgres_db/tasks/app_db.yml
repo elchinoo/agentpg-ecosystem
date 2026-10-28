@@ -4,6 +4,7 @@
     name: "{{ eco_fleet | eco_db_name(eco_db_key) }}"
     password: "{{ eco_secrets[eco_db_key ~ '/DB_PASSWORD'] }}"
     login_db: postgres
+  args: "{{ eco_pg_login }}"
   become: "{{ eco_db_become }}"
   become_user: "{{ eco_db_become_user }}"
   no_log: true
@@ -13,6 +14,7 @@
   community.postgresql.postgresql_db:
     name: "{{ eco_fleet | eco_db_name(eco_db_key) }}"
     owner: "{{ eco_fleet | eco_db_name(eco_db_key) }}"
+  args: "{{ eco_pg_login }}"
   become: "{{ eco_db_become }}"
   become_user: "{{ eco_db_become_user }}"
   tags: [db]
@@ -21,6 +23,7 @@
   community.postgresql.postgresql_query:
     login_db: postgres
     query: SELECT name FROM pg_available_extensions
+  args: "{{ eco_pg_login }}"
   register: eco_available
   check_mode: false
   changed_when: false
@@ -32,6 +35,7 @@
   community.postgresql.postgresql_ext:
     name: "{{ item }}"
     login_db: "{{ eco_fleet | eco_db_name(eco_db_key) }}"
+  args: "{{ eco_pg_login }}"
   loop: "{{ (eco_fleet | eco_get(eco_db_key)).extensions | select('in', eco_available.query_result | map(attribute='name') | list) | list }}"
   become: "{{ eco_db_become }}"
   become_user: "{{ eco_db_become_user }}"

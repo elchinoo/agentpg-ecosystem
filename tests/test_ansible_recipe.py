@@ -166,7 +166,7 @@ def test_env_template_follows_the_swappable_parts(manifest, fleet):
 
 
 def test_every_yaml_file_parses_and_the_stages_are_tagged():
-    files = [p for p in ANSIBLE.rglob("*.yml") if ".secrets" not in p.parts] + list(ANSIBLE.rglob("*.yml.example"))
+    files = [p for p in ANSIBLE.rglob("*.yml") if not {".secrets", ".venv"} & set(p.parts)] + list(ANSIBLE.rglob("*.yml.example"))
     assert files
     for p in files:
         yaml.safe_load(p.read_text())
@@ -185,7 +185,7 @@ def test_no_secret_literal_is_committed():
     assert ".secrets/" in ignore and "vault" in ignore
     assert not list(ANSIBLE.glob("inventories/*/group_vars/**/vault.yml")), "a plain vault.yml must not sit in the tree; only vault.yml.example is shipped"
     for p in ANSIBLE.rglob("*"):
-        if not p.is_file() or ".secrets" in p.parts or p.suffix in {".pyc"} or "__pycache__" in p.parts:
+        if not p.is_file() or {".secrets", ".venv", "__pycache__"} & set(p.parts) or p.suffix in {".pyc"}:
             continue
         text = p.read_text(errors="ignore")
         assert "BEGIN PRIVATE KEY" not in text and "BEGIN RSA PRIVATE KEY" not in text, p
@@ -328,3 +328,38 @@ def test_the_module_files_document_the_options_they_accept():
         spec = set(re.findall(r"(\w+)=dict\(", text)) - {"argument_spec"}
         assert set(doc["options"]) == spec, name
     assert "no_log=True" in (ANSIBLE / "library/agentpg_sandbox.py").read_text()
+
+
+# ---- the AgentPG target needs nothing beyond ansible-core ------------------------------------------------------------------------
+HOSTS_ONLY = ("infra_hosts.yml", "requirements.yml", "roles/postgres_db/", "roles/container_host/", "roles/proxy/", "inventories/own-infra", "roles/app/tasks/container.yml")
+NON_CORE = re.compile(r"community\.|ansible\.posix|ansible\.utils|ansible\.netcommon|ansible\.windows|json_query|ipaddr|module_defaults|\bcollections:")
+
+
+def _agentpg_path_files():
+    for p in sorted(ANSIBLE.rglob("*")):
+        rel = p.relative_to(ANSIBLE).as_posix()
+        if p.is_file() and not any(rel.startswith(h) for h in HOSTS_ONLY) and not {".secrets", ".venv", "__pycache__"} & set(p.parts) and p.suffix not in {".pyc"}:
+            yield rel, p
+
+
+def test_the_agentpg_path_needs_only_ansible_core():
+    """A venv with ansible-core alone (no collections) must load site.yml: module_defaults of a collection group, or any collection module, filter
+    or lookup, outside the hosts-target files would fail at load time (it did once)."""
+    seen = 0
+    for rel, p in _agentpg_path_files():
+        if rel in {".gitignore", ".ansible-lint"}:
+            continue
+        text = p.read_text(errors="ignore")
+        seen += 1
+        for n, line in enumerate(text.splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue
+            assert not NON_CORE.search(line), f"{rel}:{n} needs more than ansible-core: {line.strip()[:80]}"
+            m = re.match(r"^\s*(?:- )?([a-z_]+\.[a-z_]+\.[a-z_]+):", line)                  # a fully qualified module name used as a task key
+            assert not m or m.group(1).startswith("ansible.builtin.") or m.group(1) == "ansible.builtin", f"{rel}:{n}: {m.group(1)}"
+    assert seen > 20
+    plays = yaml.safe_load((ANSIBLE / "site.yml").read_text()) + yaml.safe_load((ANSIBLE / "verify.yml").read_text())
+    assert not [p for p in plays if "module_defaults" in p or "collections" in p]
+    # the hosts target is where the collection belongs, and requirements.yml says so
+    assert "community.postgresql" in (ANSIBLE / "requirements.yml").read_text()
+    assert "hosts" in (ANSIBLE / "requirements.yml").read_text().lower()

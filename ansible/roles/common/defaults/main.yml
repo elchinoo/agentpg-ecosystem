@@ -41,6 +41,10 @@ eco_db_login_unix_socket: /var/run/postgresql   # how the playbook reaches the d
 eco_db_login_host: ""              # ... or over TCP (then set eco_db_login_password in the vault)
 eco_db_login_user: postgres
 eco_db_login_password: ""
+eco_pg_login: >-
+  {{ ({'login_unix_socket': eco_db_login_unix_socket} if not eco_db_login_host
+      else {'login_host': eco_db_login_host, 'login_port': eco_db_port, 'login_password': eco_db_login_password})
+     | combine({'login_user': eco_db_login_user}) }}
 eco_db_become: true                # become `eco_db_become_user` on the db host (peer authentication over the socket)
 eco_db_become_user: postgres
 eco_db_demo_container: false       # true: the db host runs a throwaway pgvector container as the database (local demo only)

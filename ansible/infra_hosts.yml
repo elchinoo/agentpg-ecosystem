@@ -13,13 +13,6 @@
   gather_facts: false
   tags: [db]
   roles: [common, postgres_db]
-  vars:
-    eco_pg_defaults: >-
-      {{ ({'login_unix_socket': eco_db_login_unix_socket} if not eco_db_login_host
-          else {'login_host': eco_db_login_host, 'login_port': eco_db_port, 'login_password': eco_db_login_password})
-         | combine({'login_user': eco_db_login_user}) }}
-  module_defaults:
-    group/community.postgresql.all: "{{ eco_pg_defaults }}"
 
 - name: Proxy - https://<app>.<domain> in front of every app
   hosts: eco_proxy

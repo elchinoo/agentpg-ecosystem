@@ -6,6 +6,8 @@
   ansible.builtin.include_tasks: demo_container.yml
   when: eco_db_demo_container | bool
 
+# community.postgresql is needed by the hosts target only. The connection arguments are passed with `args:` on each task (resolved when it runs),
+# not as module_defaults (resolved when the playbook loads): the AgentPG target needs nothing beyond ansible-core.
 - name: One database and role per app
   ansible.builtin.include_tasks: app_db.yml
   loop: "{{ ['identity'] + eco_fleet.deployed if eco_identity_mode == 'managed' else eco_fleet.deployed }}"
