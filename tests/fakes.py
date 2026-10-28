@@ -55,7 +55,7 @@ class FakeAgentPG:
             user, perm = a[a.index("--username") + 1], a[a.index("--permission") + 1]
             self.db_users.setdefault(a[2], {})[user] = {"password": f"pw-{user}-{a[2]}", "permission": perm}
             return json.dumps({"username": user, "password": f"pw-{user}-{a[2]}", "permission": perm})
-        if a[0] == "connect":
+        if a[0] in ("connect", "describe"):
             return self.connect_text
         if a[:2] == ["extensions", "create"]:
             self.extensions.append((a[3], a[2]))          # recorded as (instance, extension); the CLI takes the name first

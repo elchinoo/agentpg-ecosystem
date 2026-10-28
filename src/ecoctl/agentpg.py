@@ -79,7 +79,7 @@ class AgentPG:
 
     @staticmethod
     def connect_info(instance_id: str) -> Command:
-        return Command(("connect", instance_id, "--json"))
+        return Command(("describe", instance_id, "--json"))        # `connect` shows only the hosted MCP URL; `describe` has the connection_string
 
     @staticmethod
     def create_sandbox(name: str, image: str, instance_id: str, port: int, env: dict[str, str], secret_names: set[str], *, auto_pause: bool = True,

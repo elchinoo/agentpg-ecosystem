@@ -37,7 +37,7 @@ class McpError(RuntimeError):
 
 # ---- the read-only user ------------------------------------------------------------------------------------------------
 def parse_connection(text: str) -> dict | None:
-    """Host, port, database and query string from `agentpg connect <instance> --json` (or its plain text): whatever postgres:// URL it shows, or
+    """Host, port, database and query string from `agentpg describe <instance> --json` (its `connection_string`) (or its plain text): whatever postgres:// URL it shows, or
     host/port/database fields. The user and password in it, if any, are dropped."""
     m = POSTGRES_URL.search(text)
     if m:
@@ -110,7 +110,7 @@ def ensure_user(ctx, key: str, emit: Callable[[str], None] = print) -> str:
         ctx.state.save()                                      # the password is shown only once: keep it before anything else can fail
     conn = parse_connection(ctx.agentpg.run(AgentPG.connect_info(iid)))
     if not conn:
-        raise McpError(f"{key}: could not find the database host in `agentpg connect {iid} --json`; the user was created and kept, run this again after "
+        raise McpError(f"{key}: could not find the database host in `agentpg describe {iid} --json`; the user was created and kept, run this again after "
                        "checking that output")
     have.update(conn)
     ctx.state.save()
