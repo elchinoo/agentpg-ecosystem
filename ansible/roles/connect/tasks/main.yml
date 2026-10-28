@@ -1,0 +1,23 @@
+---
+# Connect an app to a peer after both are up (ShopFront -> PayBroker in the shipped manifest): merchant, its one allowed origin, two API
+# keys, the webhook and the shop's settings, over the same HTTP APIs `ecoctl connect` uses. Idempotent: it reads what exists and writes only what
+# differs. Keys that a service shows once are kept in the secrets dir.
+- name: Connections the manifest asks for
+  ansible.builtin.debug:
+    msg: "{{ eco_fleet.connections | map(attribute='app') | list }}"
+  when: eco_fleet.connections | length > 0
+
+- name: The Ansible service client (admin scope of both ends of every connection)
+  ansible.builtin.include_role:
+    name: common
+    tasks_from: ensure_app.yml
+  vars:
+    eco_spec: "{{ eco_fleet | eco_connect_spec }}"
+    eco_secret_kind: service_secret
+    eco_issue_scope: eco-ansible
+  when: eco_http | bool and eco_connect | bool and eco_fleet.connections | length > 0 and eco_identity_mode != 'oidc'
+
+- name: Connect
+  ansible.builtin.include_tasks: one.yml
+  loop: "{{ eco_fleet.connections if (eco_http | bool and eco_connect | bool and eco_identity_mode != 'oidc') else [] }}"
+  loop_control: {loop_var: eco_conn, label: "{{ eco_conn.app }} -> {{ eco_conn.peer }}"}

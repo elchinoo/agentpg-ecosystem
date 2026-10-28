@@ -1,0 +1,23 @@
+# Managed by Ansible (roles/proxy): one site per app, <app>.{{ eco_domain }}. Edit the variables, not this file.
+# A site listens on the port in its URL (eco_public_port): containers reach the proxy on that same port through its network aliases.
+{
+{% if eco_tls_mode == 'none' %}
+	auto_https off
+{% endif %}
+{% if eco_acme_email %}
+	email {{ eco_acme_email }}
+{% endif %}
+}
+{% for key in eco_run_list %}
+
+{{ 'http://' if eco_tls_mode == 'none' else '' }}{{ eco_urls[key] | regex_replace('^https?://', '') }} {
+{% if eco_tls_mode == 'internal' %}
+	tls internal
+{% endif %}
+{% if eco_placed[key] == eco_proxy_host %}
+	reverse_proxy {{ eco_fleet.fleet }}-{{ key }}:{{ (eco_fleet | eco_get(key)).port }}
+{% else %}
+	reverse_proxy {{ hostvars[eco_placed[key]].eco_private_address | default(hostvars[eco_placed[key]].ansible_host | default(eco_placed[key])) }}:{{ eco_host_ports[key] }}
+{% endif %}
+}
+{% endfor %}

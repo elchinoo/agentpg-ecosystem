@@ -61,6 +61,8 @@ How the pieces trust each other: you sign in once at the identity provider; each
 maps your **roles in that app** to what you may do. Apps that call other apps (CityPulse reports to PagerLens, the simulator sends load to
 CityPulse and TrustDesk) fetch short-lived service tokens from the provider instead of holding hand-copied secrets.
 
+> **Prefer Ansible?** The same deployment, driven by Ansible playbooks instead of `ecoctl` (and optionally onto your own hosts), is described in [07-ansible-deployment.md](07-ansible-deployment.md).
+
 ## 2. Prerequisites
 
 - **AgentPG account and CLI.** `agentpg login` (opens a browser flow). Check with `agentpg account`; if it says "Invalid or expired token",

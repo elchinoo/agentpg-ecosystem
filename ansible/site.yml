@@ -1,0 +1,95 @@
+---
+# The whole fleet. Order is ecoctl's: identity (wait ready, pin the issuer), the LLM gateway, the apps callees-first (register, gateway client,
+# instance + sandbox or container, sign-in URL), groups, connections, then a health report. `eco_target` says where it runs:
+#   agentpg (default)  an instance and a sandbox per app on AgentPG, through the logged-in `agentpg` CLI (exactly what ecoctl creates)
+#   hosts              your own Postgres and container hosts (infra_hosts.yml adds the database, engine and proxy stages)
+#
+#   ansible-playbook -i inventories/agentpg site.yml --check          read-only: what would be created on AgentPG
+#   ansible-playbook -i inventories/agentpg site.yml                  everything
+#   ansible-playbook -i inventories/agentpg site.yml --tags apps      one stage (hosts db proxy identity gateway apps access connect verify)
+#   ansible-playbook -i inventories/agentpg site.yml -e '{"eco_only": ["trustdesk"]}'        one app and what it needs
+#   ansible-playbook -i inventories/agentpg site.yml -e '{"eco_recreate": ["llmgw"]}'        ecoctl recreate: delete and create again, with dependents
+
+- name: Prepare - read the manifest, create the secrets directory, check the choices
+  hosts: localhost
+  gather_facts: false
+  tags: [always]
+  roles: [common]
+  tasks:
+    - name: The choices make sense
+      ansible.builtin.assert:
+        that:
+          - eco_manifest.version == 1
+          - eco_container_engine in ['docker', 'podman']
+          - eco_tls_mode in ['internal', 'acme', 'none']
+          - eco_llm_mode in ['managed', 'existing', 'openai']
+          - eco_llm_mode != 'openai' or (eco_llm_base_url | length > 0 and eco_llm_api_key | length > 0)
+          - eco_llm_mode != 'existing' or eco_llm_gateway_url | length > 0
+          - eco_fleet.apps[eco_fleet.llm.gateway].calls | length == 0 and eco_fleet.apps[eco_fleet.llm.gateway].uses | length == 0
+          - eco_target in ['agentpg', 'hosts']
+          - eco_target == 'agentpg' or ('app' in groups and groups['app'] | length > 0 and 'db' in groups and groups['db'] | length > 0)
+          - eco_env_change in ['report', 'recreate']
+        fail_msg: "see the variables in roles/common/defaults/main.yml; the gateway must not call other apps (the apps need its keys first)"
+        quiet: true
+
+    - name: The secrets directory (private, git-ignored)
+      ansible.builtin.file:
+        path: "{{ eco_secrets_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: The proxy host is addressable as a group
+      ansible.builtin.add_host:
+        name: "{{ eco_proxy_host }}"
+        groups: eco_proxy
+      changed_when: false
+      when: eco_target == 'hosts'
+
+- name: Hosts target - engine, database, proxy
+  ansible.builtin.import_playbook: infra_hosts.yml
+  when: (eco_target | default('agentpg')) == 'hosts'
+  tags: [hosts, db, proxy]
+
+- name: Identity provider - container, ready, issuer pinned
+  hosts: localhost
+  gather_facts: false
+  tags: [identity]
+  roles: [common, identity]
+
+- name: LLM gateway - register, run, wait ready
+  hosts: localhost
+  gather_facts: false
+  tags: [gateway]
+  roles: [common, app]
+  vars:
+    eco_scope: gateway
+
+- name: Apps - callees before callers
+  hosts: localhost
+  gather_facts: false
+  tags: [apps]
+  roles: [common, app]
+  vars:
+    eco_scope: apps
+
+- name: Access - groups and role grants
+  hosts: localhost
+  gather_facts: false
+  tags: [access]
+  roles: [common]
+  tasks:
+    - name: Groups and grants
+      ansible.builtin.include_role:
+        name: identity
+        tasks_from: access.yml
+      when: eco_http | bool and eco_identity_mode != 'oidc'
+
+- name: Connect - ShopFront to PayBroker (merchant, keys, webhook, settings)
+  hosts: localhost
+  gather_facts: false
+  tags: [connect]
+  roles: [common, connect]
+
+- name: Verify - report health, LLM clients and registry
+  ansible.builtin.import_playbook: verify.yml
+  tags: [verify]

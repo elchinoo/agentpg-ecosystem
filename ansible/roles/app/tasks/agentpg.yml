@@ -1,0 +1,82 @@
+---
+# Instance, extensions, sandbox, URL of one app (eco_item): what ecoctl's `_deploy` does, with the same `agentpg` commands. Existing instances and
+# sandboxes are kept; a changed environment is reported (eco_env_change: recreate applies it, eco_recreate forces it).
+# Check mode reads only: it says what would be created and changes nothing (the services' HTTP APIs are not touched).
+- name: "{{ eco_item.key }}: database instance {{ eco_item.instance_name }}"
+  agentpg_instance:
+    name: "{{ eco_item.instance_name }}"
+    size: "{{ eco_fleet.agentpg.size }}"
+    state_file: "{{ eco_secrets_dir }}/agentpg/{{ eco_item.key }}.json"
+    agentpg_bin: "{{ eco_agentpg_bin }}"
+    poll_interval: "{{ eco_poll_interval }}"
+  register: eco_inst
+
+- name: "{{ eco_item.key }}: extensions"
+  agentpg_extension:
+    instance_id: "{{ eco_inst.instance_id }}"
+    names: "{{ eco_item.extensions }}"
+    state_file: "{{ eco_secrets_dir }}/agentpg/{{ eco_item.key }}.json"
+    agentpg_bin: "{{ eco_agentpg_bin }}"
+    poll_interval: "{{ eco_poll_interval }}"
+  when: eco_item.extensions | length > 0
+
+- name: "{{ eco_item.key }}: its environment, split into plain values and secrets (the names ecoctl treats as secrets)"
+  ansible.builtin.set_fact:
+    eco_env_all: "{{ dict(lookup('ansible.builtin.template', 'app.env.j2').splitlines() | select | map('split', '=', 1)) }}"
+    eco_secret_names_of_app: >-
+      {{ eco_item.generate + ['IDENTITY_API_KEY', 'LLM_API_KEY', eco_item.env_prefix ~ '_API_KEY', eco_item.env_prefix ~ '_OIDC_CLIENT_SECRET',
+                              eco_item.env_prefix ~ '_SERVICE_CLIENT_SECRET'] }}
+  no_log: true
+
+- name: "{{ eco_item.key }}: ... as two dictionaries"
+  ansible.builtin.set_fact:
+    eco_env: "{{ eco_env_all | dict2items | rejectattr('key', 'in', eco_secret_names_of_app) | items2dict }}"
+    eco_secret_env: "{{ eco_env_all | dict2items | selectattr('key', 'in', eco_secret_names_of_app) | items2dict }}"
+  no_log: true
+
+- name: "{{ eco_item.key }}: sandbox {{ eco_item.sandbox_name }} ({{ eco_item.image_ref }})"
+  agentpg_sandbox:
+    name: "{{ eco_item.sandbox_name }}"
+    image: "{{ eco_item.image_ref }}"
+    instance_id: "{{ eco_inst.instance_id }}"
+    port: "{{ eco_item.port }}"
+    env: "{{ eco_env }}"
+    secret_env: "{{ eco_secret_env }}"
+    auto_pause: "{{ eco_item.pause }}"
+    plan: "{{ eco_item.plan_eff | default(omit, true) }}"
+    recreate: "{{ eco_item.key in eco_recreate_set }}"
+    on_change: "{{ eco_env_change }}"
+    state_file: "{{ eco_secrets_dir }}/agentpg/{{ eco_item.key }}.json"
+    agentpg_bin: "{{ eco_agentpg_bin }}"
+    poll_interval: "{{ eco_poll_interval }}"
+  register: eco_sbx
+  no_log: true
+
+- name: "{{ eco_item.key }}: what AgentPG has, and what would change"
+  ansible.builtin.debug:
+    msg: "{{ eco_inst.msg }}; sandbox: {{ eco_sbx.msg }}"
+
+- name: "{{ eco_item.key }}: its URL"
+  ansible.builtin.set_fact:
+    eco_urls: "{{ eco_urls | combine({eco_item.key: eco_sbx.url}) }}"
+  when: eco_sbx.url | length > 0
+
+- name: "{{ eco_item.key }}: the environment differs from the running sandbox"
+  ansible.builtin.debug:
+    msg: >-
+      {{ eco_item.sandbox_name }} exists with a different environment (a callee was recreated, or the manifest changed). Apply it with
+      -e '{"eco_recreate": ["{{ eco_item.key }}"]}' or eco_env_change=recreate: the sandbox is deleted and created again, its database keeps its data.
+  when: eco_sbx.env_differs | default(false)
+
+- name: "{{ eco_item.key }}: wait until it answers {{ eco_wait_path }}"
+  ansible.builtin.uri:
+    url: "{{ eco_urls[eco_item.key] }}{{ eco_wait_path }}"
+    validate_certs: "{{ eco_validate_certs }}"
+  vars:
+    eco_wait_path: "{{ '/readyz' if eco_item.key in ['identity', eco_fleet.llm.gateway] else eco_item.health }}"
+  register: eco_up
+  until: eco_up.status | default(0) == 200
+  retries: 60
+  delay: 3
+  changed_when: false
+  when: eco_http | bool and eco_urls[eco_item.key] | length > 0

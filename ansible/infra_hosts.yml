@@ -1,0 +1,28 @@
+---
+# eco_target: hosts only - the part that has no counterpart on AgentPG: the container engine, a database per app, the proxy.
+# Imported by site.yml; plays match no host when the inventory has no db / app groups (the agentpg inventory declares them empty).
+
+- name: Hosts - the container engine, directories and network
+  hosts: app:eco_proxy
+  gather_facts: false
+  tags: [hosts]
+  roles: [common, container_host]
+
+- name: Database - one database and role per app, extensions where the server has them
+  hosts: db
+  gather_facts: false
+  tags: [db]
+  roles: [common, postgres_db]
+  vars:
+    eco_pg_defaults: >-
+      {{ ({'login_unix_socket': eco_db_login_unix_socket} if not eco_db_login_host
+          else {'login_host': eco_db_login_host, 'login_port': eco_db_port, 'login_password': eco_db_login_password})
+         | combine({'login_user': eco_db_login_user}) }}
+  module_defaults:
+    group/community.postgresql.all: "{{ eco_pg_defaults }}"
+
+- name: Proxy - https://<app>.<domain> in front of every app
+  hosts: eco_proxy
+  gather_facts: false
+  tags: [proxy]
+  roles: [common, proxy]

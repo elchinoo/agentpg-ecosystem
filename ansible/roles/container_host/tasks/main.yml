@@ -1,0 +1,34 @@
+---
+# Prepare a host that runs containers: the engine answers, the directories and the network exist. Does not install Docker (that is your
+# platform's job; the prerequisites say which version).
+- name: "The container engine ({{ eco_container_engine }}) answers"
+  ansible.builtin.command: "{{ eco_container_engine }} version --format '{% raw %}{{ .Server.Version }}{% endraw %}'"
+  register: eco_engine
+  changed_when: false
+  check_mode: false
+  become: "{{ eco_become }}"
+  failed_when: eco_engine.rc != 0
+  tags: [hosts]
+
+- name: Directories for env files and proxy data
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: "{{ eco_data_dir }}", mode: "0755"}
+    - {path: "{{ eco_data_dir }}/env", mode: "0700"}
+    - {path: "{{ eco_data_dir }}/proxy", mode: "0755"}
+    - {path: "{{ eco_data_dir }}/proxy/data", mode: "0755"}
+  become: "{{ eco_become }}"
+  tags: [hosts]
+
+- name: "The network {{ eco_network }} exists"
+  ansible.builtin.shell: |
+    set -e
+    {{ eco_container_engine }} network inspect {{ eco_network }} >/dev/null 2>&1 && exit 0
+    {{ eco_container_engine }} network create {{ eco_network }} >/dev/null && echo created
+  register: eco_net
+  changed_when: "'created' in eco_net.stdout"
+  become: "{{ eco_become }}"
+  tags: [hosts]

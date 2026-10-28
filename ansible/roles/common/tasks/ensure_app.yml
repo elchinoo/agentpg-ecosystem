@@ -1,0 +1,71 @@
+---
+# Register one client with the identity provider, like ecoctl's Identity.ensure_app: create it (the secret comes back once), or bring it to
+# the spec; rotate the secret only when we hold none. Inputs: eco_spec, eco_secret_kind ("client_secret" | "service_secret"), eco_issue_scope (secret name prefix).
+- name: "Identity: which clients exist ({{ eco_spec.client_id }})"
+  ansible.builtin.uri:
+    url: "{{ eco_urls.identity }}/api/apps"
+    headers: {Authorization: "Bearer {{ eco_secrets['identity/IDENTITY_API_KEY'] }}"}
+    validate_certs: "{{ eco_validate_certs }}"
+    return_content: true
+  register: eco_registered
+  check_mode: false
+  changed_when: false
+  no_log: true
+
+- name: "Identity: {{ eco_spec.client_id }} must not exist as another kind"
+  ansible.builtin.assert:
+    that: (eco_registered.json | selectattr('client_id', 'equalto', eco_spec.client_id) | map(attribute='kind') | list | first | default(eco_spec.kind)) == eco_spec.kind
+    fail_msg: "{{ eco_spec.client_id }} is registered with another kind than the manifest wants; delete it in the identity console first"
+  no_log: true
+
+- name: "Identity: create {{ eco_spec.client_id }}"
+  ansible.builtin.uri:
+    url: "{{ eco_urls.identity }}/api/apps"
+    method: POST
+    body_format: json
+    body: "{{ eco_spec }}"
+    status_code: 201
+    headers: {Authorization: "Bearer {{ eco_secrets['identity/IDENTITY_API_KEY'] }}"}
+    validate_certs: "{{ eco_validate_certs }}"
+    return_content: true
+  register: eco_created
+  no_log: true
+  when: eco_spec.client_id not in (eco_registered.json | map(attribute='client_id') | list)
+  changed_when: true
+
+- name: "Identity: bring {{ eco_spec.client_id }} to the manifest"
+  ansible.builtin.uri:
+    url: "{{ eco_urls.identity }}/api/apps/{{ eco_spec.client_id }}"
+    method: PATCH
+    body_format: json
+    body: "{{ eco_existing | eco_app_patch(eco_spec) }}"
+    headers: {Authorization: "Bearer {{ eco_secrets['identity/IDENTITY_API_KEY'] }}"}
+    validate_certs: "{{ eco_validate_certs }}"
+  vars:
+    eco_existing: "{{ eco_registered.json | selectattr('client_id', 'equalto', eco_spec.client_id) | first | default({}) }}"
+  no_log: true
+  when:
+    - eco_created is skipped
+    - eco_existing | eco_app_patch(eco_spec) | length > 0
+  changed_when: true
+
+- name: "Identity: issue a secret for {{ eco_spec.client_id }} (we hold none)"
+  ansible.builtin.uri:
+    url: "{{ eco_urls.identity }}/api/apps/{{ eco_spec.client_id }}/secret"
+    method: POST
+    headers: {Authorization: "Bearer {{ eco_secrets['identity/IDENTITY_API_KEY'] }}"}
+    validate_certs: "{{ eco_validate_certs }}"
+    return_content: true
+  register: eco_rotated
+  no_log: true
+  when:
+    - eco_created is skipped
+    - eco_issued[eco_issue_scope ~ '/' ~ eco_secret_kind] | default('') | length == 0
+  changed_when: true
+
+- name: "Identity: keep the secret of {{ eco_spec.client_id }}"
+  ansible.builtin.include_tasks: issue.yml
+  vars:
+    eco_issue_name: "{{ eco_issue_scope }}/{{ eco_secret_kind }}"
+    eco_issue_value: "{{ (eco_created.json | default({})).client_secret | default((eco_rotated.json | default({})).client_secret | default('')) }}"
+  when: eco_created is not skipped or eco_rotated is not skipped

@@ -1,0 +1,18 @@
+---
+eco_target: hosts                           # your own infrastructure: a Postgres server and container hosts (the default target is agentpg)
+# Site settings. Secrets do NOT go here: put them in group_vars/all/vault.yml and encrypt it (ansible-vault encrypt).
+eco_domain: eco.example.com                  # *.eco.example.com must resolve to the proxy host (a wildcard A record)
+eco_tls_mode: acme                           # Let's Encrypt; needs ports 80/443 reachable from the internet. internal: Caddy's own CA (demo)
+eco_acme_email: platform@example.com
+eco_container_engine: docker                 # or podman
+eco_image_tag: latest                        # pin a tag you have tested
+eco_pull: always
+# eco_only: [shopfront]                      # a slice of the fleet (and what it needs)
+# eco_placement: {trustdesk: apps2.example.com, pagerlens: apps2.example.com}
+# eco_publish_address: 10.0.1.21             # needed once an app runs on another host than the proxy
+
+# --- swap the platform parts (see docs/07-ansible-deployment.md) ---
+# eco_identity_mode: existing                # an identity provider that already runs ...
+# eco_identity_url: https://identity.corp.example.com
+# eco_llm_mode: openai                       # ... or any OpenAI-compatible endpoint instead of the LLM gateway
+# eco_llm_base_url: https://llm.corp.example.com/v1

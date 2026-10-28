@@ -1,0 +1,27 @@
+---
+# Keep a secret that a service shows only once (a client secret, a gateway key) in the secrets dir, and in eco_issued for the rest of this play.
+# Inputs: eco_issue_name ("<app>/<kind>"), eco_issue_value.
+- name: "Directory for {{ eco_issue_name }}"
+  ansible.builtin.file:
+    path: "{{ eco_secrets_dir }}/issued/{{ eco_issue_name | dirname }}"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+  become: false
+  when: eco_issue_value | length > 0
+
+- name: "Keep {{ eco_issue_name }} in the secrets dir"
+  ansible.builtin.copy:
+    content: "{{ eco_issue_value }}\n"
+    dest: "{{ eco_secrets_dir }}/issued/{{ eco_issue_name }}"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  no_log: true
+  when: eco_issue_value | length > 0
+
+- name: "Remember {{ eco_issue_name }} for this play"
+  ansible.builtin.set_fact:
+    eco_issued: "{{ eco_issued | combine({eco_issue_name: eco_issue_value}) }}"
+  no_log: true
+  when: eco_issue_value | length > 0

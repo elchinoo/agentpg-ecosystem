@@ -1,0 +1,9 @@
+---
+# Copy to vault.yml, fill in what you need, then:  ansible-vault encrypt inventories/agentpg/group_vars/all/vault.yml
+# Everything is optional: generated secrets live in .secrets/ and need no entry here.
+eco_secret_overrides:
+  # "identity/IDENTITY_API_KEY": "a key you already have"        # existing identity provider: its admin API key
+  # "llmgw/LLMGW_API_KEY": "the operator key of an existing gateway"
+# eco_llm_api_key: "sk-..."                                       # eco_llm_mode: openai
+# eco_oidc_clients:                                               # eco_identity_mode: oidc
+#   trustdesk: {client_id: trustdesk, client_secret: "..."}

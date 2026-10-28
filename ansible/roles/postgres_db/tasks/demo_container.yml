@@ -1,0 +1,35 @@
+---
+# Local demo only: a throwaway Postgres 17 with pgvector (no PostGIS, no EDB extensions: the report at the end says so).
+- name: Demo database container
+  ansible.builtin.include_role:
+    name: container_host
+    tasks_from: run.yml
+  vars:
+    eco_c_name: "{{ eco_fleet.fleet }}-db"
+    eco_c_image: "{{ eco_db_demo_image }}"
+    eco_c_host: "{{ inventory_hostname }}"
+    eco_c_args:
+      - --network
+      - "{{ eco_network }}"
+      - --network-alias
+      - eco-db
+      - --publish
+      - "127.0.0.1:{{ eco_db_port }}:5432"
+      - --env
+      - "POSTGRES_PASSWORD={{ lookup('ansible.builtin.password', eco_secrets_dir ~ '/generated/db/POSTGRES_PASSWORD length=43 chars=ascii_letters,digits') }}"
+      - --volume
+      - "{{ eco_fleet.fleet }}-db-data:/var/lib/postgresql/data"
+  no_log: true
+
+- name: Wait for the demo database
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ eco_db_port }}"
+    delay: 3
+    timeout: 90
+  when: not ansible_check_mode
+
+- name: Let it finish initialising
+  ansible.builtin.pause:
+    seconds: 5
+  when: not ansible_check_mode

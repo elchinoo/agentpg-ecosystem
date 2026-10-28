@@ -1,0 +1,66 @@
+---
+# One container, converged: pulled if needed, (re)created when its image, arguments or env file changed, started when stopped.
+# Inputs: eco_c_name, eco_c_image, eco_c_args (list of `docker run` arguments before the image), eco_c_extra (anything that must change the
+# hash, such as an env file's checksum), eco_c_host (inventory host). The container carries the hash in a label, so a rerun with the same
+# inputs changes nothing.
+- name: "{{ eco_c_name }}: is the image here?"
+  ansible.builtin.command: {argv: ["{{ eco_container_engine }}", image, inspect, --format, "{% raw %}{{ .Id }}{% endraw %}", "{{ eco_c_image }}"]}
+  register: eco_img
+  failed_when: false
+  changed_when: false
+  check_mode: false
+  delegate_to: "{{ eco_c_host }}"
+  become: "{{ eco_become }}"
+
+- name: "{{ eco_c_name }}: pull {{ eco_c_image }}"
+  ansible.builtin.command: {argv: ["{{ eco_container_engine }}", pull, --quiet, "{{ eco_c_image }}"]}
+  register: eco_pulled
+  changed_when: false          # a newer image shows up as a changed image id below, and recreates the container
+  delegate_to: "{{ eco_c_host }}"
+  become: "{{ eco_become }}"
+  when: eco_pull == 'always' or eco_img.rc != 0
+
+- name: "{{ eco_c_name }}: the image id after the pull"
+  ansible.builtin.command: {argv: ["{{ eco_container_engine }}", image, inspect, --format, "{% raw %}{{ .Id }}{% endraw %}", "{{ eco_c_image }}"]}
+  register: eco_img
+  failed_when: false
+  changed_when: false
+  check_mode: false
+  delegate_to: "{{ eco_c_host }}"
+  become: "{{ eco_become }}"
+
+- name: "{{ eco_c_name }}: what runs now"
+  ansible.builtin.command:
+    argv: ["{{ eco_container_engine }}", inspect, --format, '{% raw %}{{ index .Config.Labels "eco.hash" }}|{{ .State.Running }}{% endraw %}', "{{ eco_c_name }}"]
+  register: eco_now
+  failed_when: false
+  changed_when: false
+  check_mode: false
+  delegate_to: "{{ eco_c_host }}"
+  become: "{{ eco_become }}"
+
+- name: "{{ eco_c_name }}: converge"
+  vars:
+    eco_want: "{{ (eco_c_image ~ eco_img.stdout | default('') ~ (eco_c_args | join(' ')) ~ (eco_c_extra | default(''))) | hash('sha256') }}"
+    eco_have: "{{ eco_now.stdout.split('|')[0] if eco_now.rc == 0 else '' }}"
+    eco_running: "{{ eco_now.rc == 0 and eco_now.stdout.split('|')[1] == 'true' }}"
+  delegate_to: "{{ eco_c_host }}"
+  become: "{{ eco_become }}"
+  block:
+    - name: "{{ eco_c_name }}: remove the outdated container"
+      ansible.builtin.command: {argv: ["{{ eco_container_engine }}", rm, --force, "{{ eco_c_name }}"]}
+      when: eco_now.rc == 0 and eco_have != eco_want
+      changed_when: true
+
+    - name: "{{ eco_c_name }}: create and start"
+      ansible.builtin.command:
+        argv: >-
+          {{ [eco_container_engine, 'run', '--detach', '--name', eco_c_name, '--restart', 'unless-stopped',
+              '--label', 'eco.fleet=' ~ eco_fleet.fleet, '--label', 'eco.hash=' ~ eco_want] + eco_c_args + [eco_c_image] }}
+      when: eco_now.rc != 0 or eco_have != eco_want
+      changed_when: true
+
+    - name: "{{ eco_c_name }}: start it again"
+      ansible.builtin.command: {argv: ["{{ eco_container_engine }}", start, "{{ eco_c_name }}"]}
+      when: eco_now.rc == 0 and eco_have == eco_want and not eco_running
+      changed_when: true

@@ -1,0 +1,26 @@
+---
+- name: "{{ eco_grant.group }} -> {{ eco_grant.client_id }}: current grants"
+  ansible.builtin.uri:
+    url: "{{ eco_urls.identity }}/api/grants?client_id={{ eco_grant.client_id }}"
+    headers: {Authorization: "Bearer {{ eco_secrets['identity/IDENTITY_API_KEY'] }}"}
+    validate_certs: "{{ eco_validate_certs }}"
+    return_content: true
+  register: eco_have
+  check_mode: false
+  changed_when: false
+  no_log: true
+
+- name: "{{ eco_grant.group }} -> {{ eco_grant.client_id }}: grant {{ eco_grant.role }}"
+  ansible.builtin.uri:
+    url: "{{ eco_urls.identity }}/api/grants"
+    method: POST
+    body_format: json
+    body: {subject_type: group, subject: "{{ eco_grant.group }}", client_id: "{{ eco_grant.client_id }}", role: "{{ eco_grant.role }}"}
+    status_code: 201
+    headers: {Authorization: "Bearer {{ eco_secrets['identity/IDENTITY_API_KEY'] }}"}
+    validate_certs: "{{ eco_validate_certs }}"
+  no_log: true
+  when: >-
+    eco_have.json | selectattr('subject_type', 'equalto', 'group') | selectattr('subject_name', 'equalto', eco_grant.group)
+    | selectattr('role', 'equalto', eco_grant.role) | list | length == 0
+  changed_when: true

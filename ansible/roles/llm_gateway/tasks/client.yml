@@ -1,0 +1,119 @@
+---
+# One gateway client per LLM app, named after it, like ecoctl's Gateway.ensure_client: created once (its lg_ key is shown once), an existing
+# client keeps its limits but gets any missing default alias, a lost key is replaced by rotating the active one.
+- name: "{{ eco_item.key }}: gateway clients"
+  ansible.builtin.uri:
+    url: "{{ eco_urls[eco_fleet.llm.gateway] }}/api/clients"
+    headers: &gw_auth {Authorization: "Bearer {{ eco_secrets[eco_fleet.llm.gateway ~ '/' ~ (eco_fleet | eco_get(eco_fleet.llm.gateway)).env_prefix ~ '_API_KEY'] }}"}
+    validate_certs: "{{ eco_validate_certs }}"
+  register: eco_gw_clients
+  check_mode: false
+  changed_when: false
+  no_log: true
+
+- name: "{{ eco_item.key }}: create its gateway client"
+  ansible.builtin.uri:
+    url: "{{ eco_urls[eco_fleet.llm.gateway] }}/api/clients"
+    method: POST
+    body_format: json
+    body: >-
+      {{ {'name': eco_item.key, 'description': eco_item.name ~ ' (created by Ansible)', 'allowed_aliases': eco_item.limits.aliases,
+          'rpm_limit': eco_item.limits.rpm, 'budget_mode': eco_item.limits.budget_mode, 'issue_key': true}
+         | combine({'monthly_token_budget': eco_item.limits.budget} if eco_item.limits.budget else {}) }}
+    status_code: 201
+    headers: *gw_auth
+    validate_certs: "{{ eco_validate_certs }}"
+  register: eco_gw_created
+  no_log: true
+  when: eco_item.key not in (eco_gw_clients.json['items'] | map(attribute='name') | list)
+  changed_when: true
+
+- name: "{{ eco_item.key }}: keep the key of the new client"
+  ansible.builtin.include_role:
+    name: common
+    tasks_from: issue.yml
+  vars:
+    eco_issue_name: "{{ eco_item.key }}/llm_key"
+    eco_issue_value: "{{ eco_gw_created.json.key.key | default('') }}"
+  when: eco_gw_created is not skipped
+
+- name: "{{ eco_item.key }}: an existing client"
+  when: eco_gw_created is skipped
+  vars:
+    eco_client: "{{ eco_gw_clients.json['items'] | selectattr('name', 'equalto', eco_item.key) | first }}"
+    eco_missing: "{{ [eco_fleet.llm.chat_alias, eco_fleet.llm.embed_alias] | reject('in', eco_client.allowed_aliases | default([])) | list }}"
+  block:
+    - name: "{{ eco_item.key }}: add the default aliases it lacks"
+      ansible.builtin.uri:
+        url: "{{ eco_urls[eco_fleet.llm.gateway] }}/api/clients/{{ eco_client.id }}"
+        method: PATCH
+        body_format: json
+        body: {allowed_aliases: "{{ (eco_client.allowed_aliases | default([])) + eco_missing }}"}
+        headers: *gw_auth
+        validate_certs: "{{ eco_validate_certs }}"
+      no_log: true
+      when: eco_missing | length > 0
+      changed_when: true
+
+    - name: "{{ eco_item.key }}: its keys (we hold none)"
+      ansible.builtin.uri:
+        url: "{{ eco_urls[eco_fleet.llm.gateway] }}/api/clients/{{ eco_client.id }}/keys"
+        headers: *gw_auth
+        validate_certs: "{{ eco_validate_certs }}"
+      register: eco_gw_keys
+      check_mode: false
+      changed_when: false
+      no_log: true
+      when: eco_issued[eco_item.key ~ '/llm_key'] | default('') | length == 0
+
+    - name: "{{ eco_item.key }}: rotate the active key, drop the others, or issue one"
+      when: eco_gw_keys is not skipped
+      vars:
+        eco_active: "{{ eco_gw_keys.json['items'] | rejectattr('revoked') | list }}"
+      block:
+        - name: "{{ eco_item.key }}: rotate"
+          ansible.builtin.uri:
+            url: "{{ eco_urls[eco_fleet.llm.gateway] }}/api/clients/{{ eco_client.id }}/keys/{{ eco_active[0].id }}/rotate"
+            method: POST
+            body_format: json
+            body: {grace_minutes: 0}
+            status_code: 201
+            headers: *gw_auth
+            validate_certs: "{{ eco_validate_certs }}"
+          register: eco_gw_rotated
+          no_log: true
+          when: eco_active | length > 0
+          changed_when: true
+
+        - name: "{{ eco_item.key }}: one live key per app"
+          ansible.builtin.uri:
+            url: "{{ eco_urls[eco_fleet.llm.gateway] }}/api/clients/{{ eco_client.id }}/keys/{{ item.id }}"
+            method: DELETE
+            headers: *gw_auth
+            validate_certs: "{{ eco_validate_certs }}"
+          loop: "{{ eco_active[1:] }}"
+          loop_control: {label: "key {{ item.id }}"}
+          no_log: true
+          changed_when: true
+
+        - name: "{{ eco_item.key }}: issue a key (none was active)"
+          ansible.builtin.uri:
+            url: "{{ eco_urls[eco_fleet.llm.gateway] }}/api/clients/{{ eco_client.id }}/keys"
+            method: POST
+            body_format: json
+            body: {name: ansible}
+            status_code: 201
+            headers: *gw_auth
+            validate_certs: "{{ eco_validate_certs }}"
+          register: eco_gw_issued
+          no_log: true
+          when: eco_active | length == 0
+          changed_when: true
+
+        - name: "{{ eco_item.key }}: keep the new key"
+          ansible.builtin.include_role:
+            name: common
+            tasks_from: issue.yml
+          vars:
+            eco_issue_name: "{{ eco_item.key }}/llm_key"
+            eco_issue_value: "{{ (eco_gw_rotated.json | default({})).key | default((eco_gw_issued.json | default({})).key | default('')) }}"

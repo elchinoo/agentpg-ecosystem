@@ -1,0 +1,193 @@
+---
+- name: "{{ eco_conn.app }} -> {{ eco_conn.peer }}: what was kept from an earlier run"
+  ansible.builtin.set_fact:
+    eco_issued: >-
+      {{ eco_issued | combine({item: (lookup('ansible.builtin.file', eco_secrets_dir ~ '/issued/' ~ item, errors='ignore') | default('', true) | string | trim)}) }}
+  loop: "{{ ['secret_key', 'publishable_key', 'secret_key_id', 'publishable_key_id', 'webhook_secret'] | map('regex_replace', '^', 'connect-' ~ eco_conn.app ~ '/') | list }}"
+  no_log: true
+
+- name: "{{ eco_conn.app }} -> {{ eco_conn.peer }}: service tokens"
+  ansible.builtin.uri:
+    url: "{{ eco_urls.identity }}/oauth/token"
+    method: POST
+    body_format: form-urlencoded
+    body: {grant_type: client_credentials, scope: "{{ item }}.admin", audience: "{{ item }}"}
+    url_username: eco-ansible
+    url_password: "{{ eco_issued['eco-ansible/service_secret'] }}"
+    force_basic_auth: true
+    validate_certs: "{{ eco_validate_certs }}"
+    return_content: true
+  loop: ["{{ eco_conn.peer }}", "{{ eco_conn.app }}"]
+  register: eco_tokens
+  no_log: true
+  check_mode: false
+  changed_when: false
+
+- name: "{{ eco_conn.app }} -> {{ eco_conn.peer }}: both are ready"
+  ansible.builtin.uri:
+    url: "{{ eco_urls[item] }}/readyz"
+    validate_certs: "{{ eco_validate_certs }}"
+  loop: ["{{ eco_conn.peer }}", "{{ eco_conn.app }}"]
+  register: eco_ready
+  until: eco_ready.status | default(0) == 200
+  retries: 60
+  delay: 3
+  check_mode: false
+  changed_when: false
+
+- name: "{{ eco_conn.app }} -> {{ eco_conn.peer }}: the tokens and addresses"
+  ansible.builtin.set_fact:
+    eco_pb_auth: {Authorization: "Bearer {{ eco_tokens.results[0].json.access_token }}"}
+    eco_app_auth: {Authorization: "Bearer {{ eco_tokens.results[1].json.access_token }}"}
+    eco_pb: "{{ eco_urls[eco_conn.peer] }}"
+    eco_shop: "{{ eco_urls[eco_conn.app] }}"
+    eco_mname: "{{ eco_conn.merchant }}"
+  no_log: true
+
+- name: "{{ eco_conn.peer }}: find merchant '{{ eco_mname }}'"
+  ansible.builtin.uri:
+    url: "{{ eco_pb }}/api/merchants?name={{ eco_mname | urlencode }}"
+    headers: "{{ eco_pb_auth }}"
+    validate_certs: "{{ eco_validate_certs }}"
+  register: eco_found
+  check_mode: false
+  changed_when: false
+  no_log: true
+
+- name: "{{ eco_conn.peer }}: create merchant '{{ eco_mname }}'"
+  ansible.builtin.uri:
+    url: "{{ eco_pb }}/api/merchants"
+    method: POST
+    body_format: json
+    body: {name: "{{ eco_mname }}"}
+    status_code: [201, 409]          # 409: created concurrently, found below
+    headers: "{{ eco_pb_auth }}"
+    validate_certs: "{{ eco_validate_certs }}"
+  no_log: true
+  when: (eco_found.json['items'] | default(eco_found.json) | selectattr('name', 'equalto', eco_mname) | list | length) == 0
+  changed_when: true
+
+- name: "{{ eco_conn.peer }}: the merchant, with its keys"
+  no_log: true
+  when: not ansible_check_mode
+  block:
+    - name: "{{ eco_conn.peer }}: find it again"
+      ansible.builtin.uri:
+        url: "{{ eco_pb }}/api/merchants?name={{ eco_mname | urlencode }}"
+        headers: "{{ eco_pb_auth }}"
+        validate_certs: "{{ eco_validate_certs }}"
+      register: eco_found2
+      check_mode: false
+      changed_when: false
+
+    - name: "{{ eco_conn.peer }}: its details (the list has no keys)"
+      ansible.builtin.uri:
+        url: "{{ eco_pb }}/api/merchants/{{ (eco_found2.json['items'] | default(eco_found2.json) | selectattr('name', 'equalto', eco_mname) | first).id | urlencode }}"
+        headers: "{{ eco_pb_auth }}"
+        validate_certs: "{{ eco_validate_certs }}"
+      register: eco_merchant
+      check_mode: false
+      changed_when: false
+
+- name: "{{ eco_conn.peer }}: apply what differs"
+  when: not ansible_check_mode
+  vars:
+    eco_m: "{{ eco_merchant.json }}"
+    eco_mid: "{{ eco_m.id }}"
+  block:
+    - name: "{{ eco_conn.peer }}: allowed origins = the shop's URL only"
+      ansible.builtin.uri:
+        url: "{{ eco_pb }}/api/merchants/{{ eco_mid | urlencode }}"
+        method: PATCH
+        body_format: json
+        body: {allowed_origins: ["{{ eco_shop }}"]}
+        headers: "{{ eco_pb_auth }}"
+        validate_certs: "{{ eco_validate_certs }}"
+      when: (eco_m.allowed_origins | default([]) | map('regex_replace', '/$', '') | list) != [eco_shop]
+      changed_when: true
+
+    - name: "{{ eco_conn.peer }}: the two keys"
+      ansible.builtin.include_tasks: key.yml
+      loop: [secret, publishable]
+      loop_control: {loop_var: eco_kind}
+
+    - name: "{{ eco_conn.app }}: its current PayBroker settings (only fingerprints come back)"
+      ansible.builtin.uri:
+        url: "{{ eco_shop }}/api/settings/paybroker"
+        headers: "{{ eco_app_auth }}"
+        validate_certs: "{{ eco_validate_certs }}"
+      register: eco_settings
+      check_mode: false
+      changed_when: false
+      until: eco_settings.status | default(0) == 200       # 423 while the shop's vault is still locked
+      retries: 20
+      delay: 3
+      no_log: true
+
+    - name: "{{ eco_conn.peer }}: webhook (every PUT rotates the signing secret: only when needed)"
+      ansible.builtin.uri:
+        url: "{{ eco_pb }}/api/merchants/{{ eco_mid | urlencode }}/webhook"
+        method: PUT
+        body_format: json
+        body: {url: "{{ eco_shop }}/webhooks/paybroker"}
+        headers: "{{ eco_pb_auth }}"
+        validate_certs: "{{ eco_validate_certs }}"
+        return_content: true
+      register: eco_hook
+      no_log: true
+      vars:
+        eco_hook_url: "{{ eco_shop }}/webhooks/paybroker"
+        eco_held: "{{ eco_issued['connect-' ~ eco_conn.app ~ '/webhook_secret'] }}"
+        eco_pb_hook: "{{ eco_m.webhook_url | default(none) }}"
+      when: >-
+        eco_held | length == 0
+        or (eco_pb_hook is not none and eco_pb_hook | regex_replace('/$', '') != eco_hook_url)
+        or (eco_settings.json.fingerprints | default({})).webhook_secret | default('') != (eco_held | eco_fingerprint)
+      changed_when: true
+
+    - name: "{{ eco_conn.peer }}: keep the new signing secret"
+      ansible.builtin.include_role:
+        name: common
+        tasks_from: issue.yml
+      vars:
+        eco_issue_name: "connect-{{ eco_conn.app }}/webhook_secret"
+        eco_issue_value: "{{ eco_hook.json.signing_secret | default(eco_hook.json.secret | default(eco_hook.json.webhook_secret | default(''))) }}"
+      when: eco_hook is not skipped
+
+    - name: "{{ eco_conn.app }}: settings to push: the base URL when it differs"
+      ansible.builtin.set_fact:
+        eco_push: "{{ {'base_url': eco_pb} if (eco_settings.json.base_url | default('') | regex_replace('/$', '')) != eco_pb else {} }}"
+
+    - name: "{{ eco_conn.app }}: ... and each key or secret whose fingerprint differs from the kept value"
+      ansible.builtin.set_fact:
+        eco_push: >-
+          {{ eco_push | combine({item: eco_issued['connect-' ~ eco_conn.app ~ '/' ~ item]}
+                                if (eco_issued['connect-' ~ eco_conn.app ~ '/' ~ item] | length > 0
+                                    and (eco_settings.json.fingerprints | default({}))[item] | default('')
+                                        != (eco_issued['connect-' ~ eco_conn.app ~ '/' ~ item] | eco_fingerprint))
+                                else {}) }}
+      loop: [publishable_key, secret_key, webhook_secret]
+      no_log: true
+
+    - name: "{{ eco_conn.app }}: settings"
+      ansible.builtin.uri:
+        url: "{{ eco_shop }}/api/settings/paybroker"
+        method: PUT
+        body_format: json
+        body: "{{ eco_push }}"
+        headers: "{{ eco_app_auth }}"
+        validate_certs: "{{ eco_validate_certs }}"
+      no_log: true
+      when: eco_push | default({}) | length > 0
+      changed_when: true
+
+    - name: "{{ eco_conn.app }}: its own connection test"
+      ansible.builtin.uri:
+        url: "{{ eco_shop }}/api/settings/paybroker/test"
+        method: POST
+        headers: "{{ eco_app_auth }}"
+        validate_certs: "{{ eco_validate_certs }}"
+        return_content: true
+      register: eco_test
+      changed_when: false
+      failed_when: eco_test.json.ok is not true

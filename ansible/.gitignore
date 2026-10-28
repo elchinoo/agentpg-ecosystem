@@ -1,0 +1,8 @@
+# generated secrets and issued client secrets/keys: never commit (see docs/07-ansible-deployment.md)
+.secrets/
+*.vault-pass
+.vault-pass
+.demo-data/
+*.retry
+.venv/
+__pycache__/

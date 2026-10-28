@@ -1,0 +1,11 @@
+---
+# The apps of one scope, callees before callers (the order of ecoctl): for each, register with the identity provider, give it its LLM
+# gateway client, run its container, point its sign-in at the real URL. Scope `gateway` is the LLM gateway alone (the apps need its keys),
+# scope `apps` is everything else.
+- name: Each app of this scope
+  ansible.builtin.include_tasks: one_app.yml
+  loop: "{{ eco_fleet.selected | select('in', eco_scope_keys) | list }}"
+  loop_control: {loop_var: eco_item_key, label: "{{ eco_item_key }}"}
+  vars:
+    eco_scope_keys: >-
+      {{ [eco_fleet.llm.gateway] if eco_scope == 'gateway' else (eco_fleet.selected | reject('equalto', eco_fleet.llm.gateway) | list) }}

@@ -1,0 +1,43 @@
+---
+- name: "{{ eco_db_key }}: login role"
+  community.postgresql.postgresql_user:
+    name: "{{ eco_fleet | eco_db_name(eco_db_key) }}"
+    password: "{{ eco_secrets[eco_db_key ~ '/DB_PASSWORD'] }}"
+    login_db: postgres
+  become: "{{ eco_db_become }}"
+  become_user: "{{ eco_db_become_user }}"
+  no_log: true
+  tags: [db]
+
+- name: "{{ eco_db_key }}: database"
+  community.postgresql.postgresql_db:
+    name: "{{ eco_fleet | eco_db_name(eco_db_key) }}"
+    owner: "{{ eco_fleet | eco_db_name(eco_db_key) }}"
+  become: "{{ eco_db_become }}"
+  become_user: "{{ eco_db_become_user }}"
+  tags: [db]
+
+- name: "{{ eco_db_key }}: which extensions does this server offer?"
+  community.postgresql.postgresql_query:
+    login_db: postgres
+    query: SELECT name FROM pg_available_extensions
+  register: eco_available
+  check_mode: false
+  changed_when: false
+  become: "{{ eco_db_become }}"
+  become_user: "{{ eco_db_become_user }}"
+  tags: [db]
+
+- name: "{{ eco_db_key }}: create the extensions the server offers"
+  community.postgresql.postgresql_ext:
+    name: "{{ item }}"
+    login_db: "{{ eco_fleet | eco_db_name(eco_db_key) }}"
+  loop: "{{ (eco_fleet | eco_get(eco_db_key)).extensions | select('in', eco_available.query_result | map(attribute='name') | list) | list }}"
+  become: "{{ eco_db_become }}"
+  become_user: "{{ eco_db_become_user }}"
+  tags: [db]
+
+- name: "{{ eco_db_key }}: remember the ones that are missing"
+  ansible.builtin.set_fact:
+    eco_ext_missing: "{{ eco_ext_missing | default({}) | combine({eco_db_key: (eco_fleet | eco_get(eco_db_key)).extensions | reject('in', eco_available.query_result | map(attribute='name') | list) | list}) }}"
+  tags: [db]

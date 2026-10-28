@@ -1,0 +1,10 @@
+# Deliberate choices:
+#  - one `eco_` namespace for every variable (the manifest, the inventory and the roles share them): no per-role prefix
+#  - task names start with the app they act on ("trustdesk: env file") so a run reads as a story: Jinja in the middle of a name is intended
+#  - long Jinja expressions stay on one line where folding would make them harder to read
+skip_list:
+  - var-naming[no-role-prefix]
+  - name[template]
+  - yaml[line-length]
+exclude_paths:
+  - .secrets/

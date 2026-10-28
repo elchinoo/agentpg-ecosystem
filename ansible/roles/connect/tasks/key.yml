@@ -1,0 +1,52 @@
+---
+# One merchant key of kind eco_kind named ansible:<app>:<kind>: kept when we hold its value and PayBroker still lists it, else created
+# (the value is shown once) and any stale one of that name deleted.
+- name: "{{ eco_kind }} key"
+  vars:
+    eco_kname: "ansible:{{ eco_conn.app }}:{{ eco_kind }}"
+    eco_scope: "connect-{{ eco_conn.app }}"
+    eco_listed: "{{ eco_m['keys'] | default([]) | rejectattr('revoked_at', 'defined') | list }}"
+    eco_kept_id: "{{ eco_issued[eco_scope ~ '/' ~ eco_kind ~ '_key_id'] }}"
+    eco_kept_value: "{{ eco_issued[eco_scope ~ '/' ~ eco_kind ~ '_key'] }}"
+    eco_ok: "{{ eco_kept_value | length > 0 and eco_kept_id in (eco_listed | map(attribute='id') | map('string') | list) }}"
+  block:
+    - name: "{{ eco_kname }}: create"
+      ansible.builtin.uri:
+        url: "{{ eco_pb }}/api/merchants/{{ eco_mid | urlencode }}/keys"
+        method: POST
+        body_format: json
+        body: {kind: "{{ eco_kind }}", name: "{{ eco_kname }}"}
+        status_code: 201
+        headers: "{{ eco_pb_auth }}"
+        validate_certs: "{{ eco_validate_certs }}"
+        return_content: true
+      register: eco_newkey
+      no_log: true
+      when: not eco_ok | bool
+      changed_when: true
+
+    - name: "{{ eco_kname }}: keep the value, then its id"
+      ansible.builtin.include_role:
+        name: common
+        tasks_from: issue.yml
+      vars:
+        eco_issue_name: "{{ eco_scope }}/{{ item.name }}"
+        eco_issue_value: "{{ item.value }}"
+      loop:
+        - {name: "{{ eco_kind }}_key", value: "{{ (eco_newkey.json.key if eco_newkey.json.key is mapping else eco_newkey.json).key | default((eco_newkey.json.key if eco_newkey.json.key is mapping else eco_newkey.json).value | default('')) }}"}
+        - {name: "{{ eco_kind }}_key_id", value: "{{ (eco_newkey.json.key if eco_newkey.json.key is mapping else eco_newkey.json).id | default(eco_newkey.json.id) | string }}"}
+      no_log: true
+      when: eco_newkey is not skipped
+
+    - name: "{{ eco_kname }}: delete stale keys of that name"
+      ansible.builtin.uri:
+        url: "{{ eco_pb }}/api/merchants/{{ eco_mid | urlencode }}/keys/{{ item.id | string | urlencode }}"
+        method: DELETE
+        headers: "{{ eco_pb_auth }}"
+        validate_certs: "{{ eco_validate_certs }}"
+        status_code: [200, 404]
+      loop: "{{ eco_listed | selectattr('name', 'equalto', eco_kname) | rejectattr('id', 'equalto', eco_issued[eco_scope ~ '/' ~ eco_kind ~ '_key_id']) | list }}"
+      loop_control: {label: "{{ item.id }}"}
+      no_log: true
+      when: eco_newkey is not skipped or eco_ok | bool
+      changed_when: true

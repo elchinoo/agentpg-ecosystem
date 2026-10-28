@@ -1,0 +1,34 @@
+---
+# Caddy in front of every app: https://<app>.<eco_domain> -> the app's container. The container also carries a network alias for each
+# host name, so the apps (which must use the same public URLs as browsers: issuer, redirects) resolve them to the proxy on the engine network.
+- name: Caddyfile
+  ansible.builtin.template:
+    src: Caddyfile.j2
+    dest: "{{ eco_data_dir }}/proxy/Caddyfile"
+    mode: "0644"
+  register: eco_caddyfile
+  become: "{{ eco_become }}"
+
+- name: The proxy container
+  ansible.builtin.include_role:
+    name: container_host
+    tasks_from: run.yml
+  vars:
+    eco_c_name: "{{ eco_fleet.fleet }}-proxy"
+    eco_c_image: "{{ eco_proxy_image }}"
+    eco_c_host: "{{ inventory_hostname }}"
+    eco_c_extra: "{{ eco_caddyfile.checksum | default('') }}"
+    eco_c_args: >-
+      {{ ['--network', eco_network]
+         + (eco_run_list | map('extract', eco_urls) | map('regex_replace', '^https?://', '') | map('regex_replace', ':[0-9]+$', '')
+            | unique | map('regex_replace', '^', '--network-alias=') | list)
+         + ['--publish', eco_proxy_https_port ~ ':' ~ eco_proxy_https_port, '--publish', eco_proxy_http_port ~ ':80',
+            '--volume', eco_data_dir ~ '/proxy/Caddyfile:/etc/caddy/Caddyfile:ro',
+            '--volume', eco_data_dir ~ '/proxy/data:/data'] }}
+
+- name: Wait for Caddy's local CA, which the apps trust (tls internal)
+  ansible.builtin.wait_for:
+    path: "{{ eco_data_dir }}/proxy/data/caddy/pki/authorities/local/root.crt"
+    timeout: 60
+  become: "{{ eco_become }}"
+  when: eco_tls_mode == 'internal' and not ansible_check_mode

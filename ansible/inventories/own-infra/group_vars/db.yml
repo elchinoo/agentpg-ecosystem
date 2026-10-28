@@ -1,0 +1,5 @@
+---
+# The playbook reaches the database as `postgres` over the local socket (peer authentication, become).
+# Over the network instead: eco_db_login_host, eco_db_login_user, and eco_db_login_password in the vault file.
+eco_db_login_unix_socket: /var/run/postgresql
+eco_db_sslmode: require                      # in every app's DATABASE_URL; the server must offer TLS

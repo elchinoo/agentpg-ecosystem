@@ -1,0 +1,46 @@
+---
+# Env file, container, readiness of one app (eco_item): the identity provider and every app go through here.
+- name: "{{ eco_item.key }}: DATABASE_URL"
+  ansible.builtin.set_fact:
+    eco_database_url: >-
+      postgresql://{{ eco_fleet | eco_db_name(eco_item.key) }}:{{ eco_secrets[eco_item.key ~ '/DB_PASSWORD'] }}@{{ eco_db_address }}:{{ eco_db_app_port }}/{{ eco_fleet | eco_db_name(eco_item.key) }}?sslmode={{ eco_db_sslmode }}
+  no_log: true
+
+- name: "{{ eco_item.key }}: env file"
+  ansible.builtin.template:
+    src: app.env.j2
+    dest: "{{ eco_data_dir }}/env/{{ eco_item.key }}.env"
+    mode: "0600"
+  delegate_to: "{{ eco_placed[eco_item.key] }}"
+  become: "{{ eco_become }}"
+  register: eco_envfile
+  no_log: true
+  diff: false
+
+- name: "{{ eco_item.key }}: container {{ eco_fleet.fleet }}-{{ eco_item.key }}"
+  ansible.builtin.include_role:
+    name: container_host
+    tasks_from: run.yml
+  vars:
+    eco_c_name: "{{ eco_fleet.fleet }}-{{ eco_item.key }}"
+    eco_c_image: "{{ eco_item.image_ref }}"
+    eco_c_host: "{{ eco_placed[eco_item.key] }}"
+    eco_c_extra: "{{ eco_envfile.checksum | default('') }}"
+    eco_c_args: >-
+      {{ ['--network', eco_network, '--env-file', eco_data_dir ~ '/env/' ~ eco_item.key ~ '.env']
+         + (['--volume', eco_ca_path ~ ':/etc/eco/ca.crt:ro'] if eco_ca_path else [])
+         + (['--publish', eco_publish_address ~ ':' ~ eco_host_ports[eco_item.key] ~ ':' ~ eco_item.port] if eco_placed[eco_item.key] != eco_proxy_host else []) }}
+
+- name: "{{ eco_item.key }}: wait until it answers {{ eco_wait_path }}"
+  ansible.builtin.uri:
+    url: "{{ eco_urls[eco_item.key] }}{{ eco_wait_path }}"
+    validate_certs: "{{ eco_validate_certs }}"
+  vars:
+    eco_wait_path: "{{ '/readyz' if eco_item.key in ['identity', eco_fleet.llm.gateway] else eco_item.health }}"
+  register: eco_up
+  until: eco_up.status | default(0) == 200
+  retries: 60
+  delay: 3
+  check_mode: false
+  changed_when: false
+  when: not ansible_check_mode

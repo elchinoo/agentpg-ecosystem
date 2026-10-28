@@ -1,0 +1,17 @@
+---
+eco_target: hosts                           # your own infrastructure: a Postgres server and container hosts (the default target is agentpg)
+eco_container_engine: docker
+eco_become: false                            # your user talks to Docker directly
+eco_domain: eco.localhost                    # *.localhost resolves to this machine; inside containers the proxy's network aliases answer
+eco_tls_mode: internal                       # Caddy's own CA; the apps trust it through SSL_CERT_FILE
+eco_proxy_https_port: 8443                   # not 443: no root needed
+eco_proxy_http_port: 8080
+eco_data_dir: "{{ lookup('ansible.builtin.env', 'HOME') }}/.eco-demo"
+eco_db_demo_container: true                  # a throwaway pgvector database (Postgres 17): no PostGIS, no EDB extensions
+eco_db_port: 55432                           # published on 127.0.0.1 for the playbook
+eco_db_app_port: 5432                        # inside the engine network
+eco_db_address: eco-db                       # the database container's alias on the engine network
+eco_db_login_host: 127.0.0.1
+eco_db_login_password: "{{ lookup('ansible.builtin.password', eco_secrets_dir ~ '/generated/db/POSTGRES_PASSWORD length=43 chars=ascii_letters,digits') }}"
+eco_db_become: false
+eco_db_sslmode: disable

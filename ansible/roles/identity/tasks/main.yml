@@ -1,0 +1,46 @@
+---
+# The identity provider first: container, ready, issuer pinned. Registering the apps happens app by app (role app), as in ecoctl.
+- name: Identity provider mode
+  ansible.builtin.assert:
+    that:
+      - eco_identity_mode in ['managed', 'existing', 'oidc']
+      - eco_identity_mode == 'managed' or eco_identity_url | length > 0
+    fail_msg: "eco_identity_mode is managed, existing or oidc; the last two need eco_identity_url (the issuer)"
+    quiet: true
+
+- name: Identity provider container and readiness
+  ansible.builtin.include_role:
+    name: app
+    tasks_from: deploy.yml
+  vars:
+    eco_item: "{{ eco_fleet.identity }}"
+  when: eco_identity_mode == 'managed'
+
+- name: The identity provider answers (a provider that already runs)
+  ansible.builtin.uri:
+    url: "{{ eco_urls.identity }}/readyz"
+    validate_certs: "{{ eco_validate_certs }}"
+  register: eco_idp_ready
+  until: eco_idp_ready.status | default(0) == 200
+  retries: 20
+  delay: 3
+  check_mode: false
+  changed_when: false
+  when: eco_identity_mode == 'existing' and not ansible_check_mode
+
+- name: Read the issuer (the first request fixes it when IDENTITY_PUBLIC_URL is unset)
+  ansible.builtin.uri:
+    url: "{{ eco_urls.identity }}/.well-known/openid-configuration"
+    validate_certs: "{{ eco_validate_certs }}"
+    return_content: true
+  register: eco_discovery
+  check_mode: false
+  changed_when: false
+  when: eco_identity_mode != 'oidc' and not ansible_check_mode
+
+- name: The issuer is the public URL the apps are given
+  ansible.builtin.assert:
+    that: eco_discovery.json.issuer | regex_replace('/$', '') == eco_urls.identity | regex_replace('/$', '')
+    fail_msg: "the provider reports issuer {{ eco_discovery.json.issuer | default('?') }} but is reached at {{ eco_urls.identity }}; set IDENTITY_PUBLIC_URL (managed mode does) and restart it"
+    quiet: true
+  when: eco_identity_mode != 'oidc' and not ansible_check_mode

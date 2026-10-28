@@ -1,0 +1,31 @@
+---
+# Groups with role grants (access.groups of the manifest), run after the apps are registered. Tag: access.
+- name: Existing groups
+  ansible.builtin.uri:
+    url: "{{ eco_urls.identity }}/api/groups"
+    headers: {Authorization: "Bearer {{ eco_secrets['identity/IDENTITY_API_KEY'] }}"}
+    validate_certs: "{{ eco_validate_certs }}"
+    return_content: true
+  register: eco_groups
+  check_mode: false
+  changed_when: false
+  no_log: true
+
+- name: Create the missing groups
+  ansible.builtin.uri:
+    url: "{{ eco_urls.identity }}/api/groups"
+    method: POST
+    body_format: json
+    body: {name: "{{ item.name }}", description: "{{ item.description }}"}
+    status_code: 201
+    headers: {Authorization: "Bearer {{ eco_secrets['identity/IDENTITY_API_KEY'] }}"}
+    validate_certs: "{{ eco_validate_certs }}"
+  loop: "{{ eco_fleet.groups | rejectattr('name', 'in', eco_groups.json | map(attribute='name') | list) | list }}"
+  loop_control: {label: "{{ item.name }}"}
+  no_log: true
+  changed_when: true
+
+- name: "Grants of each group to each app"
+  ansible.builtin.include_tasks: grant.yml
+  loop: "{{ eco_fleet | eco_group_grants }}"
+  loop_control: {loop_var: eco_grant, label: "{{ eco_grant.group }} -> {{ eco_grant.client_id }}: {{ eco_grant.role }}"}

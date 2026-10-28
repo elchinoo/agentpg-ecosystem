@@ -1,0 +1,61 @@
+---
+# Everything a site normally overrides, with the default. Set these in inventory group_vars (see inventories/own-infra).
+eco_manifest_path: "{{ playbook_dir }}/../ecosystem.yaml"   # the single source of truth: apps, roles, extensions, generate, llm
+eco_only: []                       # deploy just these apps (and what they need), like `ecoctl apply --only`
+eco_image_registry: ""             # empty: agentpg.registry of the manifest
+eco_image_tag: ""                  # empty: agentpg.tag of the manifest
+eco_pull: missing                  # missing: pull only when the image is absent; always: pull on every run (a newer :latest recreates the container)
+
+eco_target: agentpg                # agentpg (default): an instance and a sandbox per app on AgentPG, driven through its CLI | hosts: your own Postgres and container hosts
+eco_agentpg_bin: agentpg           # the CLI, logged in (`agentpg login`) as the user the playbook runs as
+eco_poll_interval: 5               # seconds between polls while an instance or sandbox starts
+eco_env_change: report             # a sandbox whose environment changed: report (as `ecoctl apply`) | recreate (delete and create it again on the same database)
+eco_recreate: []                   # app keys to delete and create again, with the apps that depend on them (as `ecoctl recreate`); `identity` recreates all
+
+eco_container_engine: docker       # docker (default) or podman: same CLI, one code path
+eco_become: true                   # become root on app hosts (false for a user that can run the engine, as the local demo)
+eco_data_dir: /opt/eco             # env files, proxy data on app hosts
+eco_network: eco-net               # the engine network every container joins
+
+# ---- eco_target: hosts only, from here to the secrets: names, URLs, TLS, database ---------------------------------------------------------------------------------------------------
+eco_domain: eco.localhost          # apps are https://<app>.<eco_domain>; the identity provider is https://identity.<eco_domain>
+eco_scheme: https                  # the scheme users see (a load balancer in front may terminate TLS: then eco_tls_mode: none)
+eco_public_port: "{{ '' if eco_proxy_https_port | int == 443 else eco_proxy_https_port }}"   # part of every URL when the proxy is published on another port than 443
+eco_hosts: {}                      # app key -> host name, to override <app>.<eco_domain> for single apps
+eco_tls_mode: internal             # internal: Caddy's own CA (demo) | acme: Let's Encrypt (public DNS, ports 80/443) | none: plain http behind your own TLS
+eco_acme_email: ""
+eco_validate_certs: "{{ eco_target == 'agentpg' or eco_tls_mode in ['acme', 'none'] }}"   # does the control node trust the certificate? Not for `internal`
+eco_ca_file: ""                    # a CA bundle on the app host, mounted into every app container (SSL_CERT_FILE); set automatically for `internal`
+eco_proxy_https_port: 443          # ports the proxy container publishes on the proxy host
+eco_proxy_http_port: 80
+eco_publish_address: 127.0.0.1     # where apps are published for a proxy on another host (set the host's private address)
+eco_proxy_image: caddy:2
+eco_placement: {}                  # app key -> inventory host that runs it; default: the first host of group `app`
+
+# ---- database -----------------------------------------------------------------------------------------------------------
+eco_db_address: "{{ hostvars[groups['db'][0]].eco_db_address | default(hostvars[groups['db'][0]].ansible_host | default(groups['db'][0])) }}"   # as the app containers reach it
+eco_db_port: 5432                  # the port the playbook connects to
+eco_db_app_port: "{{ eco_db_port }}"   # the port the app containers use (differs only when the playbook reaches it through a published port)
+eco_db_sslmode: prefer             # in DATABASE_URL: disable | prefer | require | verify-full
+eco_db_login_unix_socket: /var/run/postgresql   # how the playbook reaches the database as an administrator ...
+eco_db_login_host: ""              # ... or over TCP (then set eco_db_login_password in the vault)
+eco_db_login_user: postgres
+eco_db_login_password: ""
+eco_db_become: true                # become `eco_db_become_user` on the db host (peer authentication over the socket)
+eco_db_become_user: postgres
+eco_db_demo_container: false       # true: the db host runs a throwaway pgvector container as the database (local demo only)
+eco_db_demo_image: pgvector/pgvector:pg17
+
+# ---- the swappable parts ------------------------------------------------------------------------------------------------
+eco_identity_mode: managed         # managed: deploy the identity provider | existing: one already running at eco_identity_url | oidc: any OIDC provider
+eco_identity_url: ""               # existing / oidc: the issuer URL
+eco_oidc_clients: {}               # oidc: app key -> {client_id, client_secret, service_client_id, service_client_secret} (put the secrets in the vault)
+eco_llm_mode: managed              # managed: deploy the LLM gateway | existing: one running at eco_llm_gateway_url | openai: any OpenAI-compatible endpoint
+eco_llm_gateway_url: ""            # existing: its base URL (its operator key goes to eco_secret_overrides["llmgw/LLMGW_API_KEY"])
+eco_llm_base_url: ""               # openai: e.g. https://api.openai.com/v1
+eco_llm_api_key: ""                # openai: the key every LLM app is given (vault)
+eco_connect: true                  # wire ShopFront to PayBroker (merchant, keys, webhook, settings) when the manifest asks for it
+
+# ---- secrets ------------------------------------------------------------------------------------------------------------
+eco_secrets_dir: "{{ playbook_dir }}/.secrets/{{ eco_manifest.fleet | default('fleet') }}"
+eco_secret_overrides: {}           # "<app>/<NAME>": value, e.g. "identity/IDENTITY_API_KEY"; put the values in an ansible-vault file

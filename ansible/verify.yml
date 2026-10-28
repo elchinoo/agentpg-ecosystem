@@ -1,0 +1,11 @@
+---
+# Read-only report, like `ecoctl status`: ansible-playbook -i inventories/agentpg verify.yml
+# (On AgentPG, `agentpg sandbox list` shows the sandboxes themselves; this reports what the apps answer.)
+- name: Verify - health, LLM clients, identity registry
+  hosts: localhost
+  gather_facts: false
+  tags: [verify]
+  roles:
+    - common
+    - role: verify
+      when: eco_http | bool

@@ -1,0 +1,20 @@
+---
+# One database and one login role per app (ecoctl creates one instance per app; here the same isolation is one database per app on your
+# server), and the extensions the manifest lists. An extension whose package the server does not have is reported, not an error:
+# edb_* and postgis come from EDB's or PostGIS's repositories, which a plain Postgres does not have.
+- name: Demo database container
+  ansible.builtin.include_tasks: demo_container.yml
+  when: eco_db_demo_container | bool
+
+- name: One database and role per app
+  ansible.builtin.include_tasks: app_db.yml
+  loop: "{{ ['identity'] + eco_fleet.deployed if eco_identity_mode == 'managed' else eco_fleet.deployed }}"
+  loop_control: {loop_var: eco_db_key, label: "{{ eco_db_key }}"}
+  when: not (eco_db_key == eco_fleet.llm.gateway and eco_llm_mode != 'managed')
+
+- name: Extensions the server does not offer (install the package, then run again with --tags db)
+  ansible.builtin.debug:
+    msg: "{{ item.key }}: {{ item.value | join(', ') }}"
+  loop: "{{ eco_ext_missing | default({}) | dict2items | selectattr('value') | list }}"
+  loop_control: {label: "{{ item.key }}"}
+  tags: [db]

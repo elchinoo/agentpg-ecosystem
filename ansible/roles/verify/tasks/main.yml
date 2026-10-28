@@ -1,0 +1,81 @@
+---
+# What `ecoctl status` shows, read-only: health and readiness of every app, each LLM client with one real call, and the identity registry.
+# Fails when an app is not healthy, so it can gate a pipeline.
+- name: Health and readiness of every app
+  ansible.builtin.uri:
+    url: "{{ eco_urls[item.0] }}{{ item.1 }}"
+    validate_certs: "{{ eco_validate_certs }}"
+    status_code: [200, 201, 204, 301, 302, 400, 401, 403, 404, 405, 500, 502, 503, 504]
+    timeout: 10
+  loop: "{{ eco_fleet.deployed | product(['/healthz', '/readyz']) | list }}"
+  loop_control: {label: "{{ item.0 }}{{ item.1 }}"}
+  register: eco_probe
+  failed_when: false
+  changed_when: false
+  check_mode: false
+
+- name: The identity provider and the gateway too (when this recipe runs them)
+  ansible.builtin.uri:
+    url: "{{ eco_urls[item.0] }}{{ item.1 }}"
+    validate_certs: "{{ eco_validate_certs }}"
+    status_code: [200, 401, 403, 404, 500, 502, 503, 504]
+    timeout: 10
+  loop: "{{ ['identity'] | product(['/healthz', '/readyz']) | list if eco_identity_mode == 'managed' else [] }}"
+  loop_control: {label: "{{ item.0 }}{{ item.1 }}"}
+  register: eco_probe_idp
+  failed_when: false
+  changed_when: false
+  check_mode: false
+
+- name: Each LLM client makes one tiny chat call with its own key
+  ansible.builtin.uri:
+    url: "{{ (eco_llm_base_url if eco_llm_mode == 'openai' else eco_urls[eco_fleet.llm.gateway] ~ '/v1') }}/chat/completions"
+    method: POST
+    body_format: json
+    body: {model: "{{ eco_fleet.llm.chat_alias }}", messages: [{role: user, content: ping}], max_tokens: 1}
+    headers: {Authorization: "Bearer {{ eco_issued[item ~ '/llm_key'] if eco_llm_mode != 'openai' else eco_llm_api_key }}"}
+    validate_certs: "{{ eco_validate_certs }}"
+    status_code: [200, 401, 403, 404, 429, 500, 502, 503, 504]
+    timeout: 60
+  loop: "{{ eco_fleet.consumers if eco_llm_mode != 'openai' else [] }}"
+  register: eco_llm_probe
+  failed_when: false
+  changed_when: false
+  check_mode: false
+  no_log: true
+
+- name: Registered clients (drift from the identity registry)
+  ansible.builtin.uri:
+    url: "{{ eco_urls.identity }}/api/apps"
+    headers: {Authorization: "Bearer {{ eco_secrets['identity/IDENTITY_API_KEY'] }}"}
+    validate_certs: "{{ eco_validate_certs }}"
+    return_content: true
+  register: eco_registry
+  failed_when: false
+  changed_when: false
+  check_mode: false
+  no_log: true
+  when: eco_identity_mode != 'oidc'
+
+- name: The report
+  ansible.builtin.debug:
+    msg: "{{ lookup('ansible.builtin.template', 'report.j2') | split('\n') }}"
+
+- name: Every app is healthy and the registry is complete
+  ansible.builtin.assert:
+    that:
+      - eco_unhealthy | length == 0
+      - eco_unregistered | length == 0
+      - eco_llm_failed | length == 0
+    fail_msg: "unhealthy: {{ eco_unhealthy }}; not registered: {{ eco_unregistered }}; LLM call failed for: {{ eco_llm_failed }}"
+    success_msg: "all {{ eco_fleet.deployed | length }} apps are healthy"
+  vars:
+    eco_unhealthy: >-
+      {{ (eco_probe_idp.results + eco_probe.results) | selectattr('item.1', 'equalto', '/healthz') | rejectattr('status', 'equalto', 200)
+         | map(attribute='item') | map('first') | list }}
+    eco_unregistered: >-
+      {{ [] if eco_identity_mode == 'oidc' or eco_registry.json is not defined else
+         (eco_fleet.selected | map('extract', eco_fleet.apps) | selectattr('web') | map(attribute='key') | list
+          + eco_fleet.selected | map('extract', eco_fleet.apps) | selectattr('service') | map(attribute='service_client_id') | list)
+         | reject('in', eco_registry.json | map(attribute='client_id') | list) | list }}
+    eco_llm_failed: "{{ eco_llm_probe.results | default([]) | rejectattr('status', 'equalto', 200) | map(attribute='item') | list }}"

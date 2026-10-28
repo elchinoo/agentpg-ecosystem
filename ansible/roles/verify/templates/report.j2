@@ -1,0 +1,21 @@
+{% set rows = (eco_probe_idp.results + eco_probe.results) %}
+{% set ns = namespace(keys=[]) %}
+{% for r in rows %}{% if r.item[0] not in ns.keys %}{% set ns.keys = ns.keys + [r.item[0]] %}{% endif %}{% endfor %}
+{{ 'app'.ljust(16) }}{{ 'health'.ljust(8) }}{{ 'ready'.ljust(8) }}url
+{% for k in ns.keys %}
+{% set h = rows | selectattr('item', 'equalto', [k, '/healthz']) | map(attribute='status') | first | default('-') %}
+{% set rd = rows | selectattr('item', 'equalto', [k, '/readyz']) | map(attribute='status') | first | default('-') %}
+{{ k.ljust(16) }}{{ (h | string if h != -1 else 'down').ljust(8) }}{{ (rd | string if rd != -1 else 'down').ljust(8) }}{{ eco_urls[k] }}
+{% endfor %}
+
+LLM clients (one chat call each, alias {{ eco_fleet.llm.chat_alias }})
+{% for r in eco_llm_probe.results | default([]) %}
+  {{ r.item.ljust(16) }}{{ 'ok' if r.status == 200 else 'HTTP ' ~ r.status }}
+{% endfor %}
+
+Identity registry
+{% if eco_registry.json is defined %}
+  {{ eco_registry.json | length }} client(s) registered
+{% else %}
+  (not checked)
+{% endif %}

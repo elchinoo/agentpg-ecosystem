@@ -1,0 +1,85 @@
+---
+# Read the manifest and derive everything the other roles share. Runs at the top of every play (it only reads; the secret files
+# are created once by the first play, so parallel hosts never race on them).
+- name: Read ecosystem.yaml
+  ansible.builtin.include_vars:
+    file: "{{ eco_manifest_path }}"
+    name: eco_manifest
+  tags: always
+
+- name: Derive the fleet (defaults, creation order, URL variables, gateway limits)
+  ansible.builtin.set_fact:
+    eco_fleet: >-
+      {{ eco_manifest
+         | combine({'agentpg': (eco_manifest.agentpg | default({}))
+                    | combine({'registry': eco_image_registry} if eco_image_registry else {})
+                    | combine({'tag': eco_image_tag} if eco_image_tag else {})}, recursive=true)
+         | eco_fleet(eco_only) }}
+  tags: always
+
+- name: URLs, hosts target - https://<app>.<domain>
+  ansible.builtin.set_fact:
+    eco_urls: "{{ eco_fleet | eco_urls(eco_scheme, eco_domain, eco_public_port, eco_hosts) }}"
+  when: eco_target == 'hosts'
+  tags: always
+
+- name: URLs, AgentPG target - the sandbox URLs known from earlier runs (a sandbox's URL exists only once it runs)
+  ansible.builtin.set_fact:
+    eco_urls: >-
+      {{ eco_urls | default({}) | combine({item: ((lookup('ansible.builtin.file', eco_secrets_dir ~ '/agentpg/' ~ item ~ '.json', errors='ignore')
+                                                    | default('{}', true) | string | from_json).get('url', ''))}) }}
+  loop: "{{ ['identity'] + (eco_fleet.apps | list) }}"
+  when: eco_target == 'agentpg'
+  tags: always
+
+- name: What runs where
+  ansible.builtin.set_fact:
+    eco_urls: >-
+      {{ eco_urls
+         | combine({'identity': eco_identity_url} if eco_identity_mode != 'managed' else {})
+         | combine({eco_fleet.llm.gateway: (eco_llm_gateway_url if eco_llm_mode == 'existing' else eco_llm_base_url | regex_replace('/v1/?$', ''))}
+                   if eco_llm_mode != 'managed' else {}) }}
+    eco_run_list: >-
+      {{ (['identity'] if eco_identity_mode == 'managed' else [])
+         + (eco_fleet.deployed | reject('equalto', eco_fleet.llm.gateway) | list if eco_llm_mode != 'managed' else eco_fleet.deployed) }}
+    eco_recreate_set: "{{ eco_fleet | eco_recreate_set(eco_recreate) }}"
+    eco_http: "{{ eco_target == 'hosts' or not ansible_check_mode }}"
+  tags: always
+
+- name: Where each app runs, and its published port (hosts target)
+  ansible.builtin.set_fact:
+    eco_proxy_host: "{{ (groups['proxy'] | default([]) + groups['app'])[0] }}"
+    eco_placed: "{{ eco_placed | default({}) | combine({item: eco_placement.get(item, groups['app'][0])}) }}"
+    eco_host_ports: "{{ eco_host_ports | default({}) | combine({item: 18000 + idx}) }}"
+  loop: "{{ eco_run_list }}"
+  loop_control: {index_var: idx}
+  when: eco_target == 'hosts'
+  tags: always
+
+- name: Load (or, the first time, generate) every generate-once secret
+  ansible.builtin.set_fact:
+    eco_secrets: >-
+      {{ eco_secrets | default({}) | combine({item:
+           (eco_secret_overrides[item] if item in eco_secret_overrides
+            else lookup('ansible.builtin.password', eco_secrets_dir ~ '/generated/' ~ item ~ ' length=43 chars=ascii_letters,digits,-,_'))}) }}
+  loop: "{{ eco_fleet | eco_secret_names(eco_target) }}"
+  no_log: true
+  tags: always
+
+- name: Load the secrets the identity provider and the gateway issued once (client secrets, gateway keys)
+  ansible.builtin.set_fact:
+    eco_issued: >-
+      {{ eco_issued | default({}) | combine({item: (lookup('ansible.builtin.file', eco_secrets_dir ~ '/issued/' ~ item, errors='ignore') | default('', true)
+                                                    | string | trim)}) }}
+  loop: >-
+    {{ eco_fleet.selected | product(['client_secret', 'service_secret', 'llm_key']) | map('join', '/') | list + ['eco-ansible/service_secret'] }}
+  no_log: true
+  tags: always
+
+- name: The CA bundle the app containers trust (hosts target)
+  ansible.builtin.set_fact:
+    eco_ca_path: >-
+      {{ eco_ca_file if eco_ca_file
+         else (eco_data_dir ~ '/proxy/data/caddy/pki/authorities/local/root.crt' if eco_tls_mode == 'internal' else '') }}
+  when: eco_target == 'hosts'
+  tags: always

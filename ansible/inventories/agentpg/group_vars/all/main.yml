@@ -1,0 +1,12 @@
+---
+# eco_target defaults to agentpg. Everything else comes from ../ecosystem.yaml (names, size, auto_pause, images, apps, roles, extensions, llm).
+# Overrides worth knowing (all in roles/common/defaults/main.yml):
+# eco_only: [shopfront]                  # deploy one app and what it needs, like `ecoctl apply --only`
+# eco_image_tag: latest                  # pin a tag you tested (default: the manifest's agentpg.tag)
+# eco_env_change: recreate               # apply a changed environment by recreating the sandbox (default: report, like `ecoctl apply`)
+# eco_recreate: [llmgw]                  # delete and create again, with the apps that depend on it (like `ecoctl recreate`); better given with -e
+# eco_agentpg_bin: /usr/local/bin/agentpg
+# eco_identity_mode: existing            # use an identity provider that already runs ...
+# eco_identity_url: https://identity.corp.example.com
+# eco_llm_mode: openai                   # ... or any OpenAI-compatible endpoint instead of the LLM gateway
+# eco_llm_base_url: https://llm.corp.example.com/v1

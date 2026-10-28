@@ -18,6 +18,8 @@ PayBroker, ShopFront and the LLM gateway all read the same `<PREFIX>_OIDC_*` var
 
 **Full walkthrough for a first live deployment (eight sandboxes): [docs/DEPLOY.md](docs/DEPLOY.md).**
 
+**With Ansible instead of `ecoctl`:** [`ansible/`](ansible/) deploys the same fleet on AgentPG from the same manifest (the `agentpg` CLI for instances, extensions and sandboxes, HTTPS for identity, gateway, groups and the ShopFront-PayBroker connection), for teams that drive their infrastructure with Ansible; a secondary target puts it on your own Postgres and Docker hosts. Comparison, a read-only first dry run (`--check`) and what Ansible does not do: [docs/07-ansible-deployment.md](docs/07-ansible-deployment.md).
+
 **Everything in one place: [docs/GUIDE.md](docs/GUIDE.md)** (every project, how they interact, the manifest and command reference, secrets and
 rotation, the release loop, troubleshooting, the e2e suite, AIDB status, how to add an app). **Tutorial video script:
 [docs/VIDEO-SCRIPT.md](docs/VIDEO-SCRIPT.md)** ("from zero to a running ecosystem with ecoctl"). Documents 01 to 04 under `docs/` are dated reports; GUIDE.md is the current reference.

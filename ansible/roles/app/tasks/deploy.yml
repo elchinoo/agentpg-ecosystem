@@ -1,0 +1,9 @@
+---
+# Where one app (eco_item) runs: on AgentPG (an instance and a sandbox, through the agentpg CLI) or on your own hosts (a container).
+- name: "{{ eco_item.key }}: on AgentPG"
+  ansible.builtin.include_tasks: agentpg.yml
+  when: eco_target == 'agentpg'
+
+- name: "{{ eco_item.key }}: on your own hosts"
+  ansible.builtin.include_tasks: container.yml
+  when: eco_target == 'hosts'
