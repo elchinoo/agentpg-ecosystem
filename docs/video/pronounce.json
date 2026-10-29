@@ -1,3 +1,3 @@
 {"EDB": "ee-dee-bee", "uv": "you-vee", "3.11": "three point eleven", "llm": "el-el-em", "id": "eye-dee", "ecoctl": "eco-control",
- "OpenAI": "open-ay-eye", "OpenAI-compatible": "open-ay-eye compatible", "PostGIS": "post-jis",
+ "OpenAI": "open-ay-eye", "OpenAI-compatible": "open-ay-eye compatible", "PostGIS": "post-jis", "pg_trgm": "pee-gee trigram", "tcn": "tee-see-en", "Dockerfile": "Docker file", "README": "read me", "fuzzystrmatch": "fuzzy string match",
  "edb_stat_monitor": "ee-dee-bee stat monitor", "edb_pg_tuner": "ee-dee-bee pee-gee tuner", "query_advisor": "query advisor"}

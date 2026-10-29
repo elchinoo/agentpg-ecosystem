@@ -310,9 +310,10 @@ def problem(stage):
     return img
 
 
-def capture_slide(path, caption, crop=None, title="Real screens from the live fleet", sub="Captured, not a mock-up"):
+def capture_slide(path, caption, crop=None, title="Real screens from the live fleet", sub="Captured, not a mock-up",
+                  tag="CAPTURED from the live AgentPG fleet, 28 Oct 2026"):
     """A real screenshot, fitted below the header; crop=(x0,y0,x1,y1) in the source's pixels zooms into a region."""
-    img, d = base(title, sub, tag="CAPTURED from the live AgentPG fleet, 28 Oct 2026", right="Synthetic data, test cards only")
+    img, d = base(title, sub, tag=tag, right="Synthetic data, test cards only")
     src = Image.open(path).convert("RGB")
     if crop:
         src = src.crop(crop)
@@ -349,10 +350,11 @@ def text_slide(title, subtitle, lines, caption=None, tag=None, mono=True, hl=(),
 
 def endcard():
     img, d = base("Thanks for watching")
-    d.text((W // 2, 300), "One manifest. One state file. One guide.", font=font("sans", 60, True), fill=TXT, anchor="mm")
-    d.text((W // 2, 420), "validate  |  plan  |  apply  |  status  |  connect  |  recreate", font=font("mono", 34), fill=BLUE, anchor="mm")
-    rrect(d, (360, 540, 1560, 720), fill=PANEL, outline=AMBER, width=3)
-    d.text((W // 2, 600), "Read the full guide", font=font("sans", 36, True), fill=AMBER, anchor="mm")
-    d.text((W // 2, 662), "docs/GUIDE.md in the ecosystem repository", font=font("mono", 34), fill=TXT, anchor="mm")
-    d.text((W // 2, 840), "Synthetic data, test cards only", font=font("sans", 28), fill=MUTED, anchor="mm")
+    d.text((W // 2, 280), "Five apps. Five templates.", font=font("sans", 64, True), fill=TXT, anchor="mm")
+    d.text((W // 2, 380), "Take one. Fork it. Run it. Change it.", font=font("sans", 44), fill=BLUE, anchor="mm")
+    rrect(d, (260, 480, 1660, 760), fill=PANEL, outline=AMBER, width=3)
+    d.text((W // 2, 540), "Apache License 2.0: TrustDesk, PagerLens, CityPulse, PayBroker, ShopFront", font=font("sans", 30, True), fill=AMBER, anchor="mm")
+    d.text((W // 2, 620), "Deploy: ansible/ (docs/07-ansible-deployment.md), or ecoctl", font=font("mono", 30), fill=TXT, anchor="mm")
+    d.text((W // 2, 680), "Guide: docs/GUIDE.md in the ecosystem repository", font=font("mono", 30), fill=TXT, anchor="mm")
+    d.text((W // 2, 880), "Synthetic data, test cards only", font=font("sans", 28), fill=MUTED, anchor="mm")
     return img
