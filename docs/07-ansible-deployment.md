@@ -5,7 +5,12 @@
 > through the apps' own HTTPS APIs. `ecoctl` is unchanged and stays the faster, fuller tool. A second target, `eco_target: hosts`, puts the same fleet on
 > your own Postgres and Docker hosts (section 11).
 >
-> **It has not yet touched a real AgentPG account.** Everything below was run against stand-ins (section 10). Run the dry run in section 4 first.
+> **Verified on a real AgentPG account (2026-10-29), throwaway fleet `ecoans`:** a complete apply of all eight apps from an empty fleet in one run (14 minutes,
+> `failed=0`); a second `site.yml` with `changed=0`; `verify.yml` passing (all eight sandboxes 200, five LLM clients answering, 11 identity clients, masking drift 0,
+> ShopFront's connection test to PayBroker passing); and a guarded `destroy.yml` that left the account at its starting 9 instances with the real `eco` fleet untouched.
+> Not verified: the `eco_target: hosts` path on real hosts, and `eco_env_change: recreate` on a real fleet. Run the dry run in section 4 first.
+>
+> To try it without touching a fleet you run, use `ansible/throwaway.sh apply|verify|preview|destroy`: it builds the fleet `ecoans` from a copy of the manifest.
 
 ## 1. Who this is for
 

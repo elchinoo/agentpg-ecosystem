@@ -1,8 +1,9 @@
 ---
 # Tear a fleet down: its sandboxes, then its instances (a database and its data are gone for good). Nothing else.
 #
-#   ansible-playbook destroy.yml --check -e eco_destroy_confirm=ecoans     prints what it would delete, deletes nothing
-#   ansible-playbook destroy.yml         -e eco_destroy_confirm=ecoans     deletes it
+#   ansible-playbook destroy.yml --check -e eco_destroy_confirm=eco     prints what it would delete, deletes nothing
+#   ansible-playbook destroy.yml         -e eco_destroy_confirm=eco     deletes it
+#   a throwaway fleet built from a copy of the manifest needs that copy too:  -e eco_manifest_path=/tmp/ecosystem-ansible-test.yaml -e eco_destroy_confirm=ecoans
 #
 # Safety rails, all tested (tests/test_ansible_recipe.py):
 #   - refuses unless eco_destroy_confirm equals the manifest's fleet name exactly
@@ -28,8 +29,9 @@
           - eco_target == 'agentpg'
           - eco_destroy_confirm | default('') | string == eco_fleet.fleet
         fail_msg: >-
-          Refusing to destroy. This deletes every sandbox and instance of the fleet '{{ eco_fleet.fleet }}' (data included). To go on, pass the exact fleet name:
-          -e eco_destroy_confirm={{ eco_fleet.fleet }}   (eco_target must be agentpg: for your own hosts, remove the containers and databases yourself)
+          Refusing to destroy. The manifest read ({{ eco_manifest_path | default('ecosystem.yaml') }}) names the fleet '{{ eco_fleet.fleet }}': this would delete every sandbox and
+          instance of that fleet (data included). If you meant another fleet, pass its manifest too: -e eco_manifest_path=/path/to/that.yaml. To go on with THIS fleet, pass
+          its exact name: -e eco_destroy_confirm={{ eco_fleet.fleet }}   (eco_target must be agentpg: for your own hosts, remove the containers and databases yourself)
         quiet: true
 
     - name: What belongs to this fleet, and nothing else (exact names, in deletion order)

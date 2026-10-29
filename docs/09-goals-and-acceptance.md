@@ -30,7 +30,7 @@ This page defines what the showcase must achieve and how we know each goal is me
 | G6 | AI access to the database is safe | Read-only MCP user cannot write, cannot read masked columns from base tables, and the masking survives grants after startup | **Met** 2026-10-28 after kit 0.3.1: 7 of 7 apps deny the base tables; writes refused; durability proven live (a new read-only database user re-opened TrustDesk `employee` at 16:52:39, the app closed it again by 16:55:55 without a restart); `masking_drift_tables` 0 on all apps. Before the fix the tables stayed open until the next restart |
 | G7 | Propose, never auto-apply | PagerLens tuning shows proposals, applies nothing by default | **Met** 2026-10-28 (server settings marked not applicable; apply off) |
 | G8 | Swappable pieces are explicit | Docs and videos say in the first 30 s that identity, gateway and vault are swappable | Docs **met**. Videos **not yet re-recorded** |
-| G9 | Deployable by customers their own way | `ecoctl` (fast) and an Ansible recipe that deploys on AgentPG | `ecoctl` **met**. Ansible on the real platform 2026-10-28 (throwaway fleet `ecoans`): dry run (ok=126, nothing created); partial apply (identity, gateway, PagerLens created, registered, keyed and healthy 200/200; CityPulse's sandbox created; PayBroker's instance stayed `unknown` for 420 s and the run stopped); **real teardown verified** (`destroy.yml`: 4 sandboxes and 5 instances deleted by exact name, `eco-*` untouched, failed=0). A complete apply (all 8 apps) is **not yet verified** |
+| G9 | Deployable by customers their own way | `ecoctl` (fast) and an Ansible recipe that deploys on AgentPG | **Met** 2026-10-29. `ecoctl`: fleet runs. Ansible on the real platform (throwaway fleet `ecoans`): complete 8-app apply from empty in one run (14 min, failed=0); second run `changed=0`; `verify.yml` passes; guarded `destroy.yml` returns the account to 9 instances, `eco-*` untouched. Real runs found and fixed five recipe bugs (no wait beyond 420 s, duplicate-client 422, list summary compared with the manifest, live keys misread as revoked, kept key deleted). Not verified: hosts target on real hosts |
 | G10 | Each customer video lands one of three moments | "Look how much easier this is" / "look at this cool thing only EDB can do" / "look at the level of work you should be doing" | **Not yet re-recorded**; storyboard per app is in the video scripts |
 | G11 | Platform gaps become requests | Every limitation we hit is written down with evidence for the AgentPG team | Maintained in `06-edb-and-agentpg-capabilities.md` and `08-two-mcp-routes.md` |
 
@@ -53,7 +53,7 @@ This page defines what the showcase must achieve and how we know each goal is me
 5. `pg_read_all_stats` is not available to the app role, so other users' statement texts are hidden in Insights.
 6. Superuser-only extensions (data_redaction, pg_prewarm, pgstattuple and others) cannot be installed; AIDB installs but has no grants.
 7. Sandbox URLs contain the sandbox id and change when a sandbox is recreated.
-8. Creating a fourth and fifth instance in quick succession (Ansible, throwaway fleet `ecoans`, 2026-10-28) left PayBroker's new instance in status `unknown` for over 420 s. The sandboxes and instances created before it kept running.
+8. Creating a fourth and fifth instance in quick succession (Ansible, throwaway fleet `ecoans`, 2026-10-28) left PayBroker's new instance in status `unknown` for over 420 s. The sandboxes and instances created before it kept running. With the wait raised to 1200 s the same fleet came up completely on 2026-10-29 (14 minutes for eight instances and sandboxes), so the delay was slowness, not a failure.
 9. `agentpg account` shows only an instance count; no quota or limits are visible anywhere in the CLI.
 10. Different shells on the same machine showed different views of the same account's instances and sandboxes (one saw the `ecoans-*` objects, the other did not). Cause not known; the user's own terminal is the reference.
 
@@ -61,5 +61,5 @@ This page defines what the showcase must achieve and how we know each goal is me
 
 - Every row above is **Met**, or has a written reason and an owner.
 - ~~All eight apps run kit 0.3.1 with the masking re-assert, and `masking_drift_tables` is 0 on every app.~~ Done 2026-10-28.
-- ~~The Ansible `--check` dry run has been run once on a real account.~~ Done 2026-10-28. A full apply on a throwaway fleet name is still to do.
+- ~~The Ansible `--check` dry run has been run once on a real account.~~ Done 2026-10-28. ~~A full apply on a throwaway fleet name.~~ Done 2026-10-29.
 - Customer videos re-recorded against the live behaviour above.
