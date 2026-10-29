@@ -47,7 +47,9 @@ The simulator feeds it, with a short-lived token from identity. Press burst, and
 
 CityPulse reports its own health to PagerLens, and PagerLens opens an incident.
 
-One SQL statement answers a district question across relational, time series, JSON, geographic, and vector data. PostGIS does the geography, instead of a separate GIS server. Readings are partitions, and sensor metadata is JSONB.
+The city is real: Brussels, with real commune outlines from OpenStreetMap, and simulated sensors placed inside them.
+
+One SQL statement answers a district question across relational, time series, JSON, geographic, and vector data. PostGIS answers distance questions in metres: the nearest healthy sensors are 101, 176, and 249 metres away. It replaces a separate GIS server. Readings are partitions, and sensor metadata is JSONB.
 
 ## 6 af_heart
 PayBroker is a payment broker. One API in front of several simulated processors, with smart routing and a three-tier fraud engine. It takes test cards only.

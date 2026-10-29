@@ -169,6 +169,10 @@ SL = "SLIDE: from the docs"
 
 
 def cap_img(name, caption, crop=None, **kw):
+    """Live-fleet still; `name` is the stem of a 28 Oct file, or a full file name (for example the 29 Oct Brussels stills)."""
+    if name.endswith(".jpg"):
+        kw.setdefault("tag", "CAPTURED from the live AgentPG fleet, " + ("29 Oct 2026" if "2026-10-29" in name else "28 Oct 2026"))
+        return S.capture_slide(CAPS / name, caption, crop, **kw)
     return S.capture_slide(CAPS / f"{name}-2026-10-28.jpg", caption, crop, **kw)
 
 
@@ -255,8 +259,10 @@ def scene5(A, F, cap):
         (1, 0): app_img("citypulse", "overview-simulator", "The simulator feeds it with a short-lived token", **t),
         (1, 1): app_img("citypulse", "burst-degraded-reports", "Burst: the city degrades", **t),
         2: appdia("citypulse", hot=("cp_pl",), warm=("sim_cp", "idp"), steps=("CityPulse reports its health to PagerLens, which opens an incident",), extra=("pagerlens",)),
-        (3, 0): cap_img("citypulse-explain-top", "Explain: one SQL statement, five data models", **t),
-        (3, 1): cap_img("citypulse-explain-geo-vector", "Geographic and vector data in the same statement", **t),
+        3: cap_img("citypulse-map-brussels-2026-10-29.jpg", "Brussels: real commune outlines (OpenStreetMap), simulated sensors inside them", **t),
+        (4, 0): cap_img("citypulse-explain-top-brussels-2026-10-29.jpg", "Explain: one SQL statement, five data models", **t),
+        (4, 1): cap_img("citypulse-explain-geo-brussels-2026-10-29.jpg", "PostGIS: nearest healthy sensors at 101, 176 and 249 m", crop=(235, 470, 1235, 615), **t),
+        (4, 3): cap_img("citypulse-explain-geo-brussels-2026-10-29.jpg", "Distances in metres, in the same statement", **t),
     }
     return staged(A, st, F)
 
