@@ -36,6 +36,9 @@ STEPS = [
     (4, "plan-only-trustdesk", ".venv/bin/ecoctl plan --only trustdesk", None, "empty"),
     (5, "apply-dry-run", ".venv/bin/ecoctl apply --only trustdesk", None, "empty"),
     (5, "apply-execute-cancel", ".venv/bin/ecoctl apply --only trustdesk --execute", "n", "empty"),
+    (6, "ansible-site", "ansible-playbook site.yml --syntax-check", None, "ansible"),
+    (6, "ansible-verify", "ansible-playbook verify.yml --syntax-check", None, "ansible"),
+    (6, "ansible-destroy", "ansible-playbook destroy.yml --syntax-check", None, "ansible"),
     (12, "recreate-cancel", ".venv/bin/ecoctl recreate paybroker", "n", "fixture"),
 ]
 
@@ -73,6 +76,14 @@ def capture(root: Path, cols: int = 110) -> dict:
     res = {}
     for scene, slug, cmd, stdin, state in STEPS:
         work = root / slug
+        if state == "ansible":                              # a copy of ansible/ (no .venv, no .secrets): --syntax-check parses only
+            shutil.copytree(REPO / "ansible", work / "ansible", ignore=shutil.ignore_patterns(".venv", ".secrets", "__pycache__"))
+            shutil.copy(REPO / "ecosystem.yaml", work / "ecosystem.yaml")
+            text, code = run(cmd, stdin, work / "ansible", cols)
+            if code != 0:
+                raise SystemExit(f"{slug} failed (exit {code}):\n{text}")
+            res[slug] = {"scene": scene, "cmd": cmd, "stdin": stdin, "text": text, "code": code}
+            continue
         (work / ".venv" / "bin").mkdir(parents=True)
         shutil.copy(REPO / "ecosystem.yaml", work / "ecosystem.yaml")
         (work / ".venv" / "bin" / "ecoctl").symlink_to(ECOCTL)
@@ -252,7 +263,12 @@ def make_renderer(title="ecoctl", overlay_draw=None, fs=FS):
             y += LH
         if disp:                                            # block cursor after the last row
             d.rectangle((PAD + len(disp[-1][0]) * cw, y - LH + 3, PAD + len(disp[-1][0]) * cw + cw * 0.7, y - 5), fill=(200, 204, 212))
-        if state["overlay"] and overlay_draw:
+        if isinstance(state["overlay"], str):               # a caption panel over the lower part of the terminal
+            S.rrect(d, (120, 880, S.W - 120, 1000), fill=(30, 34, 44), outline=S.AMBER, width=3)
+            for i, ln in enumerate(S.wrap(state["overlay"], S.font("sans", 36), S.W - 320)[:2]):
+                d.text((160, 940 if i == 0 and len(S.wrap(state["overlay"], S.font("sans", 36), S.W - 320)) == 1 else 915 + i * 50), ln,
+                       font=S.font("sans", 36), fill=S.TXT, anchor="lm")
+        elif state["overlay"] and overlay_draw:
             overlay_draw(img, d, state["overlay"])
         return img
 
@@ -302,9 +318,9 @@ def validate_frames(A, cap, save):
         ts.at(tout, "line", (ln, "out"))
     ts.at(tout, "line", ("$ ", "cmd"))
     ts.at(tout + 0.1, "hl", (1,))
-    ts.at(A.ps(3), "badge", "gateway first: the others depend on it")
-    ts.at(A.cs(3, 1), "badge", "pagerlens-agent: registered, not deployed")
-    ts.at(A.ps(4), "badge", "creation order: worked out by ecoctl")
+    ts.at(A.ps(3), "overlay", "Gateway first: the others depend on it")
+    ts.at(A.cs(3, 1), "overlay", "pagerlens-agent: registered here, but it runs outside AgentPG")
+    ts.at(A.ps(4), "overlay", "The creation order is worked out by ecoctl")
     return [(t, save(img)) for t, img in ts.replay(make_renderer(overlay_draw=overlay, fs=26), A.D)]
 
 
@@ -355,7 +371,10 @@ def recreate_frames(A, cap, save, until):
     ts.inline(A.ps(0) + 0.9, c["cmd"], 1.5)
     te = A.ps(0) + 2.7
     ts.reveal(lines, [(max(A.ps(1), te) + 0.2, 0), (max(A.ps(1), te) + 1.4, len(lines))])
+    ts.at(max(A.ps(1), te) + 1.5, "overlay", "A sandbox's address contains its id: recreate it and the address changes")
     ts.at(A.cs(2, 0) + 0.2, "hl", (1,))
+    ts.at(A.cs(2, 0) + 0.2, "overlay", "The cascade is listed first, then ecoctl asks")
+    ts.at(A.pe(2) - 0.1, "overlay", None)
     ts.at(A.pe(2) - 0.1, "line", ("Continue? [y/N] ", "out"))
     ts.inline(A.pe(2) + 0.3, c["stdin"], 0.2)
     ts.at(A.pe(2) + 0.7, "line", (last or "Cancelled.", "out"))

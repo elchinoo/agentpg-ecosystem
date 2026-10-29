@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One-command build of the review cut of the ecoctl tutorial video.
 
-    python3 docs/video/build.py [--work DIR] [--name ecosystem] [--deliver DIR] [--voice am_michael] [--speed 0.95]
+    python3 docs/video/build.py [--work DIR] [--name ecosystem] [--deliver DIR] [--voice am_liam] [--speed 1.08]
                                 [--keep-audio] [--sync-script]
 
 Steps
@@ -37,12 +37,6 @@ SCRIPT = REPO / "docs" / "VIDEO-SCRIPT.md"
 LEAD, TAIL, FPS = 0.35, 0.35, 30
 FFMPEG = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
 FFPROBE = shutil.which("ffprobe") or "/opt/homebrew/bin/ffprobe"
-TAG = "REVIEW CUT: slide stands in for a live capture"
-LIVE_SCENES = {6: "title for the live segment", 7: "apply --execute --yes --only trustdesk (live)", 8: "ecoctl status (live)",
-               9: "first sign-in in the identity console and launcher (browser)", 10: "interaction tour, seeded apps (browser)",
-               11: "TrustDesk request, ShopFront checkout, PayBroker payment (browser)"}
-
-
 def run(*a, **kw):
     return subprocess.run([str(x) for x in a], check=True, **kw)
 
@@ -119,6 +113,38 @@ class Frames:
         return self.seen[h]
 
 
+def break_static(kf, D, F, step=5.5):
+    """No picture stays identical for long: every keyframe that lasts 2 s or more flips between the slide and a copy tinted 4 % toward amber,
+    and a longer gap flips again every `step` s. (Caption-only changes are too small for freezedetect, and x264 flattens a 1 % tint.)"""
+    from PIL import Image
+    out, cache, par = [], {}, 0
+
+    def variant(p, on):
+        if not on:
+            return p
+        if p not in cache:
+            im = Image.open(p).convert("RGB")
+            q = Path(p).with_name(Path(p).stem + "-tint.png")
+            Image.blend(im, Image.new("RGB", im.size, (251, 191, 36)), 0.04).save(q, compress_level=1)
+            cache[p] = str(q)
+        return cache[p]
+
+    kf = sorted(kf)
+    for i, (t, p) in enumerate(kf):
+        nxt = kf[i + 1][0] if i + 1 < len(kf) else D
+        if nxt - t < 2.0:
+            out.append((t, p))
+            continue
+        par ^= 1
+        out.append((t, variant(p, par)))
+        j = 1
+        while t + step * j < nxt - 1.0:
+            par ^= 1
+            out.append((round(t + step * j, 3), variant(p, par)))
+            j += 1
+    return out
+
+
 def staged(A, stages, F, lead_in=0.0):
     """stages: {key: image}; key is a paragraph n or (n, s) for sentence s of paragraph n. Shown just before the voice reaches it;
     the first key also covers t=0."""
@@ -133,31 +159,30 @@ def staged(A, stages, F, lead_in=0.0):
 # --------------------------------------------------------------------------------------------------------------- scenes
 ALL = ("pagerlens", "citypulse", "cpsim", "trustdesk", "paybroker", "shopfront")
 GW = tuple("gw_" + k for k in S.LLM_APPS)
+CAPS = REPO.parent / "videos" / "live-captures"
+SCAF = ("eco", "idp", "gw", "vault", "ansible")
+
+
+def cap_img(name, caption, crop=None, **kw):
+    return S.capture_slide(CAPS / f"{name}-2026-10-28.jpg", caption, crop, **kw)
 
 
 def scene1(A, F, cap):
-    sub = "Sample apps for EDB AIDB and AgentPG, deployed by ecoctl"
-    D = lambda **k: S.diagram("The AgentPG ecosystem", sub, **k)  # noqa: E731
-    full = ("eco", "idp", "gw", "model") + ALL
+    sub = "Platform, reference scaffolding, sample apps"
+    D = lambda **k: S.diagram("The AgentPG ecosystem", sub, legend=True, **k)  # noqa: E731
+    full = SCAF + ("model",) + ALL
     st = {
-        0: D(lower="ecoctl: one manifest, one command"),
-        1: D(frame=True),
-        (1, 1): D(frame=True, nodes=("trustdesk",)),
-        2: D(frame=True, nodes=("eco",), hot=("ecoctl_fleet",), steps=("ecoctl deploys the whole fleet from a single file",)),
-        3: D(frame=True, nodes=("eco", "trustdesk", "pagerlens", "citypulse")),
-        4: D(frame=True, nodes=("eco",) + ALL),
-        5: D(frame=True, nodes=("eco", "idp") + ALL, hot=("idp",), steps=("identity: sign-in, and short-lived service tokens",)),
-        (5, 2): D(frame=True, nodes=full, warm=("idp",) + GW + ("gw_model",), lower="LLM gateway: one key per app, models behind it"),
-        6: D(frame=True, nodes=full, warm=("idp",) + GW, hot=("sim_cp", "cp_pl"),
-             steps=("Simulator sends readings to CityPulse", "CityPulse reports trouble to PagerLens")),
-        7: D(frame=True, nodes=full, warm=("idp", "sim_cp", "cp_pl") + GW, hot=("sf_pb", "pb_sf"),
-             steps=("ShopFront sends payments to PayBroker", "PayBroker sends a signed webhook back")),
-        (7, 1): D(frame=True, nodes=full, warm=("idp", "sim_cp", "cp_pl", "sf_pb", "pb_sf") + GW, hot=("gw_trustdesk",),
-                  steps=("TrustDesk asks the gateway to check requests against policy",)),
-        8: D(frame=True, nodes=full, warm=("idp", "sim_cp", "cp_pl", "sf_pb", "pb_sf", "sim_td") + GW,
-             lower="8 sandboxes: 6 apps, identity, gateway"),
-        (8, 1): D(frame=True, nodes=full, warm=("idp", "sim_cp", "cp_pl", "sf_pb", "pb_sf", "sim_td") + GW,
-                  lower="Plan it. Run it. Watch it work."),
+        (0, 0): S.problem(0), (0, 1): S.problem(1), (0, 2): S.problem(2),
+        (1, 0): D(frame=True),
+        (1, 1): D(frame=True, plat=True, lower="PLATFORM = EDB Postgres on AgentPG"),
+        (2, 0): D(frame=True, nodes=SCAF, lower="REFERENCE SCAFFOLDING"),
+        (2, 1): D(frame=True, nodes=SCAF, lower="All of it is swappable"),
+        (2, 2): D(frame=True, nodes=SCAF, marks=("idp",), lower="Any OIDC provider that sends the roles the apps expect"),
+        (2, 3): D(frame=True, nodes=SCAF + ("model",), marks=("gw", "model"), lower="Any OpenAI-compatible gateway"),
+        (2, 4): D(frame=True, nodes=SCAF + ("model",), marks=("vault",), lower="Your own vault, through the kit"),
+        (2, 5): D(frame=True, nodes=SCAF + ("model",), marks=("eco", "ansible"), lower="Your own automation"),
+        3: D(frame=True, nodes=full, lower="SAMPLE APPS: they exist to show the platform"),
+        4: D(frame=True, nodes=full, warm=("idp",) + GW + ("gw_model",), lower="Plan it. Run it. Watch it work."),
     }
     return staged(A, st, F)
 
@@ -217,80 +242,140 @@ def scene5(A, F, cap):
     return term + [(t, sl(0)), (max(A.ps(4) - 0.15, 0), sl(1)), (max(A.ps(5) - 0.15, 0), sl(2))]
 
 
+SL = "SLIDE: from the docs, not captured output"
+
+
 def scene6(A, F, cap):
-    img = S.flow("The live segment", "Recorded once on a demo account, fleet name: demo",
-                 [("ecoctl apply --execute", "create the fleet, for TrustDesk only"), ("ecoctl status", "check that it is healthy"),
-                  ("First sign-in", "open the apps through one launcher")],
-                 cards=[("Why it is recorded", ["Real databases take minutes to create, and each run prints new addresses.",
-                                                "The waits are cut and a timer says how much was sped up."], S.BLUE)], tag=TAG)
-    return [(0.0, F.save(img))]
+    """The Ansible scene (own scene id, can be re-cut alone). The complete eight-app apply was verified on 29 Oct 2026 (docs/07 banner, docs/09 G9);
+    the hosts target and recreate on a real fleet are not, and the scene says so."""
+    T = lambda lines, **k: S.text_slide("Ansible: the customer-owned alternative", "docs/07-ansible-deployment.md and ansible/", lines, tag=SL, **k)  # noqa: E731
+    cmds = ["ansible-playbook site.yml --check          # dry run: reads only", "ansible-playbook site.yml                  # create the fleet",
+            "ansible-playbook verify.yml                # health, one LLM call per client, registry",
+            "ansible-playbook destroy.yml -e eco_destroy_confirm=<fleet>   # guarded teardown"]
+    guard = ["Refuses unless eco_destroy_confirm equals the fleet name", "Deletes exact names only: <fleet>-<app> and <fleet>-<app>-db",
+             "Sandboxes first, then instances", "With --check: prints the list, deletes nothing"]
+    R = lambda lines, **k: S.text_slide("Ansible on the real platform", "Throwaway fleet ecoans", lines, tag="CAPTURED from the real run of 29 Oct 2026", **k)  # noqa: E731
+    verify = ["verify.yml: all eight sandboxes answer 200", "Five LLM clients answer; 11 identity clients; masking drift 0",
+              "ShopFront's connection test to PayBroker passes", "Second site.yml run: nothing to change"]
+    done = ["Dry run (site.yml --check): verified", "Guarded destroy: the account is back at its 9 instances, the real eco fleet untouched"]
+    nov = ["Not verified: the hosts target on real hosts", "Not verified: recreate on a real fleet"]
+    t_term = max(A.ps(2) - 0.15, 0)
+    ts = record.TermScript()
+    ts.at(0, "badge", "offline: syntax check only, nothing deployed")
+    ts.at(0, "line", ("$ ", "cmd"))
+    t = A.ps(2) + 0.1
+    for slug in ("ansible-site", "ansible-verify", "ansible-destroy"):
+        c = cap[slug]
+        if t > A.ps(2) + 0.1:
+            ts.at(t, "line", ("$ ", "cmd"))
+        ts.inline(t, c["cmd"], 0.55)
+        t += 0.7
+        for ln in c["text"].strip("\n").split("\n"):
+            ts.at(t, "line", (ln, "out"))
+        t += 0.35
+    term = [(tt, F.save(img)) for tt, img in ts.replay(record.make_renderer(title="ansible", fs=28), max(A.ps(3) - 0.16, t_term + 0.5))]
+    term = [(max(tt, t_term) if i else t_term, p) for i, (tt, p) in enumerate(term)]
+    term[0] = (t_term, term[0][1])
+    first = [
+        (0.0, F.save(T(["Same manifest as ecoctl: ecosystem.yaml", "ecoctl: one tool, the faster and fuller way",
+                        "Ansible recipe: playbooks you can tag, check, vault and run in your own pipeline",
+                        "Reference scaffolding: swappable for your own automation"], mono=False, hl=(2,), fs=34))),
+        (max(A.cs(1, 0) - 0.15, 0), F.save(T(cmds, fs=28))),
+        (max(A.cs(1, 1) - 0.15, 0), F.save(T(cmds, fs=28, hl=(0, 1)))),
+        (max(A.cs(1, 2) - 0.15, 0), F.save(T(cmds, fs=28, hl=(2,)))),
+        (max(A.cs(1, 3) - 0.15, 0), F.save(T(cmds, fs=28, hl=(3,)))),
+    ]
+    rest = [
+        (max(A.ps(3) - 0.15, 0), F.save(T(guard, mono=False, fs=34))),
+        (max(A.cs(3, 1) - 0.15, 0), F.save(T(guard, mono=False, fs=34, hl=(0,)))),
+        (max(A.cs(3, 2) - 0.15, 0), F.save(T(guard, mono=False, fs=34, hl=(1, 2)))),
+        (max(A.ps(4) - 0.15, 0), F.save(R(["Throwaway fleet ecoans, a real AgentPG account", "29 Oct 2026"], mono=False, fs=40))),
+        (max(A.cs(4, 1) - 0.15, 0), F.save(R(["Complete apply, all eight apps, from empty, one run: 14 minutes",
+                                              "first run:   ok=367   changed=96   failed=0"], hl=(1,), fs=34))),
+        (max(A.ps(5) - 0.15, 0), F.save(R(["Complete apply, all eight apps, from empty, one run: 14 minutes",
+                                           "first run:   ok=367   changed=96   failed=0",
+                                           "second run:  ok=254   changed=0    failed=0"], hl=(2,), fs=34))),
+        (max(A.cs(5, 1) - 0.15, 0), F.save(T(verify, mono=False, fs=34, hl=(0, 1, 2)))),
+        (max(A.cs(5, 2) - 0.15, 0), F.save(T(done, mono=False, fs=34, hl=(0, 1)))),
+        (max(A.ps(6) - 0.15, 0), F.save(T(nov, mono=False, fs=36, hl=(0, 1)))),
+    ]
+    return first + term + rest
+
+
+TAGS = "SLIDE: steps from the guide, not captured output"
 
 
 def scene7(A, F, cap):
-    steps = [("apply --execute --yes", "for TrustDesk only"), ("Identity provider", "database, sandbox, issuer pinned"),
-             ("LLM gateway", "registered, database, sandbox"), ("TrustDesk", "registered, own gateway key and limits"),
-             ("TrustDesk sandbox", "the key goes into its environment"), ("Done", "addresses, and a reminder to join a group")]
-    cards = [("What the real output looks like", ["One line for each step.", "Each line names the step and ends with what happened to it.",
-                                                  "At the end: the list of addresses and a reminder to join a group."], S.BLUE),
-             ("Where the secrets live", ["One private file next to the manifest, never shown on screen.", "Git-ignored, and the only copy: back it up."], S.AMBER)]
-    fl = lambda a, c=None: S.flow("Deploying TrustDesk, step by step", "What apply --execute does, in order", steps, active=a, done=range(a),  # noqa: E731
-                                  cards=cards, active_card=c, tag=TAG)
-    st = {0: fl(0), 1: fl(1), (1, 1): fl(2), 2: fl(3), 3: fl(4), 4: fl(5, 0), 5: fl(5, 1)}
+    dsteps = [("Identity provider", "database, sandbox, issuer pinned"), ("LLM gateway", "registered, database, sandbox"),
+              ("Each app", "registered, its own gateway key, sandbox"), ("Done", "addresses, and a reminder to join a group")]
+    dcards = [("Where the secrets live", ["One private file next to the manifest, never shown on screen.", "Git-ignored, and the only copy: back it up."], S.AMBER)]
+    dep = lambda a, c=None: S.flow("What apply --execute does", "In order", dsteps, active=a, done=range(a) if a is not None else (),  # noqa: E731
+                                   cards=dcards, active_card=c, tag=TAGS)
+    ssteps = [("Apps", "every app answers health and ready"), ("Gateway", "clients, limits, and a tiny chat call"),
+              ("Identity registry", "matches what is deployed"), ("Exit code", "0 means green")]
+    stat = lambda a: S.flow("ecoctl status", "The check you will use most", ssteps, active=a, done=[i for i in range(4) if i < (a or 0)],  # noqa: E731
+                            cards=[("Drift", ["A limit changed by hand makes status warn.", "ecoctl llm sync shows the difference, or restores it."], S.AMBER)], tag=TAGS)
+    gsteps = [("Identity console", "create yourself as a user"), ("Join a group", "ecosystem-admins"),
+              ("Launcher", "/apps: one tile per app"), ("One sign-in", "click a tile and land signed in")]
+    gcards = [("Groups come from the manifest", ["ecosystem-admins: admin in every app", "risk-team: risk manager in PayBroker, viewer in PagerLens",
+                                                 "support: approver in TrustDesk"], S.BLUE)]
+    sign = lambda a: S.flow("First sign-in", "The one manual step is you", gsteps, active=a, done=range(a), cards=gcards, tag=TAGS)  # noqa: E731
+    st = {(0, 0): dep(None), (0, 1): dep(None), (1, 0): dep(0), (1, 1): dep(1), (1, 2): dep(2), 2: dep(3, 0),
+          (3, 0): stat(None), (3, 1): stat(1), (3, 2): stat(3), (4, 0): sign(0), (4, 1): sign(2)}
     return staged(A, st, F)
 
 
 def scene8(A, F, cap):
-    steps = [("Apps", "every app answers health and ready"), ("Gateway", "clients, limits, and a tiny chat call"),
-             ("Identity registry", "matches what is deployed"), ("Exit code", "0 means green")]
-    cards = [("What the real output looks like", ["A table: one row per app, with the health and ready codes.",
-                                                  "A gateway section: one row per client, and one tiny chat call per app.",
-                                                  "Identity registry rows, each marked ok."], S.BLUE),
-             ("Drift", ["A limit changed by hand in the gateway makes status warn.", "ecoctl llm sync shows the difference.",
-                        "With its apply flag it restores the manifest values."], S.AMBER)]
-    act = {0: (None, None), 1: (0, 0), 2: (1, 0), 3: (2, 0), 4: (3, None), 5: (1, 1)}
-    st = {n: S.flow("ecoctl status", "The check you will use most", steps, active=a, done=[i for i in range(4) if a is not None and i < a],
-                    cards=cards, active_card=c, tag=TAG) for n, (a, c) in act.items()}
+    allnodes = SCAF + ("model",) + ALL
+    D = lambda **k: S.diagram("The apps work together", "One city, one burst, one incident", frame=True, nodes=allnodes, tag=TAGS, **k)  # noqa: E731
+    st = {
+        0: D(lower="Synthetic city, synthetic data"),
+        (1, 0): D(warm=("idp",), hot=("sim_cp",), steps=("Simulator sends readings to CityPulse: short-lived token, scope citypulse.ingest",)),
+        2: D(warm=("idp", "sim_cp"), hot=("cp_pl",), marks=("pagerlens",), steps=("Burst: CityPulse degrades and reports to PagerLens, scope pagerlens.ingest",)),
+        (3, 0): D(warm=("idp", "sim_cp", "cp_pl"), hot=("sf_pb", "pb_sf"),
+                  steps=("ShopFront sends payments to PayBroker", "PayBroker signs a webhook back to the shop")),
+        (3, 1): D(warm=("idp", "sim_cp", "cp_pl", "sf_pb", "pb_sf"), lower="Every call: only the scope the manifest granted"),
+    }
     return staged(A, st, F)
 
 
 def scene9(A, F, cap):
-    steps = [("Identity console", "create yourself as a user"), ("Join a group", "ecosystem-admins"),
-             ("Launcher", "open /apps: one tile per app"), ("One sign-in", "click a tile and land signed in")]
-    cards = [("Groups come from the manifest", ["ecosystem-admins: admin in every app", "risk-team: risk manager in PayBroker, viewer in PagerLens",
-                                                "support: approver in TrustDesk"], S.BLUE),
-             ("Optional", ["Google or GitHub login is switched on in the same console.", "Nothing changes in the apps."], S.AMBER)]
-    fl = lambda a, c=None: S.flow("First sign-in", "The one manual step is you", steps, active=a, done=range(a) if a is not None else (),  # noqa: E731
-                                  cards=cards, active_card=c, tag=TAG)
-    st = {0: fl(0), (1, 0): fl(0), (1, 1): fl(1), 2: fl(2), (2, 1): fl(3), 3: fl(None, 0), (3, 2): fl(None, 1)}
+    st = {
+        0: cap_img("citypulse-map-gotham", "CityPulse, map of Gotham: district health, from the live AgentPG fleet"),
+        (1, 1): cap_img("citypulse-map-gotham", "Dashed outlines are derived from the sensor positions (PostGIS)", crop=(230, 125, 1235, 705)),
+        (2, 0): cap_img("citypulse-explain-top", "CityPulse, Explain: one SQL statement, five data models"),
+        (2, 1): cap_img("citypulse-explain-geo-vector", "Geographic and vector data in the same statement"),
+    }
     return staged(A, st, F)
 
 
 def scene10(A, F, cap):
-    allnodes = ("idp", "gw", "model") + ALL
-    D = lambda **k: S.diagram("The apps work together", "One city, one burst, one incident", frame=True, nodes=allnodes, tag=TAG, **k)  # noqa: E731
     st = {
-        0: D(lower="Synthetic city, synthetic data"),
-        1: D(warm=("idp",), hot=("sim_cp",), steps=("Simulator sends readings to CityPulse: short-lived token, scope citypulse.ingest",)),
-        2: D(warm=("idp", "sim_cp"), hot=("cp_pl",), steps=("Burst: CityPulse degrades and reports to PagerLens, scope pagerlens.ingest",)),
-        3: D(warm=("idp", "sim_cp", "cp_pl"), marks=("pagerlens",), lower="PagerLens: incident, evidence, ranked causes"),
-        4: D(warm=("idp", "sim_cp", "cp_pl"), hot=("gw_pagerlens",), steps=("PagerLens asks a model through the gateway, with its own key",)),
-        5: D(warm=("idp", "sim_cp", "cp_pl", "gw_pagerlens"), hot=("sim_pb", "sim_td"),
-             steps=("Simulator pays through PayBroker: a merchant key, not a scope", "Simulator sends TrustDesk requests: scope trustdesk.requests.write")),
-        6: D(warm=("idp", "sim_cp", "cp_pl", "gw_pagerlens", "sim_pb", "sim_td"), lower="Every call: only the scope the manifest granted"),
+        0: cap_img("trustdesk-req-000016-rejection", "TrustDesk, REQ-000016: fifteen days of leave, short notice"),
+        (1, 0): cap_img("trustdesk-req-000016-rejection", "AI pre-validation: suggests rejection, non-compliant", crop=(685, 140, 1180, 330)),
+        (2, 0): cap_img("trustdesk-req-000016-verified-quotes", "Foundation: the policy passages the reasons quote"),
+        (2, 1): cap_img("trustdesk-req-000016-verified-quotes", "Quote found word for word in the document", crop=(700, 120, 1165, 420)),
+        (3, 0): cap_img("trustdesk-req-000016-verified-quotes", "The AI advises; a person decides", crop=(685, 490, 1180, 770)),
     }
     return staged(A, st, F)
 
 
 def scene11(A, F, cap):
-    allnodes = ("eco", "idp", "gw", "model") + ALL
-    D = lambda **k: S.diagram("Policy checks and payments", "TrustDesk, ShopFront and PayBroker", frame=True, nodes=allnodes, tag=TAG, **k)  # noqa: E731
+    ins = (CAPS / "ecoctl-insights.txt").read_text().splitlines()[:18]
+    mcp = ["App MCP: each app's own tools, behind our identity (roles and scopes)",
+           "AgentPG database MCP: generic, over a read-only database user",
+           "Use the first for anything verifiable, or that changes data", "Use the second to explore data and ask about slow queries"]
     st = {
-        0: D(hot=("gw_trustdesk",), steps=("TrustDesk asks the gateway to check the request. Every quote is verified word for word",)),
-        1: D(warm=("gw_trustdesk",), marks=("trustdesk",), lower="A person still decides"),
-        2: D(warm=("gw_trustdesk",), hot=("sf_pb",), steps=("Test card tokenized in the browser: it never touches the shop's server",)),
-        3: D(warm=("gw_trustdesk", "sf_pb"), hot=("pb_sf",), steps=("PayBroker scores the payment and signs a webhook back to the shop",)),
-        4: D(warm=("gw_trustdesk", "sf_pb", "pb_sf"), marks=("shopfront", "paybroker", "eco"), lower="ecoctl connect: merchant, origin, keys, webhook"),
-        5: D(warm=GW + ("gw_model",), marks=("gw",), lower="chat-default: one alias, every app follows"),
+        0: cap_img("trustdesk-insights-top-queries-masking", "TrustDesk, Database page: query insights from the platform"),
+        (1, 0): cap_img("trustdesk-insights-top-queries-masking", "Top queries: from edb_stat_monitor", crop=(273, 120, 1195, 560)),
+        (1, 1): cap_img("trustdesk-insights-tuner-advisor", "Settings suggestions: from edb_pg_tuner", crop=(273, 140, 1195, 380)),
+        (1, 2): cap_img("trustdesk-insights-tuner-advisor", "Index suggestions: from query_advisor", crop=(273, 380, 1195, 750)),
+        (2, 0): cap_img("trustdesk-insights-tuner-advisor", "Suggestions only: a person decides what to change"),
+        (3, 0): cap_img("trustdesk-insights-top-queries-masking", "Masked views for the read-only user: hashed and starred values", crop=(273, 540, 1195, 812)),
+        (4, 0): cap_img("paybroker-insights-masking-sql-in-monitor", "PayBroker, Database page: REVOKE and masked views in the monitor", title="Real screens from the live fleet"),
+        (4, 1): cap_img("paybroker-insights-masking-sql-in-monitor", "A masked view: the actor name is cut to one letter and stars", crop=(248, 150, 1220, 270)),
+        5: S.text_slide("ecoctl insights", "The query advisor's suggestions, per app (excerpt)", ins, tag="CAPTURED from the live AgentPG fleet, 28 Oct 2026", fs=22, lh=40),
+        6: S.text_slide("Two MCP routes", "docs/08-two-mcp-routes.md", mcp, tag=SL, mono=False, fs=34),
     }
     return staged(A, st, F)
 
@@ -298,12 +383,16 @@ def scene11(A, F, cap):
 def scene12(A, F, cap):
     t_diag = max(A.ps(4) - 0.15, 0)
     term = [(t, p) for t, p in record.recreate_frames(A, cap, F.save, t_diag - 0.01)]
-    allnodes = ("eco", "idp", "gw", "model") + ALL
-    dia = S.diagram("One manifest, one state file, one guide", "The whole fleet, from one file", frame=True, nodes=allnodes,
-                    warm=("idp", "sim_cp", "cp_pl", "sf_pb", "pb_sf", "sim_td") + GW, lower="Add an app by adding a few lines")
-    dia1 = S.diagram("One manifest, one state file, one guide", "The whole fleet, from one file", frame=True, nodes=allnodes,
-                     warm=("idp", "sim_cp", "cp_pl", "sf_pb", "pb_sf", "sim_td") + GW, lower="One manifest, one state file, one guide")
-    return term + [(t_diag, F.save(dia1)), (max(A.ps(5) - 0.15, 0), F.save(dia)), (max(A.ps(6) - 0.15, 0), F.save(S.endcard()))]
+    allnodes = SCAF + ("model",) + ALL
+    dia = S.diagram("One manifest, one state file, one guide", "The whole fleet, from one file", frame=True, nodes=allnodes, legend=True,
+                    warm=("idp",) + GW, lower="One manifest, one state file, one guide")
+    dia2 = S.diagram("One manifest, one state file, one guide", "The whole fleet, from one file", frame=True, nodes=allnodes, legend=True,
+                     warm=("idp",) + GW, lower="Add an app by adding a few lines")
+    mk = lambda txt: S.diagram("One manifest, one state file, one guide", "The whole fleet, from one file", frame=True, nodes=allnodes,  # noqa: E731
+                               legend=True, warm=("idp",) + GW, lower=txt)
+    dia3, dia4 = mk("Rotate every secret: one flag, then a recreate"), mk("The state file is your backup target")
+    return term + [(t_diag, F.save(dia)), (max(A.ps(5) - 0.15, 0), F.save(dia2)),
+                    (max(A.cs(5, 1) - 0.15, 0), F.save(dia3)), (max(A.cs(5, 2) - 0.15, 0), F.save(dia4)), (max(A.ps(6) - 0.15, 0), F.save(S.endcard()))]
 
 
 SCENES = {1: scene1, 2: scene2, 3: scene3, 4: scene4, 5: scene5, 6: scene6, 7: scene7, 8: scene8, 9: scene9, 10: scene10, 11: scene11, 12: scene12}
@@ -369,8 +458,8 @@ def main():
     ap.add_argument("--work", default=str(HERE / "out" / "build"))
     ap.add_argument("--name", default="ecosystem")
     ap.add_argument("--deliver", default=None)
-    ap.add_argument("--voice", default="am_michael")
-    ap.add_argument("--speed", default="0.95")
+    ap.add_argument("--voice", default="am_liam")  # scenes name their own voice in narration.txt: am_liam, af_heart, am_eric
+    ap.add_argument("--speed", default="1.08")  # the shared default of videos/tts/narrate.py
     ap.add_argument("--keep-audio", action="store_true", help="reuse work/audio from a previous run")
     ap.add_argument("--sync-script", action="store_true")
     a = ap.parse_args()
@@ -400,7 +489,7 @@ def main():
         A = Audio(sid, narr[sid], paras[sid])
         auds[sid] = A
         starts[sid] = t0
-        kf = sorted(SCENES[int(sid)](A, F, cap))
+        kf = break_static(SCENES[int(sid)](A, F, cap), A.D, F)
         ts_ = [t for t, _ in kf] + [A.D]
         gaps_ = [(ts_[i + 1] - ts_[i], ts_[i]) for i in range(len(kf)) if kf[i][1] and ts_[i + 1] - ts_[i] > 8.0]
         for g, at in gaps_:

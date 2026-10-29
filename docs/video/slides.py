@@ -87,6 +87,9 @@ NODES = {
 }
 LLM_APPS = ["pagerlens", "cpsim", "trustdesk", "paybroker", "shopfront"]
 GW_BOX, IDP_BOX, ECO_BOX, MODEL_BOX = (700, 720, 1220, 830), (700, 160, 1220, 260), (60, 160, 440, 250), (1440, 720, 1860, 830)
+VAULT_BOX, ANS_BOX = (1290, 160, 1550, 260), (1590, 160, 1860, 260)
+PLAT, SCAF, SAMP = GREEN, PURPLE, BLUE                  # the three labels: platform, reference scaffolding, sample apps
+CAT = {"plat": ("PLATFORM", PLAT), "scaf": ("REFERENCE SCAFFOLDING", SCAF), "samp": ("SAMPLE APP", SAMP)}
 
 
 def cx(k):
@@ -114,7 +117,16 @@ def edge_geometry():
 EDGES = edge_geometry()
 
 
-def node_box(d, box, title, sub, color, mark=False, sub2=None):
+def pill(d, x, y, text, color):
+    f = font("sans", 16, True)
+    tw = f.getlength(text) + 20
+    rrect(d, (x, y - 22, x + tw, y), fill=mix(color, BG, 0.25), outline=color, width=2, r=11)
+    d.text((x + tw / 2, y - 11), text, font=f, fill=color, anchor="mm")
+
+
+def node_box(d, box, title, sub, color, mark=False, sub2=None, cat=None):
+    if cat:
+        pill(d, box[0], box[1] - 3, CAT[cat][0], CAT[cat][1])
     rrect(d, box, fill=PANEL, outline=AMBER if mark else color, width=6 if mark else 3)
     x0, y0, x1, y1 = box
     mx = (x0 + x1) // 2
@@ -123,14 +135,27 @@ def node_box(d, box, title, sub, color, mark=False, sub2=None):
 
 
 def diagram(title="The AgentPG ecosystem", subtitle=None, nodes=(), frame=False, hot=(), warm=(), marks=(), steps=(),
-            lower=None, tag=None, ecoctl_edges=False):
+            lower=None, tag=None, ecoctl_edges=False, legend=False, plat=None, cats=True):
     """nodes: keys to draw (apps, 'idp', 'gw', 'model', 'eco'); hot/warm: edge ids (hot are numbered in order); steps: caption lines
     matching the hot edges one to one; marks: nodes outlined in amber."""
     img, d = base(title, subtitle, tag)
     nodes, hot, warm = set(nodes), list(hot), list(warm)
+    if legend:
+        x = W - 60
+        for key in ("samp", "scaf", "plat"):
+            txt, col = CAT[key]
+            f = font("sans", 20, True)
+            x -= f.getlength(txt)
+            d.text((x, 112), txt, font=f, fill=col, anchor="lm")
+            d.ellipse((x - 26, 102, x - 8, 120), fill=col)
+            x -= 64
     if frame:
-        rrect(d, (60, 300, 1860, 650), fill=(24, 27, 35), outline=LINE, width=2, r=26)
-        d.text((86, 318), "each app runs in its own AgentPG sandbox, with its own Postgres database", font=font("sans", 22), fill=MUTED)
+        on = plat is not None
+        rrect(d, (60, 300, 1860, 650), fill=(24, 27, 35), outline=PLAT if on else LINE, width=5 if on else 2, r=26)
+        if cats:
+            pill(d, 80, 300 + 2, "PLATFORM", PLAT)
+        d.text((86, 322), "EDB Postgres on AgentPG: each app in its own sandbox, with its own Postgres database", font=font("sans", 22),
+               fill=PLAT if on else MUTED)
     for eid in warm:
         draw_edge(d, eid, mix(GREY, BG, 0.8), 4, None, nodes)
     for i, eid in enumerate(hot):
@@ -138,15 +163,19 @@ def diagram(title="The AgentPG ecosystem", subtitle=None, nodes=(), frame=False,
     for k in APPS:
         if k in nodes:
             t, s, c = NODES[k]
-            node_box(d, (XS[k], 400, XS[k] + AW, 540), t, s, c, mark=k in marks)
+            node_box(d, (XS[k], 400, XS[k] + AW, 540), t, s, c, mark=k in marks, cat="samp" if cats else None)
     if "idp" in nodes:
-        node_box(d, IDP_BOX, "identity", "sign-in and service tokens", PURPLE, mark="idp" in marks)
+        node_box(d, IDP_BOX, "identity (OIDC)", "sign-in and service tokens", SCAF, mark="idp" in marks, cat="scaf" if cats else None)
     if "gw" in nodes:
-        node_box(d, GW_BOX, "LLM gateway", "one door to models, one key per app", TEAL, mark="gw" in marks)
+        node_box(d, GW_BOX, "llm-gateway", "OpenAI-compatible, one key per app", SCAF, mark="gw" in marks, cat="scaf" if cats else None)
     if "model" in nodes:
-        node_box(d, MODEL_BOX, "model provider", "or the built-in echo model", GREY)
+        node_box(d, MODEL_BOX, "model provider", "yours, or the built-in echo model", GREY)
     if "eco" in nodes:
-        node_box(d, ECO_BOX, "ecoctl", "deploys the fleet from one file", AMBER, mark="eco" in marks)
+        node_box(d, ECO_BOX, "ecoctl", "deploys the fleet from one file", SCAF, mark="eco" in marks, cat="scaf" if cats else None)
+    if "vault" in nodes:
+        node_box(d, VAULT_BOX, "kit vault", "secrets, or your own", SCAF, mark="vault" in marks, cat="scaf" if cats else None)
+    if "ansible" in nodes:
+        node_box(d, ANS_BOX, "Ansible recipe", "or your own automation", SCAF, mark="ansible" in marks, cat="scaf" if cats else None)
     # caption panel
     if steps:
         rrect(d, (60, 862, 1860, 1012), fill=PANEL, outline=LINE, width=2)
@@ -258,6 +287,63 @@ def flow(title, subtitle, steps, active=None, done=(), cards=(), active_card=Non
                     d.text((x0 + 60, y), sl, font=font("sans", 29), fill=TXT)
                     y += 40
                 y += 12
+    return img
+
+
+def problem(stage):
+    """Opening slide: stage 0 the ask, 1 the needs, 2 the cost."""
+    img, d = base("Several AI apps on Postgres", "What you want to show or run", right="Synthetic data, test cards only")
+    rrect(d, (60, 200, 1860, 330), fill=PANEL, outline=LINE, width=2)
+    d.text((100, 265), "A demo, or a pilot, with several AI apps on Postgres", font=font("sans", 44, True), fill=TXT, anchor="lm")
+    items = [("Sign-in", "one login for every app"), ("Model gateway", "keys, limits, one door"), ("Secrets", "none in code or files"),
+             ("A database each", "extensions, users, backups")]
+    for i, (h, sub) in enumerate(items):
+        x0 = 60 + i * 460
+        on = stage >= 1
+        rrect(d, (x0, 400, x0 + 420, 600), fill=PANEL, outline=AMBER if on else FAINT, width=3 if on else 1)
+        d.text((x0 + 30, 470), h if on else "?", font=font("sans", 40, True), fill=TXT if on else FAINT, anchor="lm")
+        if on:
+            d.text((x0 + 30, 540), sub, font=font("sans", 26), fill=MUTED, anchor="lm")
+    if stage >= 2:
+        rrect(d, (60, 700, 1860, 880), fill=mix(RED, PANEL, 0.18), outline=RED, width=4)
+        d.text((W // 2, 790), "Weeks of plumbing before the first demo?", font=font("sans", 56, True), fill=TXT, anchor="mm")
+    return img
+
+
+def capture_slide(path, caption, crop=None, title="Real screens from the live fleet", sub="Captured, not a mock-up"):
+    """A real screenshot, fitted below the header; crop=(x0,y0,x1,y1) in the source's pixels zooms into a region."""
+    img, d = base(title, sub, tag="CAPTURED from the live AgentPG fleet, 28 Oct 2026", right="Synthetic data, test cards only")
+    src = Image.open(path).convert("RGB")
+    if crop:
+        src = src.crop(crop)
+    box_w, box_h = 1800, 770
+    k = min(box_w / src.width, box_h / src.height)
+    src = src.resize((int(src.width * k), int(src.height * k)), Image.LANCZOS)
+    x0, y0 = (W - src.width) // 2, 140
+    rrect(d, (x0 - 6, y0 - 6, x0 + src.width + 6, y0 + src.height + 6), outline=AMBER, width=3, r=8)
+    img.paste(src, (x0, y0))
+    d = ImageDraw.Draw(img)
+    rrect(d, (60, 940, 1860, 1022), fill=PANEL, outline=LINE, width=2, r=14)
+    d.text((96, 981), caption, font=font("sans", 32), fill=TXT, anchor="lm")
+    return img
+
+
+def text_slide(title, subtitle, lines, caption=None, tag=None, mono=True, hl=(), fs=32, lh=56):
+    """A panel of text lines (commands in mono), highlighted lines in amber, optional caption bar."""
+    img, d = base(title, subtitle, tag)
+    h = 90 + lh * len(lines)
+    rrect(d, (80, 170, 1840, 170 + h), fill=PANEL, outline=LINE, width=2, r=14)
+    f = font("mono" if mono else "sans", fs)
+    for i, ln in enumerate(lines):
+        y = 215 + i * lh
+        if i in hl:
+            d.rectangle((84, y - 22, 1836, y + 30), fill=mix(AMBER, PANEL, 0.2))
+        d.text((120, y + 4), ln, font=f, fill=AMBER if i in hl else TXT, anchor="lm")
+    if caption:
+        rrect(d, (80, 900, 1840, 1010), fill=PANEL, outline=AMBER, width=3)
+        cl = wrap(caption, font("sans", 32), 1680)[:2]
+        for i, ln in enumerate(cl):
+            d.text((116, (955 if len(cl) == 1 else 930) + i * 44), ln, font=font("sans", 32), fill=TXT, anchor="lm")
     return img
 
 
