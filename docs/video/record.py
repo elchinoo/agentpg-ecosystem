@@ -33,9 +33,6 @@ ECOCTL = REPO / ".venv" / "bin" / "ecoctl"
 # (scene, slug, typed command, stdin answer or None, state: "empty" | "fixture")
 STEPS = [
     (10, "validate", ".venv/bin/ecoctl validate", None, "empty"),
-    (11, "ansible-site", "ansible-playbook site.yml --syntax-check", None, "ansible"),
-    (11, "ansible-verify", "ansible-playbook verify.yml --syntax-check", None, "ansible"),
-    (11, "ansible-destroy", "ansible-playbook destroy.yml --syntax-check", None, "ansible"),
 ]
 
 # terminal canvas (1920x1080): geometry shared by the renderer and by capture() (the plan is wrapped to the same column count)

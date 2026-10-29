@@ -1,20 +1,20 @@
 ## 1 am_liam
 You need an app with AI in it, on Postgres. With sign-in, access to a model, secrets, and a deploy. That is weeks of plumbing before the first useful screen.
 
-Here are five sample apps that already have all of it. They are Apache 2.0. Take one, fork it, run it, and change it.
+Here are five apps that already have all of it. They are not only demos of AgentPG. They are templates: take one, adapt it, and run it for a real use case.
 
-They are templates, not demos. Each one has sign-in, a model gateway, secrets, service-to-service calls, webhooks, and a full deploy process.
+Full sign-in, a model gateway, secrets, service-to-service integration, and a full deploy process are already in place. The five apps are Apache 2.0.
 
-They run on EDB Postgres on AgentPG. In this video: what each app does, how they fit together, and which EDB features they use.
+And the whole fleet, eight sandboxes with their databases, deploys from one manifest in about fourteen minutes.
 
 ## 2 af_heart
 Here is the map, with three labels.
 
 The platform is EDB Postgres on AgentPG: a database and a sandbox for every app, with the EDB extensions.
 
-Reference scaffolding is identity, the LLM gateway, and the kit vault. All swappable. Any OIDC provider that sends the roles the apps expect. Any OpenAI-compatible gateway. Your own vault, through the kit.
+Reference scaffolding is identity, the LLM gateway, and the kit vault. All swappable: any OIDC provider that sends the roles the apps expect, any OpenAI-compatible gateway, your own vault through the kit.
 
-The sample apps sit on top. Now, who calls whom? The simulator sends readings to CityPulse. CityPulse reports trouble to PagerLens. ShopFront sends payments to PayBroker, which sends a signed webhook back. TrustDesk, PagerLens, and the others ask the gateway for a model.
+The sample apps sit on top. The simulator sends readings to CityPulse. CityPulse reports trouble to PagerLens. ShopFront sends payments to PayBroker, and a signed webhook comes back. Every app asks the gateway for its model.
 
 And everything signs in through identity, with short-lived service tokens.
 
@@ -25,18 +25,18 @@ A model checks each request against the policy. The answer lists numbered reason
 
 The app checks every quote against the document, word for word. A person still decides.
 
-On the Postgres side, search mixes pgvector with full-text, and pg_trgm forgives typos. Personal data sits behind masked views.
+Instead of a separate search stack, search is pgvector, full-text, and pg_trgm in one Postgres, so typos still find the right policy. Personal data sits behind masked views, not behind code in every service.
 
-It signs in through identity, uses the gateway for its model, and takes requests from other apps through its API. It also has an MCP server.
+It signs in through identity, and asks the gateway for its model.
 
 ## 4 af_heart
 PagerLens is an incident investigator. It is three in the morning, and an alert fires.
 
 It gathers the evidence, ranks likely causes, and shows the data that supports or refutes each one. It can read, but it cannot restart or roll back anything.
 
-Ask PagerLens answers in plain English, and each citation is marked verified against the database. Here, a labelled stand-in model answers: the wiring is real, the words are canned.
+Ask PagerLens answers in plain English, and each citation is marked verified against the database. Here, a labelled stand-in model answers.
 
-Tuning is propose and approve. Nothing is applied by default. Live incident pages come from Postgres itself, through tcn.
+Live incident pages come from Postgres itself, through tcn notifications, so there is no message broker. Tuning is propose and approve: nothing is applied by default.
 
 It receives alerts from CityPulse, and signs in through identity.
 
@@ -47,28 +47,28 @@ The simulator feeds it, with a short-lived token from identity. Press burst, and
 
 CityPulse reports its own health to PagerLens, and PagerLens opens an incident.
 
-One SQL statement answers a district question across relational, time series, JSON, geographic, and vector data. PostGIS does the geography. Readings are time-series partitions, and sensor metadata is JSONB.
+One SQL statement answers a district question across relational, time series, JSON, geographic, and vector data. PostGIS does the geography, instead of a separate GIS server. Readings are partitions, and sensor metadata is JSONB.
 
 ## 6 af_heart
 PayBroker is a payment broker. One API in front of several simulated processors, with smart routing and a three-tier fraud engine. It takes test cards only.
 
 Every decision goes into a hash-chained audit ledger, inside Postgres. Change one old row, and verify names the first broken entry.
 
-Row-level security keeps each merchant to its own rows. Masked views hide what the read-only user should not see. And payments are idempotent: a retry never charges twice.
+Row-level security keeps each merchant to its own rows, and masked views hide what the read-only user should not see. Both live in the database, not in every service.
 
-ShopFront calls it, and PayBroker sends signed webhooks back.
+Payments are idempotent: a retry never charges twice. ShopFront calls it, and PayBroker sends signed webhooks back.
 
 ## 7 am_eric
 ShopFront is a small web shop. It shows an ordinary app, on a database that works.
 
 Search forgives typos: kettel finds kettle. A vague query like morning caffeine matches by words and by meaning, in one SQL statement, with no separate vector store.
 
-At checkout, the card goes from the browser straight to PayBroker, so the shop never sees the number. A signed webhook comes back, and the order page updates live.
+At checkout, the card goes from the browser straight to PayBroker, so the shop never sees the number. A signed webhook comes back, and the order page updates live through tcn, with no message broker.
 
-It is the easiest one to copy: a catalog, a cart, orders, and payments through another service. A customer assistant even answers: where is my order?
+It is the easiest one to copy: a catalog, a cart, orders, and payments through another service.
 
 ## 8 af_heart
-How do they integrate in practice? Five things, all swappable.
+How do they integrate? Five things, all swappable.
 
 Sign-in is OIDC, with roles per app.
 
@@ -80,48 +80,42 @@ Webhooks are signed, between ShopFront and PayBroker.
 
 Secrets live in the kit vault, never in code or in files.
 
+And every app gets the same extras from the shared kit: an Insights tab, health checks, and masking.
+
 ## 9 am_liam
-Now the platform. Every app has a Database page, fed by three EDB extensions: edb_stat_monitor for top queries, edb_pg_tuner for settings, and query_advisor for index suggestions.
+Now the platform. Every app has a Database page, fed by edb_stat_monitor for top queries, edb_pg_tuner for settings, and query_advisor for index suggestions. No external monitoring or tuning tool.
 
 These are suggestions only. A person decides what to change.
 
-Masking is plain Postgres, done properly. Base tables are revoked, masked views are the way in, and the kit keeps it in force. The read-only user an AI connects with cannot read what is masked.
+Masking is Postgres done properly. Base tables are revoked, masked views are the way in, and the kit keeps it in force. The read-only user an AI connects with cannot read what is masked.
+
+So it is one Postgres, instead of a search engine, a vector database, a map server, and a message queue.
 
 Two MCP routes exist: each app's own MCP server, and AgentPG's database MCP.
 
 ## 10 af_heart
-To run them: each repository is Apache 2.0, with a README quick start and a Dockerfile.
+Next on the roadmap: EDB AIDB. We are integrating it into the apps.
 
-ecoctl is an internal tool. It deploys the whole fleet from one manifest. It was also built to show how you can wrap your own solution around the agentpg command line client.
+The plan is pipelines that chunk and embed documents inside the database, and keep them in step when the source table changes. So the apps stop computing embeddings in application code.
 
-But for your own infrastructure, there is a second way.
+TrustDesk policies, PagerLens runbooks and incident memory, and CityPulse questions in plain language are the first candidates.
+
+And agents that run inside Postgres, with tools that act as a database role. The grant, not a prompt, sets what an AI may touch.
 
 ## 11 am_eric
-Ansible is the way to deploy with your own infrastructure. It is a recipe in the ansible folder of the ecosystem repository, and it deploys the same fleet on AgentPG. Use it when your team already runs everything through Ansible.
+To run them: each repository has a README quick start and a Dockerfile.
 
-It reads the same manifest as ecoctl, so nothing is written twice. It needs ansible-core only, no collections and no extra packages, and it runs from your machine against AgentPG.
+ecoctl is an internal tool. One manifest, one command, and the whole fleet is deployed. It was built to show how you can wrap your own solution around the agentpg client.
 
-Because it is Ansible, you can tag a stage, run a check first, keep your values in Vault, and put it in your own pipeline.
+There are also Ansible recipes that deploy the whole fleet on AgentPG. They are tested, and they work: all eight apps, deployed from empty, in about fourteen minutes.
 
-Three playbooks. Site creates the fleet: identity, the gateway, each app, then access and connections. Verify checks it. Destroy removes it.
-
-Destroy is guarded. It refuses unless you pass the fleet name as confirmation. It deletes exact names only, and it prints the list first.
-
-There is also a small throwaway script, with apply, verify, preview, and destroy, on a separate fleet name, for a safe first try.
-
-Offline, all three pass a syntax check.
-
-And it works. We ran it for real, on a throwaway fleet: all eight apps, deployed from empty, in one run, in fourteen minutes. A real AgentPG account, with real databases.
-
-A second run changed nothing. Verify passed: every sandbox answers, the gateway clients work, the identity registry matches, and masking drift is zero. The guarded teardown then returned the account to where it started.
-
-Not verified yet: the hosts target on real hosts, and recreate on a real fleet.
+They are a sample to reuse, to fit your company's own deployment. The same manifest as ecoctl, ansible-core only, and three playbooks: site, verify, and destroy.
 
 ## 12 af_heart
-So: five apps, each one a template.
+So: five apps, and they are not only demos. They are templates.
 
-Fork one. Swap identity, the gateway, or the vault for yours. Deploy it with the Ansible recipe, or with ecoctl. Then change it into the thing you need.
+Take one. Swap identity, the gateway, or the vault for yours. Adapt it, and run it for a real use case.
 
-All of it on EDB Postgres on AgentPG, with the extensions already there.
+Sign-in, the gateway, secrets, service-to-service calls, and the deploy are already in place, on EDB Postgres on AgentPG.
 
-Thanks for watching. The guides are linked below.
+One manifest, one command, a whole fleet. Apache 2.0 for the five apps. Thanks for watching.
