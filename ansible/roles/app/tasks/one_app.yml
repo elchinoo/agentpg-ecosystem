@@ -33,6 +33,22 @@
   ansible.builtin.include_tasks: deploy.yml
   when: eco_item.deploy and eco_item.key in eco_run_list
 
+- name: "{{ eco_item.name }}: where its sign-in points now (the list is a summary: no redirect addresses)"
+  ansible.builtin.uri:
+    url: "{{ eco_urls.identity }}/api/apps/{{ eco_item.key }}"
+    headers: {Authorization: "Bearer {{ eco_secrets['identity/IDENTITY_API_KEY'] }}"}
+    validate_certs: "{{ eco_validate_certs }}"
+    return_content: true
+  register: eco_signin_now
+  check_mode: false
+  changed_when: false
+  no_log: true
+  when:
+    - eco_http | bool
+    - eco_identity_mode != 'oidc'
+    - eco_item.deploy
+    - eco_item.web
+
 - name: "{{ eco_item.name }}: point its sign-in at the real URL"
   ansible.builtin.uri:
     url: "{{ eco_urls.identity }}/api/apps/{{ eco_item.key }}"
@@ -50,5 +66,5 @@
     - eco_identity_mode != 'oidc'
     - eco_item.deploy
     - eco_item.web
-    - (eco_registered.json | selectattr('client_id', 'equalto', eco_item.key) | map(attribute='redirect_uris') | first | default([])) != [eco_urls[eco_item.key] ~ '/auth/callback']
+    - (eco_signin_now.json.redirect_uris | default([])) != [eco_urls[eco_item.key] ~ '/auth/callback'] or (eco_signin_now.json.url | default('')) != eco_urls[eco_item.key]
   changed_when: true

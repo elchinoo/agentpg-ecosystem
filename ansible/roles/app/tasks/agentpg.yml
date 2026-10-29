@@ -9,6 +9,7 @@
     state_file: "{{ eco_secrets_dir }}/agentpg/{{ eco_item.key }}.json"
     agentpg_bin: "{{ eco_agentpg_bin }}"
     poll_interval: "{{ eco_poll_interval }}"
+    timeout: "{{ eco_provision_timeout }}"
   register: eco_inst
 
 - name: "{{ eco_item.key }}: extensions"
@@ -18,6 +19,7 @@
     state_file: "{{ eco_secrets_dir }}/agentpg/{{ eco_item.key }}.json"
     agentpg_bin: "{{ eco_agentpg_bin }}"
     poll_interval: "{{ eco_poll_interval }}"
+    timeout: "{{ eco_provision_timeout }}"
   when: eco_item.extensions | length > 0
 
 - name: "{{ eco_item.key }}: its environment, split into plain values and secrets (the names ecoctl treats as secrets)"
@@ -49,6 +51,7 @@
     state_file: "{{ eco_secrets_dir }}/agentpg/{{ eco_item.key }}.json"
     agentpg_bin: "{{ eco_agentpg_bin }}"
     poll_interval: "{{ eco_poll_interval }}"
+    timeout: "{{ eco_provision_timeout }}"
   register: eco_sbx
   no_log: true
 

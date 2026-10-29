@@ -138,6 +138,16 @@ def eco_app_patch(existing: dict, spec: dict) -> dict:
     return patch
 
 
+def eco_active_keys(keys: list) -> list:
+    """The merchant keys that are not revoked: PayBroker lists `revoked_at: null` for a live key, so 'defined' is no test."""
+    return [k for k in keys or [] if not k.get('revoked_at')]
+
+
+def eco_stale_keys(active: list, name: str, kept_id) -> list:
+    """The live keys called `name` other than the one we keep. Ids are numbers on PayBroker and text in our files: compare as text, or the key we keep is deleted too."""
+    return [k for k in active or [] if k.get("name") == name and str(k.get("id")) != str(kept_id)]
+
+
 def eco_group_grants(fleet: dict) -> list[dict]:
     """Every (group, app, role) to ensure, as ecoctl's `_group`: `*` means every selected web app that defines the role."""
     out = []

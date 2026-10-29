@@ -489,3 +489,33 @@ def test_destroy_playbook_guards_before_it_touches_anything():
     assert "eco_destroy_secrets" in text and "basename == eco_fleet.fleet" in text and names
     assert "common" not in " ".join(str(r) for r in play.get("roles", []))                    # the `common` role would generate secrets for a fleet being dropped
     assert not yaml.safe_load((ANSIBLE / "roles/common/defaults/main.yml").read_text())["eco_destroy_confirm"]      # no default confirmation
+
+
+def test_live_merchant_keys_are_not_mistaken_for_revoked():
+    # PayBroker lists `revoked_at: null` for a live key; testing "defined" dropped every key and a second run created two more (seen live, 2026-10-28)
+    keys = [{"id": 1, "revoked_at": None}, {"id": 2}, {"id": 3, "revoked_at": "2026-10-28T10:00:00Z"}]
+    assert [k["id"] for k in eco.eco_active_keys(keys)] == [1, 2]
+    assert eco.eco_active_keys(None) == []
+
+
+def test_ensure_app_compares_against_the_full_record_not_the_list_summary():
+    # the identity list has no scopes and counts the roles, so comparing with it patched every client on every run
+    text = (ANSIBLE / "roles/common/tasks/ensure_app.yml").read_text()
+    assert "eco_existing: \"{{ (eco_full.json | default({})) }}\"" in text
+    assert "/api/apps/{{ eco_spec.client_id }}\"" in text and "register: eco_full" in text
+    assert "defined" not in (ANSIBLE / "roles/connect/tasks/key.yml").read_text().split("eco_listed:")[1].splitlines()[0]
+
+
+def test_stale_key_cleanup_never_deletes_the_key_we_keep():
+    # PayBroker ids are numbers, the kept id is text from a file: comparing them directly deleted the live keys of ShopFront (seen live, 2026-10-28)
+    active = [{"id": 3, "name": "ansible:shopfront:secret"}, {"id": 1, "name": "ansible:shopfront:secret"}, {"id": 9, "name": "ecoctl:shopfront:secret"}]
+    assert [k["id"] for k in eco.eco_stale_keys(active, "ansible:shopfront:secret", "3")] == [1]
+    assert eco.eco_stale_keys(active, "ansible:shopfront:secret", 3) == [active[1]]
+    assert eco.eco_stale_keys(None, "x", "1") == []
+
+
+def test_signin_redirect_is_compared_with_the_full_record():
+    # the identity list has no redirect addresses, so every run patched every app's sign-in (7 changes on a run that changed nothing)
+    text = (ANSIBLE / "roles/app/tasks/one_app.yml").read_text()
+    assert "register: eco_signin_now" in text and "eco_signin_now.json.redirect_uris" in text
+    assert "eco_registered.json | selectattr('client_id', 'equalto', eco_item.key) | map(attribute='redirect_uris')" not in text

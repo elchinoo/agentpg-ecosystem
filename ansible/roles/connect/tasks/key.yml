@@ -5,7 +5,7 @@
   vars:
     eco_kname: "ansible:{{ eco_conn.app }}:{{ eco_kind }}"
     eco_scope: "connect-{{ eco_conn.app }}"
-    eco_listed: "{{ eco_m['keys'] | default([]) | rejectattr('revoked_at', 'defined') | list }}"
+    eco_listed: "{{ eco_m['keys'] | default([]) | eco_active_keys }}"
     eco_kept_id: "{{ eco_issued[eco_scope ~ '/' ~ eco_kind ~ '_key_id'] }}"
     eco_kept_value: "{{ eco_issued[eco_scope ~ '/' ~ eco_kind ~ '_key'] }}"
     eco_ok: "{{ eco_kept_value | length > 0 and eco_kept_id in (eco_listed | map(attribute='id') | map('string') | list) }}"
@@ -45,7 +45,7 @@
         headers: "{{ eco_pb_auth }}"
         validate_certs: "{{ eco_validate_certs }}"
         status_code: [200, 404]
-      loop: "{{ eco_listed | selectattr('name', 'equalto', eco_kname) | rejectattr('id', 'equalto', eco_issued[eco_scope ~ '/' ~ eco_kind ~ '_key_id']) | list }}"
+      loop: "{{ eco_listed | eco_stale_keys(eco_kname, eco_issued[eco_scope ~ '/' ~ eco_kind ~ '_key_id']) }}"
       loop_control: {label: "{{ item.id }}"}
       no_log: true
       when: eco_newkey is not skipped or eco_ok | bool

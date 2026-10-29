@@ -24,14 +24,28 @@
     method: POST
     body_format: json
     body: "{{ eco_spec }}"
-    status_code: 201
+    status_code: [201, 422]
     headers: {Authorization: "Bearer {{ eco_secrets['identity/IDENTITY_API_KEY'] }}"}
     validate_certs: "{{ eco_validate_certs }}"
     return_content: true
   register: eco_created
   no_log: true
   when: eco_spec.client_id not in (eco_registered.json | map(attribute='client_id') | list)
-  changed_when: true
+  changed_when: eco_created.status | default(0) == 201
+  # 422 "already exists" means the client appeared after the list above was read (an interrupted run, or two runs at once): carry on as if it existed
+  failed_when: eco_created.status | default(201) not in [201, 422] or (eco_created.status | default(201) == 422 and 'already exists' not in (eco_created.content | default('')))
+
+- name: "Identity: the full record of {{ eco_spec.client_id }} (the list is a summary: no scopes, roles as a count)"
+  ansible.builtin.uri:
+    url: "{{ eco_urls.identity }}/api/apps/{{ eco_spec.client_id }}"
+    headers: {Authorization: "Bearer {{ eco_secrets['identity/IDENTITY_API_KEY'] }}"}
+    validate_certs: "{{ eco_validate_certs }}"
+    return_content: true
+  register: eco_full
+  check_mode: false
+  changed_when: false
+  no_log: true
+  when: eco_created is skipped or eco_created.status | default(0) == 422
 
 - name: "Identity: bring {{ eco_spec.client_id }} to the manifest"
   ansible.builtin.uri:
@@ -42,10 +56,10 @@
     headers: {Authorization: "Bearer {{ eco_secrets['identity/IDENTITY_API_KEY'] }}"}
     validate_certs: "{{ eco_validate_certs }}"
   vars:
-    eco_existing: "{{ eco_registered.json | selectattr('client_id', 'equalto', eco_spec.client_id) | first | default({}) }}"
+    eco_existing: "{{ (eco_full.json | default({})) }}"
   no_log: true
   when:
-    - eco_created is skipped
+    - eco_created is skipped or eco_created.status | default(0) == 422
     - eco_existing | eco_app_patch(eco_spec) | length > 0
   changed_when: true
 
@@ -59,7 +73,7 @@
   register: eco_rotated
   no_log: true
   when:
-    - eco_created is skipped
+    - eco_created is skipped or eco_created.status | default(0) == 422
     - eco_issued[eco_issue_scope ~ '/' ~ eco_secret_kind] | default('') | length == 0
   changed_when: true
 

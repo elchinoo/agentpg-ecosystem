@@ -8,6 +8,7 @@ eco_pull: missing                  # missing: pull only when the image is absent
 
 eco_target: agentpg                # agentpg (default): an instance and a sandbox per app on AgentPG, driven through its CLI | hosts: your own Postgres and container hosts
 eco_agentpg_bin: agentpg           # the CLI, logged in (`agentpg login`) as the user the playbook runs as
+eco_provision_timeout: 1200       # seconds to wait for one instance, extension or sandbox (a slow instance stayed "unknown" for over 420 s once)
 eco_poll_interval: 5               # seconds between polls while an instance or sandbox starts
 eco_env_change: report             # a sandbox whose environment changed: report (as `ecoctl apply`) | recreate (delete and create it again on the same database)
 eco_recreate: []                   # app keys to delete and create again, with the apps that depend on them (as `ecoctl recreate`); `identity` recreates all
