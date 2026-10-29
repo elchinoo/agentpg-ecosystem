@@ -92,6 +92,10 @@ class Audio:
         last = self.first[n] + len(sentences(self.paras[n])) - 1
         return round(LEAD + self.cues[last]["end"], 3)
 
+    def ce(self, n, s):
+        s = min(s, len(sentences(self.paras[n])) - 1)
+        return round(LEAD + self.cues[self.first[n] + s]["end"], 3)
+
     def cs(self, n, s):
         s = min(s, len(sentences(self.paras[n])) - 1)
         return round(LEAD + self.cues[self.first[n] + s]["start"], 3)
@@ -114,48 +118,22 @@ class Frames:
         return self.seen[h]
 
 
-def motion(kf, D, F, fps=6, scale=1.03, min_len=3.0):
-    """No picture stays still: a keyframe lasting `min_len` s or more gets a very slow pan (3 % enlarged, drifting about 2 % of the width and 2 %
-    of the height, alternately one way and back), drawn above the footer line with the footer fixed. A pan keeps the area of every element
-    constant, so there is no colour or brightness drift. Frames are written at `fps` as PNG, like every other keyframe."""
-    from PIL import Image
-    out, i = [], 0
-    W_, H_, FOOT_ = S.W, S.H, 1040
-    for k, (t, p) in enumerate(kf):
-        nxt = kf[k + 1][0] if k + 1 < len(kf) else D
-        dur = nxt - t
-        if dur < min_len:
-            out.append((t, p))
-            continue
-        im = Image.open(p).convert("RGB")
-        top, foot = im.crop((0, 0, W_, FOOT_)), im.crop((0, FOOT_, W_, H_))
-        w, h = W_ / scale, FOOT_ / scale
-        fx, fy = W_ - w, FOOT_ - h                          # free room: 56 x 31 px
-        n = int(dur * fps)
-        rev = (i % 2 == 1)
-        i += 1
-        for j in range(n):
-            u = j / max(n - 1, 1)
-            u = 1 - u if rev else u
-            x0, y0 = fx * (0.18 + 0.64 * u), fy * (0.15 + 0.7 * u)
-            fr = top.resize((W_, FOOT_), Image.BICUBIC, box=(x0, y0, x0 + w, y0 + h))
-            canvas = Image.new("RGB", (W_, H_))
-            canvas.paste(fr, (0, 0))
-            canvas.paste(foot, (0, FOOT_))
-            q = Path(p).with_name(f"{Path(p).stem}-m{j:04d}.png")
-            canvas.save(q, compress_level=1)
-            out.append((round(t + j / fps, 3), str(q)))
-    return out
-
-
 def staged(A, stages, F, lead_in=0.0):
-    """stages: {key: image}; key is a paragraph n or (n, s) for sentence s of paragraph n. Shown just before the voice reaches it;
-    the first key also covers t=0."""
-    out, first = [], min(stages, key=lambda k: (k, 0) if isinstance(k, int) else k)
-    for k in sorted(stages, key=lambda k: (k, 0) if isinstance(k, int) else k):
-        n, sn = (k, 0) if isinstance(k, int) else k
-        t = 0.0 if k == first else max((A.ps(n) if sn == 0 else A.cs(n, sn)) - 0.15, 0.0)
-        out.append((t, F.save(stages[k])))
+    """stages: {key: image}; key is a paragraph n, (n, s) for sentence s of paragraph n, or (n, s, f) for the fraction f (0 to 1) of the way
+    through that sentence. Shown just before the voice reaches it (a fraction exactly at its point); the first key also covers t=0.
+    Pictures never move: a long sentence is broken up by revealing or highlighting something, or by changing the caption."""
+    norm = lambda k: (k, 0, 0.0) if isinstance(k, int) else (k[0], k[1], 0.0) if len(k) == 2 else k  # noqa: E731
+    keys = sorted(stages, key=norm)
+    out = []
+    for i, k in enumerate(keys):
+        n, sn, fr = norm(k)
+        if i == 0:
+            t = 0.0
+        elif fr:
+            t = A.cs(n, sn) + fr * (A.ce(n, sn) - A.cs(n, sn))
+        else:
+            t = max((A.ps(n) if sn == 0 else A.cs(n, sn)) - 0.15, 0.0)
+        out.append((round(t, 3), F.save(stages[k])))
     return out
 
 
@@ -204,8 +182,12 @@ def scene2(A, F, cap):
     st = {
         0: D(frame=True),
         1: D(frame=True, plat=True, lower="PLATFORM = EDB Postgres on AgentPG"),
+        (1, 0, 0.4): D(frame=True, plat=True, lower="A database and a sandbox for every app"),
+        (1, 0, 0.75): D(frame=True, plat=True, lower="With the EDB extensions"),
         (2, 0): D(frame=True, nodes=SCAF3, lower="REFERENCE SCAFFOLDING"),
-        (2, 1): D(frame=True, nodes=SCAF3 + ("model",), marks=("idp", "gw", "vault"), lower="All swappable: your OIDC, gateway, vault"),
+        (2, 1): D(frame=True, nodes=SCAF3 + ("model",), marks=("idp",), lower="Any OIDC provider that sends the roles the apps expect"),
+        (2, 1, 0.4): D(frame=True, nodes=SCAF3 + ("model",), marks=("gw", "model"), lower="Any OpenAI-compatible gateway"),
+        (2, 1, 0.72): D(frame=True, nodes=SCAF3 + ("model",), marks=("vault",), lower="Your own vault, through the kit"),
         (3, 0): D(frame=True, nodes=full, lower="SAMPLE APPS"),
         (3, 1): D(frame=True, nodes=full, hot=("sim_cp",), steps=("The simulator sends readings to CityPulse",)),
         (3, 2): D(frame=True, nodes=full, warm=("sim_cp",), hot=("cp_pl",), steps=("CityPulse reports trouble to PagerLens",)),
@@ -233,6 +215,7 @@ def scene3(A, F, cap):
         (2, 0): cap_img("trustdesk-req-000016-verified-quotes", "Quote found word for word in the document", crop=(700, 120, 1165, 420), **t),
         (2, 1): cap_img("trustdesk-req-000016-verified-quotes", "The AI advises; a person decides", crop=(685, 490, 1180, 770), **t),
         (3, 0): app_img("trustdesk", "search-typo-tolerant", "Search: pgvector and full-text together, pg_trgm for typos", **t),
+        (3, 0, 0.5): app_img("trustdesk", "search-typo-tolerant", "One Postgres, not a separate search stack", **t),
         (3, 1): cap_img("trustdesk-insights-top-queries-masking", "Masked views for the people data", crop=(273, 540, 1195, 812), **t),
         4: appdia("trustdesk", hot=("gw_trustdesk",), warm=("idp",), steps=("TrustDesk signs in through identity and asks the gateway for its model",)),
     }
@@ -244,7 +227,9 @@ def scene4(A, F, cap):
     st = {
         0: app_img("pagerlens", "incident-investigate-no-model", "An incident page: investigate with rules, no model, no cost", **t),
         (1, 0): app_img("pagerlens", "report-manual-steps", "Evidence, ranked hypotheses, and manual steps only", **t),
-        2: app_img("pagerlens", "ask-verified-citations", "Ask PagerLens: each citation marked verified (stand-in model)", **t),
+        (1, 1): app_img("pagerlens", "report-manual-steps", "It can read, but it cannot restart or roll back anything", crop=(320, 20, 1580, 620), **t),
+        2: app_img("pagerlens", "ask-verified-citations", "Ask PagerLens: each citation marked verified", **t),
+        (2, 1): app_img("pagerlens", "ask-verified-citations", "A labelled stand-in model answers here", crop=(300, 100, 1620, 760), **t),
         (3, 0): app_img("pagerlens", "incident-investigate-no-model", "Live incident pages: Postgres tcn notifications, no message broker", **t),
         (3, 1): app_img("pagerlens", "report-manual-steps", "Propose and approve: nothing is applied by default", **t),
         4: appdia("pagerlens", hot=("cp_pl",), warm=("idp",), steps=("CityPulse reports to PagerLens with a scope; PagerLens signs in through identity",)),
@@ -256,13 +241,17 @@ def scene5(A, F, cap):
     t = dict(title="CityPulse and the Simulator", sub="Smart-city sensors: PostGIS, time series, JSON, vectors")
     st = {
         0: app_img("citypulse", "overview-simulator", "CityPulse: thousands of simulated sensors, one city verdict", **t),
+        (0, 1): app_img("citypulse", "overview-simulator", "A status engine turns the readings into a city verdict", crop=(300, 330, 1700, 760), **t),
         (1, 0): app_img("citypulse", "overview-simulator", "The simulator feeds it with a short-lived token", **t),
         (1, 1): app_img("citypulse", "burst-degraded-reports", "Burst: the city degrades", **t),
         2: appdia("citypulse", hot=("cp_pl",), warm=("sim_cp", "idp"), steps=("CityPulse reports its health to PagerLens, which opens an incident",), extra=("pagerlens",)),
         3: cap_img("citypulse-map-brussels-2026-10-29.jpg", "Brussels: real commune outlines (OpenStreetMap), simulated sensors inside them", **t),
         (4, 0): cap_img("citypulse-explain-top-brussels-2026-10-29.jpg", "Explain: one SQL statement, five data models", **t),
+        (4, 0, 0.5): cap_img("citypulse-explain-top-brussels-2026-10-29.jpg", "Relational: sensors by state, right now", crop=(233, 225, 1235, 440), **t),
         (4, 1): cap_img("citypulse-explain-geo-brussels-2026-10-29.jpg", "PostGIS: nearest healthy sensors at 101, 176 and 249 m", crop=(235, 470, 1235, 615), **t),
-        (4, 3): cap_img("citypulse-explain-geo-brussels-2026-10-29.jpg", "Distances in metres, in the same statement", **t),
+        (4, 1, 0.5): cap_img("citypulse-explain-geo-brussels-2026-10-29.jpg", "Distances in metres, in the same statement", **t),
+        (4, 2): cap_img("citypulse-explain-geo-brussels-2026-10-29.jpg", "Neighbouring communes, in kilometres: no GIS server", crop=(235, 535, 1235, 620), **t),
+        (4, 3): cap_img("citypulse-explain-geo-brussels-2026-10-29.jpg", "Readings are partitions, sensor metadata is JSONB", **t),
     }
     return staged(A, st, F)
 
@@ -270,7 +259,9 @@ def scene5(A, F, cap):
 def scene6(A, F, cap):
     t = dict(title="PayBroker", sub="Payment broker: audit chain, row-level security, masked views")
     st = {
-        0: appdia("paybroker", warm=("sf_pb", "pb_sf"), lower="One payment API, simulated processors, test cards only"),
+        0: appdia("paybroker", warm=("sf_pb", "pb_sf"), lower="One payment API in front of simulated processors"),
+        (0, 1): appdia("paybroker", warm=("sf_pb", "pb_sf"), lower="Smart routing, a three-tier fraud engine"),
+        (0, 2): appdia("paybroker", warm=("sf_pb", "pb_sf"), lower="Test cards only"),
         (1, 0): app_img("paybroker", "ledger-chain-intact", "Hash-chained audit ledger: every hash recomputed by the database", **t),
         (1, 1): app_img("paybroker", "ledger-tamper-named", "One old row changed: the first broken entry is named", **t),
         (2, 0): cap_img("paybroker-insights-masking-sql-in-monitor", "Masked views: REVOKE on base tables, views as the way in", **t),
@@ -317,7 +308,9 @@ def scene9(A, F, cap):
     st = {
         0: cap_img("trustdesk-insights-top-queries-masking", "TrustDesk, Database page", **t),
         (0, 1): cap_img("trustdesk-insights-top-queries-masking", "Top queries: edb_stat_monitor", crop=(273, 120, 1195, 560), **t),
-        (0, 2): cap_img("trustdesk-insights-tuner-advisor", "Settings: edb_pg_tuner. Indexes: query_advisor", **t),
+        (0, 1, 0.4): cap_img("trustdesk-insights-tuner-advisor", "Settings: edb_pg_tuner", crop=(273, 140, 1195, 380), **t),
+        (0, 1, 0.7): cap_img("trustdesk-insights-tuner-advisor", "Index suggestions: query_advisor", crop=(273, 380, 1195, 750), **t),
+        (0, 2): cap_img("trustdesk-insights-tuner-advisor", "No external monitoring or tuning tool", **t),
         1: cap_img("trustdesk-insights-tuner-advisor", "Suggestions only: a person decides", crop=(273, 380, 1195, 750), **t),
         (2, 0): cap_img("paybroker-insights-masking-sql-in-monitor", "PayBroker: masking statements in the monitor", **t),
         (2, 1): cap_img("trustdesk-insights-top-queries-masking", "Masked views, kept in force by the kit", crop=(273, 540, 1195, 812), **t),
@@ -329,12 +322,15 @@ def scene9(A, F, cap):
 
 
 def scene10(A, F, cap):
-    lines = ["Pipelines chunk and embed documents inside the database", "and keep them in step when the source table changes",
-             "TrustDesk policies, PagerLens runbooks and incident memory, CityPulse questions in plain language",
-             "Agents inside Postgres, with tools that act as a database role"]
-    R = lambda hl=(), n=4: S.text_slide("Next on the roadmap: EDB AIDB", "What we are integrating into the apps", lines[:n], tag="ROADMAP", mono=False, fs=34, hl=hl)  # noqa: E731
-    st = {0: R((), 0) if False else S.text_slide("Next on the roadmap: EDB AIDB", "We are integrating it into the apps", ["EDB AIDB"], tag="ROADMAP", mono=False, fs=60),
-          (1, 0): R((0,), 2), (1, 1): R((1,), 2), 2: R((2,), 3), 3: R((3,), 4)}
+    head = ["Pipelines chunk and embed documents inside the database", "and keep them in step when the source table changes"]
+    cand = ["First candidates:", "TrustDesk policies", "PagerLens runbooks and incident memory", "CityPulse questions in plain language"]
+    ag = ["Agents inside Postgres, with tools that act as a database role", "The grant, not a prompt, sets what an AI may touch"]
+    R = lambda lines, hl=(): S.text_slide("Next on the roadmap: EDB AIDB", "What we are integrating into the apps", lines, tag="ROADMAP", mono=False, fs=36, hl=hl)  # noqa: E731
+    st = {0: S.text_slide("Next on the roadmap: EDB AIDB", "We are integrating it into the apps", ["EDB AIDB"], tag="ROADMAP", mono=False, fs=60),
+          (1, 0): R(head[:1], (0,)), (1, 1): R(head, (1,)),
+          (2, 0): R(head + cand[:1], (2,)), (2, 0, 0.3): R(head + cand[:2], (3,)), (2, 0, 0.55): R(head + cand[:3], (4,)),
+          (2, 0, 0.8): R(head + cand, (5,)),
+          (3, 0): R(head + cand + ag[:1], (6,)), (3, 1): R(head + cand + ag, (7,))}
     return staged(A, st, F)
 
 
@@ -373,7 +369,8 @@ def scene12(A, F, cap):
     st = {(0, 0): mk("Five apps, and not only demos"), (0, 1): mk("They are templates"),
           (1, 0): mk("Take one", marks=("trustdesk",)), (1, 1): mk("Swap identity, gateway or vault", marks=("idp", "gw", "vault")),
           (1, 2): mk("Adapt it, run it for a real use case"),
-          2: mk("Sign-in, gateway, secrets, calls, deploy: in place", plat=True), 3: S.endcard()}
+          2: mk("Sign-in and the gateway: in place", plat=True), (2, 0, 0.35): mk("Secrets and service-to-service calls: in place", plat=True),
+          (2, 0, 0.7): mk("The deploy: in place, on EDB Postgres on AgentPG", plat=True), 3: S.endcard()}
     return staged(A, st, F)
 
 
@@ -471,7 +468,7 @@ def main():
         A = Audio(sid, narr[sid], paras[sid])
         auds[sid] = A
         starts[sid] = t0
-        kf = motion(sorted(SCENES[int(sid)](A, F, cap)), A.D, F)
+        kf = sorted(SCENES[int(sid)](A, F, cap))
         ts_ = [t for t, _ in kf] + [A.D]
         gaps_ = [(ts_[i + 1] - ts_[i], ts_[i]) for i in range(len(kf)) if kf[i][1] and ts_[i + 1] - ts_[i] > 8.0]
         for g, at in gaps_:
@@ -499,8 +496,12 @@ def main():
     srt = work / f"{a.name}.srt"
     write_srt(srt, order, narr, starts)
     mp4 = work / f"{a.name}.mp4"
+    force_keys = ",".join(f"{t:.3f}" for t, _ in timeline)
     run(FFMPEG, "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-i", work / "audio.wav", "-i", srt,
-        "-map", "0:v", "-map", "1:a", "-map", "2:s", "-vf", f"fps={FPS},format=yuv420p", "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+        "-map", "0:v", "-map", "1:a", "-map", "2:s", "-vf", f"fps={FPS},format=yuv420p", "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+        # a picture is held byte-identical: a keyframe (I-frame) exactly where the picture changes, no B-frames, no adaptive quantisation or
+        # mbtree (they make later frames of a still picture "refine"), no periodic or scene-cut I-frames inside a held picture
+        "-bf", "0", "-g", "100000", "-force_key_frames", force_keys, "-x264-params", "mbtree=0:aq-mode=0:scenecut=0",
         "-c:a", "aac", "-b:a", "160k", "-c:s", "mov_text", "-metadata:s:s:0", "language=eng", "-t", f"{total:.3f}", "-movflags", "+faststart", mp4)
     v, au = probe(mp4), probe(work / "audio.wav")
     print(f"{mp4}: {v:.2f} s video, {au:.2f} s audio, planned {total:.2f} s")
