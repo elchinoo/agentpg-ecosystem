@@ -11,3 +11,4 @@ dist/
 .env.*
 !.env.example
 docs/video/out/
+docs/video-components/out/
