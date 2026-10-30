@@ -12,3 +12,8 @@ dist/
 !.env.example
 docs/video/out/
 docs/video-components/out/
+!.env.*example
+*.key
+*.pem
+*.dbkey
+api_key
