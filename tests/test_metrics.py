@@ -57,11 +57,11 @@ def test_status_shows_metric_columns_after_ready_and_dashes_when_unavailable(dep
     assert code == 0
     lines = out.splitlines()
     head = lines[0].split()
-    assert head[:6] == ["app", "health", "ready", "cpu", "mem", "net"]
+    assert head[:7] == ["app", "health", "ready", "vault", "cpu", "mem", "net"]
     row = next(ln for ln in lines if ln.startswith("llmgw"))
-    assert row.split()[1:8] == ["200", "200", "0.5%", "12.6%", "1", "kbps", "/"]
+    assert row.split()[1:9] == ["200", "200", "unlocked", "0.5%", "12.6%", "1", "kbps", "/"]
     other = next(ln for ln in lines if ln.startswith("identity"))
-    assert other.split()[1:6] == ["200", "200", "-", "-", "-"]
+    assert other.split()[1:7] == ["200", "200", "unlocked", "-", "-", "-"]
 
 
 def test_a_failing_metrics_call_does_not_break_status(deployed, capsys):  # noqa: F811
@@ -69,4 +69,4 @@ def test_a_failing_metrics_call_does_not_break_status(deployed, capsys):  # noqa
     cli.metrics_fail = True
     code, out = _status(ctx, capsys)
     assert code == 0
-    assert next(ln for ln in out.splitlines() if ln.startswith("identity")).split()[3:6] == ["-", "-", "-"]
+    assert next(ln for ln in out.splitlines() if ln.startswith("identity")).split()[4:7] == ["-", "-", "-"]

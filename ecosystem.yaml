@@ -1,5 +1,7 @@
 # The fleet in one file. `ecoctl plan` shows what it would create; `ecoctl apply --execute` creates it.
 # No secrets belong here: names under `generate:` get a random value that ecoctl keeps in .ecosystem/ (git-ignored).
+# `vault: platform` (default) lets an app unlock its stored secrets by itself after a restart, from `<PREFIX>_ENCRYPTION_KEY` in its sandbox environment
+# (list the name under `generate:`). `vault: password` (identity, the LLM gateway only) sets no such key: the vault is opened by the operator's admin password.
 version: 1
 fleet: eco                       # prefix of every database and sandbox name (eco-trustdesk, eco-trustdesk-db, ...)
 agentpg:
@@ -25,7 +27,7 @@ llm:                             # apps with `llm: true` are wired to the LLM ga
 identity:
   image: identity
   auto_pause: false              # everything signs in through it: never let it sleep
-  generate: [IDENTITY_ENCRYPTION_KEY]
+  vault: password                # the signing key's vault is created and opened with the operator's admin password (ecoctl apply|unlock): no IDENTITY_ENCRYPTION_KEY in the sandbox environment, so a read of it does not open the key
   extensions: [query_advisor, edb_stat_monitor, edb_pg_tuner]
 
 apps:
@@ -127,7 +129,7 @@ apps:
     description: One place for model provider keys, budgets and usage
     extensions: [query_advisor, edb_stat_monitor, edb_pg_tuner]
     env_prefix: LLMGW
-    generate: [LLMGW_ENCRYPTION_KEY]
+    vault: password              # the real provider keys are opened with the operator's admin password, not by a key in the sandbox environment (see `identity`)
     roles:
       - {name: admin, description: "Everything"}
       - {name: operator, description: "Clients, models and usage"}

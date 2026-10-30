@@ -3,6 +3,7 @@ registers apps with the identity provider. Every step checks what already exists
 import hashlib
 import json
 import re
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -14,6 +15,7 @@ from .identity_client import PENDING_REDIRECT, Identity, IdentityError
 from .llm_client import Gateway, GatewayError
 from .manifest import App, Manifest
 from .state import State
+from .vault import ENV_PASSWORD, VaultAdmin, ensure_unlocked
 
 
 @dataclass
@@ -35,6 +37,11 @@ class Context:
     connect_http: httpx.Client | None = None                # the identity token endpoint, PayBroker's and the shop's admin APIs; injected in tests
     connect_sleep: Callable[[float], None] | None = None    # injected in tests (waiting for a locked vault or a service that is starting)
     connect_clock: Callable[[], float] | None = None
+    prompt_password: bool = False                           # ask for the admin password of the `vault: password` apps instead of using ECOCTL_ADMIN_PASSWORD or the state file (never kept)
+    ask_password: Callable[[str], str] | None = None        # injected in tests (default: getpass)
+    announce: Callable[[str], None] = lambda text: print(text, file=sys.stderr, flush=True)       # the one place a generated admin password is shown
+    vault_sleep: Callable[[float], None] | None = None      # injected in tests (waiting for an app to answer)
+    vault_clock: Callable[[], float] | None = None
     _identity: Identity | None = None
 
     def gateway(self) -> Gateway:
@@ -43,6 +50,15 @@ class Context:
         if not url:
             raise GatewayError(f"the LLM gateway ({key}) has no URL yet")
         return Gateway(url, self.state.secret(key, llm_admin_name(self.manifest)), self.llm_http)
+
+    def vault_admin(self, app: App) -> VaultAdmin:
+        """The vault API of an app with `vault: password`, with the operator key ecoctl holds for it (identity: its admin key; the gateway: its operator key)."""
+        url = self.state.app(app.key).get("url")
+        if not url:
+            raise IdentityError(f"{app.key} has no URL yet")
+        if app.key == "identity":
+            return VaultAdmin(url, self.state.admin_key(), self.http, self.vault_sleep, self.vault_clock)
+        return VaultAdmin(url, self.state.secret(app.key, llm_admin_name(self.manifest)), self.llm_http, self.vault_sleep, self.vault_clock)
 
     def identity(self) -> Identity:
         if self._identity is None:
@@ -68,12 +84,15 @@ def app_env(ctx: Context, app: App) -> tuple[dict[str, str], set[str]]:
     env = dict(app.env)
     secret_names: set[str] = set()
     for name in app.generate:
+        if app.vault == "password" and name == app.encryption_key_name:
+            continue                                                        # the platform must hold nothing that opens this vault (the manifest refuses it too)
         env[name] = st.secret(app.key, name)
         secret_names.add(name)
-    if m.consumers() and app.key == m.llm.gateway:
+    if app.key == m.llm.gateway and (m.consumers() or app.vault == "password"):
         name = llm_admin_name(m)
-        env[name] = st.secret(app.key, name)                                  # the operator key ecoctl creates one client per app with
+        env[name] = st.secret(app.key, name)                                  # the operator key ecoctl creates one client per app with (and opens the vault with)
         secret_names.add(name)
+    if m.consumers() and app.key == m.llm.gateway:
         # the default aliases the gateway seeds on its built-in echo provider, so every app works before a real provider exists
         env[f"{app.env_prefix}_DEFAULT_CHAT_ALIAS"] = m.llm.chat_alias
         env[f"{app.env_prefix}_DEFAULT_EMBED_ALIAS"] = m.llm.embed_alias
@@ -282,6 +301,8 @@ def build(ctx: Context) -> list[Step]:
                                               {**cmd_env, "IDENTITY_API_KEY": "<generated>"}, {"IDENTITY_API_KEY"},
                                               auto_pause=m.pause_enabled(ident), plan=m.plan_for(ident)).display()],
                       lambda c: _deploy(c, c.manifest.identity)))
+    if ident.vault == "password":
+        steps.append(_vault_step(ident))
     steps.append(Step("Identity provider: wait until it is ready and pin its issuer URL",
                       ["GET <identity>/readyz", "GET <identity>/.well-known/openid-configuration  (the first request fixes the issuer)"],
                       lambda c: _ready(c)))
@@ -322,7 +343,7 @@ def build(ctx: Context) -> list[Step]:
         if app.llm:
             placeholders.setdefault("LLM_BASE_URL", f"<{m.llm.gateway} url>/v1")
             placeholders["LLM_API_KEY"] = "<generated>"
-        if m.consumers() and app.key == m.llm.gateway:
+        if app.key == m.llm.gateway and (m.consumers() or app.vault == "password"):
             placeholders[llm_admin_name(m)] = "<generated>"
         deploy = [AgentPG.create_instance(m.instance_name(app.key), m.size).display(),
                   *_extension_detail(ctx, app),
@@ -330,6 +351,8 @@ def build(ctx: Context) -> list[Step]:
                                          {k for k, v in placeholders.items() if v == "<generated>"}, auto_pause=m.pause_enabled(app),
                                          plan=m.plan_for(app)).display()]
         steps.append(Step(f"{app.name}: database and sandbox", deploy, (lambda a: lambda c: _deploy(c, a))(app)))
+        if app.vault == "password":
+            steps.append(_vault_step(app))                         # before anything that needs it: the gateway's provider keys, the dependents' health waits
         if app.web:
             steps.append(Step(f"{app.name}: point its sign-in at the real URL", [f"identity: set redirect URI to <{app.key} url>/auth/callback and its launcher URL"],
                               (lambda a: lambda c: _finish_urls(c, a))(app)))
@@ -352,6 +375,19 @@ def build(ctx: Context) -> list[Step]:
             f"{a.key}: push base URL, keys and webhook secret (only fields whose fingerprint differs), then run its connection test"],
             (lambda ak, pk: lambda c: connect_step(c, ak, pk))(a.key, peer)))
     return steps
+
+
+def _vault_step(app: App) -> Step:
+    """Create (first run) or open (after a restart or recreate) the vault of an app with `vault: password`. It runs right after the app's sandbox
+    exists and before anything waits for it to be ready: the identity provider cannot sign (its /readyz says `locked`) until this has run, and nothing
+    that needs a token (registering clients, the dependents) works before that."""
+    return Step(f"{'Identity provider' if app.key == 'identity' else app.name}: create or open its vault with the operator's admin password",
+                [f"GET <{app.key}>/api/session  (public: is the vault created, is it unlocked)",
+                 "not created yet: POST /api/admin-password (the data key is wrapped under the admin password alone; there is no platform wrap)",
+                 "created but locked (a restart): POST /api/vault/unlock",
+                 f"the password is {ENV_PASSWORD}, the prompt (--admin-password-prompt) or .ecosystem/state.json; a new one is generated and shown once when none exists. "
+                 f"It is never put in the sandbox environment ({app.encryption_key_name} is not set)"],
+                lambda c: ensure_unlocked(c, app))
 
 
 def _ready(ctx: Context) -> str:

@@ -16,6 +16,14 @@
     eco_item: "{{ eco_fleet.identity }}"
   when: eco_identity_mode == 'managed'
 
+- name: Identity provider - create or open its vault with the admin password (it cannot sign tokens, nor answer /readyz, before)
+  ansible.builtin.include_role:
+    name: vault
+    tasks_from: one.yml
+  vars:
+    eco_item: "{{ eco_fleet.identity }}"
+  when: eco_identity_mode == 'managed' and eco_fleet.identity.vault == 'password' and eco_http | bool
+
 - name: The identity provider answers (a provider that already runs)
   ansible.builtin.uri:
     url: "{{ eco_urls.identity }}/readyz"

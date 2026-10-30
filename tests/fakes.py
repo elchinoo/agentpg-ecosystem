@@ -90,6 +90,61 @@ class FakeAgentPG:
         return [c for c in self.calls if c[1:1 + len(prefix)] == list(prefix)]
 
 
+class FakeVault:
+    """The vault part of identity's and the gateway's API, with the kit's rules: no platform key, so the data key is wrapped under the admin password
+    alone; it is created by POST /api/admin-password (which unlocks), opened by POST /api/vault/unlock, and a restart locks it again.
+    `platform=True` is the other mode: the platform's key opens it by itself (auto_unlock)."""
+
+    def __init__(self, platform: bool = False):
+        self.platform = platform
+        self.initialized = False
+        self.unlocked = False
+        self.password: str | None = None
+        self.initializations = 0
+        self.unlocks = 0
+
+    def restart(self) -> None:
+        """A platform restart, recreate or crash: the in-memory data key is gone."""
+        self.unlocked = self.platform and self.initialized
+
+    def session(self) -> dict:
+        reason = None if self.unlocked else "not_initialized" if not self.initialized else "no_platform_key"
+        return {"initialized": self.initialized, "unlocked": self.unlocked, "auto_unlock": self.platform and self.initialized, "reason": reason}
+
+    def handle(self, path: str, body: dict) -> httpx.Response | None:
+        if path == "/api/admin-password":
+            if self.initialized:
+                return httpx.Response(422, json={"detail": "current password is required"})
+            if len(body.get("new", "")) < 12:
+                return httpx.Response(422, json={"detail": "password is too short"})
+            self.password, self.initialized, self.unlocked = body["new"], True, True
+            self.initializations += 1
+            return httpx.Response(200, json={"ok": True})
+        if path == "/api/vault/unlock":
+            if not self.initialized:
+                return httpx.Response(409, json={"detail": "set an admin password first"})
+            if body.get("password") != self.password:
+                return httpx.Response(403, json={"detail": "wrong password"})
+            self.unlocked = True
+            self.unlocks += 1
+            return httpx.Response(200, json={"ok": True})
+        return None
+
+
+def fake_get(idp):
+    """A stand-in for httpx.get as `ecoctl status` uses it: every probe answers 200, and /api/session says what each app's vault is like."""
+    from urllib.parse import urlparse
+
+    def get(url, **kw):
+        req = httpx.Request("GET", url)
+        if url.endswith("/api/session"):
+            host = urlparse(url).hostname or ""
+            vault = idp.vault if host.startswith("eco-identity") else getattr(getattr(idp, "gateway", None), "vault", None) if host.startswith("eco-llmgw") else None
+            return httpx.Response(200, json={"vault": vault.session() if vault else {"initialized": True, "unlocked": True, "auto_unlock": True, "reason": None}}, request=req)
+        return httpx.Response(200, request=req)
+    return get
+
+
 class FakeIdentity:
     """Just enough of the admin API for ecoctl, with the real provider's rules about secrets and kinds."""
 
@@ -101,6 +156,7 @@ class FakeIdentity:
         self.issuer: str | None = None
         self.secrets: dict[str, str] = {}               # client id -> its current secret (what the token endpoint accepts)
         self.token_requests: list[dict] = []            # {client, scope, audience} of every client_credentials request
+        self.vault = FakeVault()                        # identity runs in admin-password-only mode (`vault: password`): locked until the password is given
         from tests.fakes_connect import FakeConnect
         self.connect = FakeConnect(self)                # PayBroker's and the shop's admin APIs, behind one client with the token endpoint
 
@@ -114,6 +170,8 @@ class FakeIdentity:
         except ValueError:
             cid, secret = "", ""
         app = self.apps.get(cid)
+        if not self.vault.unlocked:
+            return httpx.Response(500, json={"error": "server_error", "error_description": "no signing key: unlock the vault"})
         if app is None or app["kind"] != "service" or self.secrets.get(cid) != secret:
             return httpx.Response(401, json={"error": "invalid_client"})
         if form.get("grant_type") != "client_credentials" or form.get("scope") not in app["allowed_scopes"] or form.get("audience", "") not in {*app["allowed_audiences"], ""}:
@@ -126,10 +184,16 @@ class FakeIdentity:
         self.requests.append((method, path))
         if path == "/oauth/token":
             return self._token(request)
+        if path == "/api/session":
+            return httpx.Response(200, json={"state": "logged_out", "vault": self.vault.session()})
         if request.headers.get("authorization") != "Bearer " + self.admin_key and path not in {"/readyz", "/.well-known/openid-configuration"}:
             return httpx.Response(401, json={"detail": "authentication required"})
         body = json.loads(request.content) if request.content else {}
+        if path in {"/api/admin-password", "/api/vault/unlock"}:
+            return self.vault.handle(path, body)
         if path == "/readyz":
+            if not self.vault.unlocked:
+                return httpx.Response(503, json={"status": "locked", "detail": "no signing key: unlock the vault"})
             return httpx.Response(200, json={"status": "ready"})
         if path == "/.well-known/openid-configuration":
             self.issuer = self.issuer or f"{request.url.scheme}://{request.url.host}"
@@ -193,6 +257,7 @@ class FakeGateway:
         self.ready_after = 0                             # /readyz answers 503 this many times first
         self._n = 0
         self.upstream_status = 200                       # what a chat call answers (to simulate a broken alias)
+        self.vault = FakeVault()                         # the gateway runs in admin-password-only mode (`vault: password`)
 
     def _new_key(self, cid: int) -> dict:
         self._n += 1
@@ -222,8 +287,12 @@ class FakeGateway:
                 return httpx.Response(self.upstream_status, json={"error": {"code": "upstream_unavailable", "message": "down"}})
             self.chat_calls.append({"client": c["name"], "model": body["model"], "max_tokens": body.get("max_tokens")})
             return httpx.Response(200, json={"choices": [{"message": {"content": "Echo: ping"}}], "usage": {"total_tokens": 5}})
+        if path == "/api/session":
+            return httpx.Response(200, json={"state": "logged_out", "vault": self.vault.session()})
         if self.operator_key is None or auth != "Bearer " + self.operator_key:
             return httpx.Response(401, json={"detail": "authentication required"})
+        if path in {"/api/admin-password", "/api/vault/unlock"}:
+            return self.vault.handle(path, body)
         if path == "/api/models" and method == "GET":
             return httpx.Response(200, json={"items": [{"alias": a} for a in sorted(self.aliases)]})
         if path == "/api/clients" and method == "GET":

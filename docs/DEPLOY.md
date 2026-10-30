@@ -163,8 +163,10 @@ The provider was created with a static admin key (generated, kept in `.ecosystem
 1. Find the URL: `.venv/bin/ecoctl status` (the `eco-identity` row) or `agentpg sandbox status <identity-sandbox-id>`.
 2. Print the key (do not paste it anywhere public): `.venv/bin/ecoctl env identity --reveal | grep IDENTITY_API_KEY`.
 3. Open `https://<identity>/admin`. Expand **Use the server's API key instead**, paste the key, sign in.
-4. **Settings → Admin password**: set one (12+ characters). From now on you can sign in with it, and the provider's vault is protected by it as
-   well as by the platform secret. Keep the API key for automation (`ecoctl` uses it).
+4. The provider already has an **admin password**: `ecoctl` created its vault with one on the first `apply` (a strong one, shown once and kept in `.ecosystem/state.json`
+   unless you supplied your own through `ECOCTL_ADMIN_PASSWORD` or `--admin-password-prompt`). It opens the signing key's vault, and you can sign in to the console with it. The
+   platform does not store it (section 11a). Keep the API key for automation (`ecoctl` uses it); change the password under **Settings → Admin password** only together with
+   the copy `ecoctl` uses (a changed password needs `ECOCTL_ADMIN_PASSWORD` or `--admin-password-prompt` from then on).
 5. **Users → New user**: create yourself (username, e-mail, a password). **Groups → `ecosystem-admins` → add yourself.** That group was
    created by `ecoctl` with the `admin` role in every app, so one membership gives you access everywhere. Other groups from the manifest
    (`risk-team`, `support`) grant narrower roles; add people to them as needed.
@@ -269,7 +271,7 @@ Check it: `ecoctl status` lists each app's gateway client and the result of one 
 provider and model (for example `gpt-4o-mini`; a second target gives failover) and save; do the same for `embed-default` with an embedding model
 that returns **1536** numbers, the manifest's `embed_dimensions` (or set the alias's size to match what the apps were created with). **No app, client or key changes**: the next
 request of every app goes to the new model. Add prices to see cost estimates. To switch the default model later, repoint the alias again.
-`LLMGW_ENCRYPTION_KEY` (already set by `ecoctl`) lets the gateway unlock the provider key after a restart.
+The gateway's vault (which holds that key) is opened by the admin password, not by a key in its environment: after a platform restart run `ecoctl unlock` (section 11a).
 
 **See usage per app.** Gateway console **Overview** (per client: requests, tokens, spend against budget, errors) and **Clients**; or
 `GET /api/usage?group=client` (API.md in the gateway repository). Prompts and answers are never stored.
@@ -402,7 +404,8 @@ from AgentPG) and saves the new one.
 |---|---|
 | See everything | `ecoctl status`, `agentpg sandbox list`, `agentpg instances list` |
 | Logs | `agentpg sandbox logs <sandbox-id>` |
-| Resume a paused sandbox | `agentpg sandbox resume <sandbox-id>`; apps hold stored keys locked until a sign-in unlocks them (the platform secret, `*_ENCRYPTION_KEY`, makes that automatic: `ecoctl` sets it) |
+| Resume a paused sandbox | `agentpg sandbox resume <sandbox-id>`; apps hold stored keys locked until a sign-in unlocks them (the platform secret, `*_ENCRYPTION_KEY`, makes that automatic: `ecoctl` sets it for the apps with `vault: platform`). Identity and the gateway (`vault: password`) need `ecoctl unlock` |
+| After a platform restart | `ecoctl unlock` (identity, then the gateway), then `ecoctl status`: both must show `unlocked` (section 11a) |
 | Deploy a new image | CI pushes `:latest`. `ecoctl recreate <app>` deletes the sandbox and creates it afresh so it pulls the image (the database and secrets are kept). Because the URL changes, it also recreates every app that **calls** this one, every app that lists it under `uses` (the simulator uses PayBroker and identity), and every app that uses it as the LLM gateway (their environment names its URL); recreating `identity` recreates the whole fleet. Allow a couple of minutes per app |
 | Change an app's environment | Edit the manifest, then `ecoctl recreate <app>` |
 | Rotate a client secret or a gateway key | `ecoctl apply --execute --rotate`, then recreate the sandboxes whose environment changed (section 9) |
@@ -412,6 +415,28 @@ from AgentPG) and saves the new one.
 | Forgot an app's local admin password | `agentpg sandbox console <id>`, then `trustdesk reset-admin` (or `pagerlens`, `citypulse`, `cpsim`, `paybroker`, `shopfront`, `llmgw`, `identity`); for apps that store provider keys this erases them |
 | Rotate the identity signing key | Identity console → Keys → Rotate (the old key stays published for 24 h) |
 | Back up | Each app's data is in its instance; use AgentPG's instance tools. Also keep `.ecosystem/state.json`: it is the only copy of the client secrets and of each instance's database key |
+
+### 11a. The vault of identity and the gateway: restarts, and moving an existing fleet
+
+Identity (the signing key) and the LLM gateway (the real provider keys) are `vault: password` in the manifest: **no `IDENTITY_ENCRYPTION_KEY` or `LLMGW_ENCRYPTION_KEY` is put in their
+sandbox environment**. The first `apply` creates each vault with the operator's admin password; after that only the password opens it. What that buys, and what it does not (a platform
+environment disclosure no longer opens the signing key or the provider keys; database write access, the data key in process memory, the value of the password and the need for a human at
+every restart remain) is in [GUIDE section 9a](GUIDE.md#9a-the-vault-policy-identity-and-the-gateway-are-opened-by-the-operator) and [SECURITY.md](../SECURITY.md).
+
+- **The password.** Supply it with `ECOCTL_ADMIN_PASSWORD` (from your password manager) or `--admin-password-prompt`, or let the first `apply` generate one: it is shown once and kept in `.ecosystem/state.json`
+  (mode 0600, git-ignored). Copy it to your password manager. `apply` never makes up a password for a vault that exists; if the state file is lost and you do not have the password, the vault cannot be opened
+  (`identity reset-admin` / `llmgw reset-admin` recreate it and discard what it protected: new signing keys, provider keys to enter again).
+- **After a platform restart** (resume of a paused sandbox, a platform maintenance, a crash, a recreate outside `ecoctl`): identity and the gateway are locked. Run `ecoctl unlock`. Until then identity
+  cannot sign (`/readyz` says `locked`; new sign-ins and service tokens fail) and the gateway cannot use a stored provider key; tokens already issued keep working until they expire (the apps verify them offline).
+  `ecoctl status` shows the `vault` column; it exits 1 while a `vault: password` app is locked. `ecoctl recreate` and `apply` unlock as part of the run, before they wait for readiness.
+- **Auto-pause.** Identity is `auto_pause: false` in the manifest. A sandbox that pauses and resumes starts its process again, so expect a resumed gateway to be locked again and to need `ecoctl unlock` (not verified live).
+- **Moving an existing fleet** created with the platform wrap (an `IDENTITY_ENCRYPTION_KEY` / `LLMGW_ENCRYPTION_KEY` in its environment): changing the manifest changes the environment, so `apply` reports "exists with a different
+  environment"; and the vault, created in platform mode, has no password wrap, so `unlock` cannot open it ("did not open the vault"). The supported move is a **new database for identity and the gateway**: delete
+  the sandboxes and their instances (or use `reset-admin` in each console: it clears the vault, discards the signing keys and stored provider keys), then `ecoctl apply --execute`; identity gets new signing keys
+  (every app re-reads the JWKS; users sign in again) and the provider keys are entered again in the gateway. Moving *in place* would need the kit's `drop_platform_wrap` and a data-key rotation
+  (agentpg-kit GUIDE 7.3.2), which neither app exposes over HTTP today; until then a database that ever held a platform wrap still holds it, and an old copy of the environment still opens that copy. Remove an unused
+  `IDENTITY_ENCRYPTION_KEY` / `LLMGW_ENCRYPTION_KEY` from `.ecosystem/state.json` (under `apps.<app>.generated`) once you have moved.
+- **Going back.** Set `vault: platform` and list `<PREFIX>_ENCRYPTION_KEY` under `generate:`; sign in to the app's console once with the admin password and the kit re-wraps the data key under the platform key (it does that at a password sign-in when the platform key is set).
 
 ## 12. Troubleshooting
 
@@ -427,7 +452,9 @@ from AgentPG) and saves the new one.
 | Provider shows an `invalid_request` / redirect error | The registered redirect URI does not match the URL the app sends | `ecoctl status` shows drift; re-run `ecoctl apply --execute`. If the sandbox URL is not what the app derives from the request, set `<PREFIX>_PUBLIC_URL` in the manifest `env` and recreate the sandbox |
 | `sso_error=your account has no role in <App>` | You hold no role there | Add yourself to `ecosystem-admins` (or grant a role) and sign in again |
 | `sso_error=...` mentioning the issuer or audience | Identity was reached under a different URL than it first answered on | The first request fixes the issuer. Set `IDENTITY_PUBLIC_URL` in the identity `env` and recreate it |
-| Identity `/readyz` says `locked` | The vault is locked: `IDENTITY_ENCRYPTION_KEY` missing or the database was replaced | Recreate the sandbox with the same encryption key from `.ecosystem/`, or sign in as admin to unlock |
+| Identity `/readyz` says `locked` | The vault is opened by the admin password and the platform restarted or the sandbox was recreated (or, for a `vault: platform` identity, its `IDENTITY_ENCRYPTION_KEY` is missing) | `ecoctl unlock` (section 11a) |
+| `ecoctl unlock` / `apply`: "did not open the vault" | Wrong admin password, or a vault created in platform mode (no password wrap) | Supply the right `ECOCTL_ADMIN_PASSWORD`; for a platform-mode vault see section 11a, moving an existing fleet |
+| `ecoctl apply`: "protected by an admin password this machine does not have" | The vault exists and the state file lost the password | `ECOCTL_ADMIN_PASSWORD=... ecoctl apply --execute` or `--admin-password-prompt` |
 | A service call gets `401`/`invalid_scope`/`access_denied` | The calling app's service client is not allowed that scope or audience | `ecoctl validate`; compare `calls`/`exposes` in the manifest with Apps in the identity console; re-run `apply` |
 | Simulator: "the environment variable ... is empty" | The token variable is empty and the simulator has no service credentials | Check `CPSIM_SERVICE_CLIENT_ID/_SECRET` in `ecoctl env cpsim`, or set the variable |
 | PagerLens shows no `citypulse-*` | CityPulse cannot reach PagerLens or lacks the service token | `agentpg sandbox logs <citypulse-id>` (look for `reporter:`); `PAGERLENS_URL` and `CITYPULSE_SERVICE_CLIENT_*` set? |
@@ -436,7 +463,7 @@ from AgentPG) and saves the new one.
 | `ecoctl status` shows a chat call `HTTP 502` / `503` | The default alias points at a provider that fails or is locked | Gateway console: Models > `chat-default`, Providers > Test; echo needs nothing |
 | Gateway: `403 wrong_credential` | An operator credential was used on `/v1` | Use a client key (`lg_...`) |
 | Gateway: `429 budget_exceeded` / `rate_limit_exceeded` | The client's budget or rate limit | Clients → raise the limit, or switch to soft mode |
-| Gateway: `503 vault_locked` | A real provider's key is locked after a restart | `LLMGW_ENCRYPTION_KEY` unlocks it automatically; otherwise sign in as admin |
+| Gateway: `503 vault_locked` / `423` | A real provider's key is locked after a restart | `ecoctl unlock llmgw` (the gateway's vault is opened by the admin password) |
 | `ecoctl connect` says the identity provider refused the `ecoctl` service client | The `ecoctl` client is not registered (or its secret in the state file is stale) | `ecoctl apply --execute` registers it again (`--rotate` issues a new secret) |
 | `ecoctl connect`: "the shop's vault is still locked after 60 s" | The shop's vault opens only after a sign-in or its encryption key | Unlock it (the platform key makes that automatic), then `ecoctl connect` |
 | `ecoctl connect`: "connection test ... failed: webhook_secret: FAILED" | PayBroker signs with another secret than the shop holds | `ecoctl connect --rotate` sets both ends afresh |
@@ -447,7 +474,7 @@ from AgentPG) and saves the new one.
 ## 13. Security checklist before you share a URL
 
 - [ ] Every app is reachable only over https (AgentPG terminates TLS). No app is waiting on a setup code on a public URL.
-- [ ] You set an **admin password** at the identity provider and created your own user; the generated **API key** is stored only in `.ecosystem/`.
+- [ ] The identity provider's and the gateway's vaults are open (`ecoctl status` shows `unlocked`), the **admin password** is in your password manager, and the generated **API key** is stored only in `.ecosystem/`. You created your own user.
 - [ ] `ecosystem-admins` contains only you (and people you trust). Other groups carry the narrow roles they need.
 - [ ] Upstream login (if enabled) is `invite_only`, or `open` for a domain you control.
 - [ ] Optional: `<PREFIX>_LOCAL_LOGIN=false` on the apps once SSO works, so the only way in is through the provider.

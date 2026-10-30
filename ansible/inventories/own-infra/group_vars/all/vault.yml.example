@@ -8,3 +8,5 @@ eco_secret_overrides:
 # eco_db_login_password: "..."                                    # a database administrator reached over TCP
 # eco_oidc_clients:                                               # eco_identity_mode: oidc
 #   trustdesk: {client_id: trustdesk, client_secret: "..."}
+# eco_admin_password: "a long passphrase"                          # opens the vaults of identity and the gateway (`vault: password`); omit it to have a strong one generated into .secrets/<fleet>/vault/admin_password,
+#                                                                  # or use ECO_ADMIN_PASSWORD / -e eco_admin_password_prompt=true. The platform never stores it; keep it in a password manager

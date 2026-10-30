@@ -55,9 +55,9 @@ def test_apply_creates_everything_in_dependency_order(world):
     assert env["CITYPULSE_URL"] == "https://eco-citypulse.sandbox.example" and env["TRUSTDESK_URL"] == "https://eco-trustdesk.sandbox.example"
     assert env["CPSIM_OIDC_CLIENT_ID"] == "cpsim" and env["CPSIM_SERVICE_CLIENT_ID"] == "cpsim-service"
     assert env["CPSIM_OIDC_CLIENT_SECRET"] == "cs_cpsim_1" and env["CPSIM_SERVICE_CLIENT_SECRET"] == "cs_cpsim-service_1"
-    # the identity provider got the static admin key and a generated encryption key
+    # the identity provider got the static admin key and NO encryption key: its vault is opened with the admin password
     assert cli.sandboxes["eco-identity"]["env"]["IDENTITY_API_KEY"] == ctx.state.admin_key()
-    assert cli.sandboxes["eco-identity"]["env"]["IDENTITY_ENCRYPTION_KEY"] == ctx.state.secret("identity", "IDENTITY_ENCRYPTION_KEY")
+    assert "IDENTITY_ENCRYPTION_KEY" not in cli.sandboxes["eco-identity"]["env"]
 
 
 def test_the_registry_ends_up_pointing_at_the_real_urls(world):

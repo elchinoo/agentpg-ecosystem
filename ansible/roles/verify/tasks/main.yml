@@ -27,6 +27,19 @@
   changed_when: false
   check_mode: false
 
+- name: "The vault of every app (public /api/session, apps with `vault: password` must be open, the others open themselves)"
+  ansible.builtin.uri:
+    url: "{{ eco_urls[item] }}/api/session"
+    validate_certs: "{{ eco_validate_certs }}"
+    status_code: [200, 401, 403, 404, 500, 502, 503, 504]
+    return_content: true
+    timeout: 10
+  loop: "{{ (['identity'] if eco_identity_mode == 'managed' else []) + eco_fleet.deployed }}"
+  register: eco_vault_probe
+  failed_when: false
+  changed_when: false
+  check_mode: false
+
 - name: Each LLM client makes one tiny chat call with its own key
   ansible.builtin.uri:
     url: "{{ (eco_llm_base_url if eco_llm_mode == 'openai' else eco_urls[eco_fleet.llm.gateway] ~ '/v1') }}/chat/completions"
@@ -67,7 +80,8 @@
       - eco_unhealthy | length == 0
       - eco_unregistered | length == 0
       - eco_llm_failed | length == 0
-    fail_msg: "unhealthy: {{ eco_unhealthy }}; not registered: {{ eco_unregistered }}; LLM call failed for: {{ eco_llm_failed }}"
+      - eco_vault_locked | length == 0
+    fail_msg: "unhealthy: {{ eco_unhealthy }}; not registered: {{ eco_unregistered }}; LLM call failed for: {{ eco_llm_failed }}; vault locked (run unlock.yml): {{ eco_vault_locked }}"
     success_msg: "all {{ eco_fleet.deployed | length }} apps are healthy"
   vars:
     eco_unhealthy: >-
@@ -79,3 +93,4 @@
           + eco_fleet.selected | map('extract', eco_fleet.apps) | selectattr('service') | map(attribute='service_client_id') | list)
          | reject('in', eco_registry.json | map(attribute='client_id') | list) | list }}
     eco_llm_failed: "{{ eco_llm_probe.results | default([]) | rejectattr('status', 'equalto', 200) | map(attribute='item') | list }}"
+    eco_vault_locked: "{{ eco_fleet | eco_vault_failures(eco_vault_probe.results) | select('in', eco_run_list) | list }}"

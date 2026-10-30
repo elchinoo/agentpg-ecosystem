@@ -28,6 +28,14 @@ INSTALLS_NEEDS_BDR_OR_OBJECT_STORE = {"pgaa"}
 PLANS = {"small", "medium", "large"}
 SECRETISH = re.compile(r"(SECRET|PASSWORD|PASSWD|TOKEN|KEY|DSN|CREDENTIAL)", re.I)
 URL_WITH_PASSWORD = re.compile(r"://[^/\s:@]+:[^/\s@]+@")
+# How an app's vault (the data key that encrypts the secrets it stores) is opened after a restart.
+#   platform  the platform holds a wrap of the data key (`<PREFIX>_ENCRYPTION_KEY` in the sandbox environment): the app unlocks itself. Default.
+#   password  no platform wrap: the vault is created and opened with the operator's admin password, which ecoctl supplies and the platform never stores.
+VAULT_MODES = ("platform", "password")
+# `vault: password` needs two things from the app's code: the kit's admin-password-only vault mode (agentpg-kit GUIDE 7.3.2) and an operator
+# credential ecoctl holds (the app's static key) to call POST /api/admin-password and POST /api/vault/unlock. Only the identity provider
+# (signing keys) and the LLM gateway (provider keys) are wired that way; every other app has no static key from ecoctl and keeps its platform wrap.
+PASSWORD_VAULT_SUPPORT = "the identity provider and the LLM gateway"
 
 
 class ManifestError(ValueError):
@@ -110,6 +118,11 @@ class App:
     llm_override: LLMOverride = LLMOverride() # limits and extra aliases for this app's gateway client (`llm: {rpm: ...}`)
     uses: tuple[str, ...] = ()                # apps (or `identity`) whose URL is injected without a scope: called by other means (a merchant key, ...)
     connect: dict[str, Connect] = field(default_factory=dict)      # peer app -> how ecoctl connects this app to it (merchant, keys, webhook)
+    vault: str = "platform"                   # platform: auto-unlock from `<PREFIX>_ENCRYPTION_KEY` | password: opened with the operator's admin password
+
+    @property
+    def encryption_key_name(self) -> str:
+        return f"{self.env_prefix}_ENCRYPTION_KEY"
 
     @property
     def service(self) -> bool:
@@ -139,6 +152,10 @@ class Manifest:
     auto_pause: bool = True
     plan: str | None = None
     llm: LLM = field(default_factory=LLM)
+
+    def password_vault_apps(self) -> list[App]:
+        """The deployed apps whose vault is opened with the operator's admin password, identity first (it signs the tokens everything else needs)."""
+        return [a for a in (self.identity, *self.order()) if a.vault == "password" and a.deploy]
 
     def consumers(self) -> list[str]:
         """The apps that use the LLM gateway."""
@@ -285,7 +302,7 @@ def _env(raw, where: str) -> dict[str, str]:
 
 def _app(key: str, raw: dict, where: str, *, identity: bool = False) -> App:
     _only(raw, {"name", "description", "image", "port", "extensions", "env", "generate", "health", "web", "roles", "default_roles",
-                "env_prefix", "exposes", "calls", "uses", "url_env", "deploy", "auto_pause", "plan", "llm", "connect"}, where)
+                "env_prefix", "exposes", "calls", "uses", "url_env", "deploy", "auto_pause", "plan", "llm", "connect", "vault"}, where)
     if not NAME.match(key):
         raise ManifestError(f"{where}: {key!r} must be 2-40 lowercase letters, digits or dashes")
     port = raw.get("port", 8000)
@@ -374,7 +391,10 @@ def _app(key: str, raw: dict, where: str, *, identity: bool = False) -> App:
         if not deploy:
             raise ManifestError(f"{where}: `llm: true` needs a deployed app (deploy: true): there is no sandbox to give the gateway settings to")
     connect = _connect(raw.get("connect"), f"{where}.connect")
-    return App(llm=llm, llm_override=override, connect=connect, deploy=deploy, auto_pause=auto_pause, plan=plan,
+    vault = raw.get("vault", "platform")
+    if vault not in VAULT_MODES:
+        raise ManifestError(f"{where}.vault must be one of {', '.join(VAULT_MODES)}")
+    return App(vault=vault, llm=llm, llm_override=override, connect=connect, deploy=deploy, auto_pause=auto_pause, plan=plan,
                key=key, name=_text(raw.get("name"), f"{where}.name", key), description=str(raw.get("description", ""))[:300],
                image=_text(raw.get("image"), f"{where}.image", key, 100), port=port, extensions=exts, env=env,
                generate=generate, health=_text(raw.get("health"), f"{where}.health", "/healthz", 100), roles=tuple(roles), default_roles=default_roles,
@@ -526,7 +546,20 @@ def parse(doc: dict) -> Manifest:
                 if t in apps and apps[t].web and role not in {r.name for r in apps[t].roles} and target != "*":
                     raise ManifestError(f"access.groups.{name}.grants.{t}: {role!r} is not a role of {t}")
         groups.append(Group(str(name), str(g.get("description", ""))[:200], grants))
-    m = Manifest(fleet=fleet, registry=registry, tag=tag, size=size, identity=ident, apps=apps, groups=tuple(groups), auto_pause=fleet_pause, plan=fleet_plan, llm=_llm(doc.get("llm"), apps))
+    llm = _llm(doc.get("llm"), apps)
+    for key, app in {"identity": ident, **apps}.items():
+        if app.vault != "password":
+            continue
+        where = "identity" if key == "identity" else f"apps.{key}"
+        if key not in {"identity", llm.gateway}:
+            raise ManifestError(f"{where}.vault: password is not supported for {key}. Only {PASSWORD_VAULT_SUPPORT} can be opened with an admin password by ecoctl "
+                                f"(their code has the password-only vault mode and ecoctl holds an operator key for them); {key} keeps its platform wrap, `vault: platform`")
+        if not app.deploy:
+            raise ManifestError(f"{where}.vault: password needs a deployed app (deploy: true): there is no sandbox whose vault could be opened")
+        if app.encryption_key_name in app.generate:
+            raise ManifestError(f"{where}: `vault: password` means the platform holds no key for the vault, so {app.encryption_key_name} must not be listed under `generate:` "
+                                "(a generated key in the sandbox environment would be a second way to open it)")
+    m = Manifest(fleet=fleet, registry=registry, tag=tag, size=size, identity=ident, apps=apps, groups=tuple(groups), auto_pause=fleet_pause, plan=fleet_plan, llm=llm)
     m.order()                                                  # raises on a cycle
     return m
 

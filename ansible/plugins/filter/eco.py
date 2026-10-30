@@ -28,7 +28,29 @@ def _app(key: str, raw: dict, identity: bool = False) -> dict:
         "llm": bool(llm), "llm_override": llm if isinstance(llm, dict) else {},
         "connect": {p: {"merchant": str(s["merchant"]).strip()} for p, s in (raw.get("connect") or {}).items()},
         "service": bool(calls), "service_client_id": f"{key}-service",
+        "vault": raw.get("vault", "platform"), "encryption_key_name": f"{prefix}_ENCRYPTION_KEY",
     }
+
+
+VAULT_MODES = ("platform", "password")
+PASSWORD_VAULT_SUPPORT = "the identity provider and the LLM gateway"
+
+
+def _check_vaults(fleet: dict) -> None:
+    """The manifest's `vault:` rules, as ecoctl.manifest enforces them (tests/test_ansible_recipe.py compares the two)."""
+    for key, a in {"identity": fleet["identity"], **fleet["apps"]}.items():
+        where = "identity" if key == "identity" else f"apps.{key}"
+        if a["vault"] not in VAULT_MODES:
+            raise ValueError(f"{where}.vault must be one of {', '.join(VAULT_MODES)}")
+        if a["vault"] != "password":
+            continue
+        if key not in ("identity", fleet["llm"]["gateway"]):
+            raise ValueError(f"{where}.vault: password is not supported for {key}. Only {PASSWORD_VAULT_SUPPORT} can be opened with an admin password by the recipe; "
+                             f"{key} keeps its platform wrap, `vault: platform`")
+        if not a["deploy"]:
+            raise ValueError(f"{where}.vault: password needs a deployed app (deploy: true)")
+        if a["encryption_key_name"] in a["generate"]:
+            raise ValueError(f"{where}: `vault: password` means the platform holds no key for the vault, so {a['encryption_key_name']} must not be listed under `generate:`")
 
 
 def _needs(fleet: dict, key: str) -> list[str]:
@@ -69,6 +91,7 @@ def eco_fleet(doc: dict, only=None) -> dict:
     fleet = {"agentpg": {"size": str(reg.get("size", "small")), "auto_pause": reg.get("auto_pause", True), "plan": reg.get("plan")}, "fleet": doc["fleet"], "registry": str(reg.get("registry", "ghcr.io/elchinoo")).rstrip("/"), "tag": reg.get("tag", "latest"), "llm": llm,
              "identity": _app("identity", doc.get("identity"), identity=True), "apps": {k: _app(k, v) for k, v in doc["apps"].items()}}
     fleet["order"] = _order(fleet)
+    _check_vaults(fleet)
     chosen: set[str] = set()
 
     def add(k: str) -> None:
@@ -85,6 +108,7 @@ def eco_fleet(doc: dict, only=None) -> dict:
     fleet["selected"] = [k for k in fleet["order"] if k in chosen]
     fleet["deployed"] = [k for k in fleet["selected"] if fleet["apps"][k]["deploy"]]
     fleet["consumers"] = sorted(k for k in fleet["deployed"] if fleet["apps"][k]["llm"])
+    fleet["vault_apps"] = [k for k in ("identity", *fleet["deployed"]) if eco_get(fleet, k)["vault"] == "password"]       # opened with the operator's admin password, identity first
     for a in [fleet["identity"], *fleet["apps"].values()]:
         a["image_ref"] = f"{fleet['registry']}/{a['image']}:{fleet['tag']}"
         a["sandbox_name"], a["instance_name"] = f"{fleet['fleet']}-{a['key']}", f"{fleet['fleet']}-{a['key']}-db"        # as ecoctl: eco-<app> and eco-<app>-db
@@ -180,12 +204,34 @@ def eco_secret_names(fleet: dict, target: str = "agentpg") -> list[str]:
     for k in fleet["deployed"]:
         a = fleet["apps"][k]
         names += [f"{k}/{n}" for n in a["generate"]]
-    if fleet["consumers"]:
-        gw = fleet["apps"][fleet["llm"]["gateway"]]
-        names.append(f"{gw['key']}/{gw['env_prefix']}_API_KEY")
+    gw = fleet["apps"][fleet["llm"]["gateway"]]
+    if fleet["consumers"] or (gw["vault"] == "password" and gw["key"] in fleet["deployed"]):
+        names.append(f"{gw['key']}/{gw['env_prefix']}_API_KEY")                     # the operator key: creates the apps' clients, and opens a password vault
     if target == "hosts":
         names += [f"{k}/DB_PASSWORD" for k in ("identity", *fleet["deployed"])]
     return list(dict.fromkeys(names))
+
+
+def eco_vault_label(mode: str, state) -> str:
+    """What the report shows for an app's vault, from the `vault` object of its GET /api/session (None: not reported). As ecoctl.vault.describe."""
+    if not isinstance(state, dict) or "unlocked" not in state:
+        return "?"
+    if mode == "password":
+        return "unlocked" if state["unlocked"] else ("LOCKED" if state.get("initialized") else "not initialised")
+    if state["unlocked"]:
+        return "auto" if state.get("auto_unlock") else "unlocked"
+    return "LOCKED" if state.get("initialized") else "empty"
+
+
+def eco_vault_failures(fleet: dict, probes: list) -> list[str]:
+    """The apps with `vault: password` whose vault is not open: `probes` are the results of the /api/session calls (item = app key)."""
+    out = []
+    for key in fleet["vault_apps"]:
+        r = next((p for p in probes if p.get("item") == key), None)
+        state = ((r or {}).get("json") or {}).get("vault") if r and r.get("status") == 200 else None
+        if eco_vault_label("password", state) != "unlocked":
+            out.append(key)
+    return out
 
 
 def eco_dependents(fleet: dict, keys) -> list[str]:

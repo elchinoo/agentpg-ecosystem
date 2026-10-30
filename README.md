@@ -37,6 +37,7 @@ uv venv && uv pip install -e ".[dev]"
 .venv/bin/ecoctl status                  # health and live CPU/memory/network of each app, each LLM client + one real call, and drift from the identity registry
 .venv/bin/ecoctl llm test trustdesk      # one tiny chat call through the LLM gateway with that app's own key
 .venv/bin/ecoctl connect --dry-run       # what connecting ShopFront to PayBroker would change (apply does it for you)
+.venv/bin/ecoctl unlock                  # after a platform restart: open the vaults of identity and the gateway with the admin password (`vault: password`; docs/GUIDE.md section 9a)
 .venv/bin/ecoctl env trustdesk           # the environment an app is created with (secrets shown as ***; --reveal prints them)
 ```
 

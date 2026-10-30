@@ -2,6 +2,8 @@
 
 Needs a Postgres (TEST_DATABASE_URL) and the identity package importable (`pip install -e ../identity ../agentpg-kit`).
 """
+import argparse
+import json
 import os
 from pathlib import Path
 
@@ -14,10 +16,12 @@ identity_api = pytest.importorskip("identity.api")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+from ecoctl import cli as cli_mod  # noqa: E402
 from ecoctl.agentpg import AgentPG  # noqa: E402
 from ecoctl.manifest import load  # noqa: E402
 from ecoctl.plan import Context, build  # noqa: E402
 from ecoctl.state import State  # noqa: E402
+from ecoctl.vault import VaultError, ensure_unlocked  # noqa: E402
 from tests.fakes import FakeAgentPG, FakeGateway  # noqa: E402
 from tests.fakes_connect import FakeConnect  # noqa: E402
 
@@ -48,7 +52,8 @@ def test_apply_against_the_real_provider(tmp_path, monkeypatch):
     identity_cli.run_migrations()
     state = State(tmp_path / "eco")
     monkeypatch.setenv("IDENTITY_API_KEY", state.admin_key())
-    monkeypatch.setenv("IDENTITY_ENCRYPTION_KEY", "integration-test-encryption-key-0123456789")
+    monkeypatch.delenv("IDENTITY_ENCRYPTION_KEY", raising=False)             # `vault: password`: no platform key; the vault is created with the admin password
+    monkeypatch.delenv("IDENTITY_ENCRYPTION_KEY_FILE", raising=False)
     monkeypatch.setenv("IDENTITY_PUBLIC_URL", "https://eco-identity.sandbox.example")
     identity_api.reset_server()
     with TestClient(identity_api.app, base_url="https://eco-identity.sandbox.example") as http:
@@ -73,9 +78,29 @@ def test_apply_against_the_real_provider(tmp_path, monkeypatch):
 
         fc.pb.token_ok, fc.shop.token_ok = accepts("paybroker"), accepts("shopfront")
         connect_http = httpx.Client(transport=httpx.MockTransport(fc.handler))
-        ctx = Context(load(MANIFEST), state, AgentPG(run=cli), http=http, llm_http=llm_http, connect_http=connect_http)
+        ctx = Context(load(MANIFEST), state, AgentPG(run=cli), http=http, llm_http=llm_http, connect_http=connect_http, announce=lambda t: None)
+        assert http.get("/api/session").json()["vault"] == {"initialized": False, "unlocked": False, "auto_unlock": False, "reason": "not_initialized"}
+        assert http.get("/readyz").status_code == 503                         # no signing key until the vault exists
         for step in build(ctx):
             step.run(ctx)
+        session = http.get("/api/session").json()["vault"]
+        assert session["initialized"] and session["unlocked"] and not session["auto_unlock"]      # created with the password alone: no platform wrap
+        pw = state.vault_admin_password()
+        assert pw and pw not in json.dumps(cli.sandboxes["eco-identity"]["env"])
+        # a platform restart: the key in memory is gone, identity cannot sign, `unlock` opens it with the same password and a second apply works
+        from identity import keys as identity_keys
+        from identity.core import vault as identity_vault
+        identity_vault.lock()
+        identity_keys.forget()
+        assert http.get("/readyz").status_code == 503
+        locked = Context(load(MANIFEST), State(state.dir), AgentPG(run=cli), http=http, llm_http=llm_http, connect_http=connect_http)
+        assert cli_mod.cmd_unlock(argparse.Namespace(file=str(MANIFEST), state=str(state.dir), apps=["identity"], admin_password_prompt=False), ctx=locked) == 0
+        assert http.get("/readyz").status_code == 200
+        identity_vault.lock()
+        identity_keys.forget()
+        with pytest.raises(VaultError, match="did not open the vault"):
+            ensure_unlocked(Context(load(MANIFEST), State(state.dir), AgentPG(run=cli), http=http, prompt_password=True, ask_password=lambda q: "a-wrong-passphrase-0000"), load(MANIFEST).identity)
+        ensure_unlocked(locked, load(MANIFEST).identity)
         again = Context(load(MANIFEST), State(state.dir), AgentPG(run=cli), http=http, llm_http=llm_http, connect_http=connect_http)
         fc.pb.writes.clear()
         fc.shop.writes.clear()

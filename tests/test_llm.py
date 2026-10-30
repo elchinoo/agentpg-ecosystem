@@ -10,7 +10,7 @@ from ecoctl import cli as cli_mod
 from ecoctl.llm_client import Gateway, GatewayError
 from ecoctl.plan import app_env, build
 from ecoctl.state import State
-from tests.fakes import FakeGateway
+from tests.fakes import FakeGateway, fake_get
 from tests.test_plan import MANIFEST, again, apply, world  # noqa: F401  (the fixture)
 
 CONSUMERS = ("cpsim", "pagerlens", "paybroker", "shopfront", "trustdesk")
@@ -164,9 +164,18 @@ def test_a_client_that_vanished_from_the_gateway_is_created_again_and_the_key_re
 def test_a_gateway_that_does_not_know_the_operator_key_says_how_to_fix_it(world):  # noqa: F811
     ctx, cli, idp = world
     gateway_of(idp).operator_key = "something-else"                                      # created before ecoctl set LLMGW_API_KEY
+    gateway_of(idp).vault.initialized = gateway_of(idp).vault.unlocked = True            # (its vault is already open: the first call that needs the key is the client list)
     with pytest.raises(GatewayError, match="ecoctl recreate"):
         apply(ctx)
     assert "llm_key" not in ctx.state.app("trustdesk")
+
+
+def test_a_gateway_that_does_not_know_the_operator_key_cannot_have_its_vault_opened(world):  # noqa: F811
+    from ecoctl.vault import VaultError
+    ctx, cli, idp = world
+    gateway_of(idp).operator_key = "something-else"
+    with pytest.raises(VaultError, match="ecoctl recreate"):
+        apply(ctx)
 
 
 def test_an_unknown_alias_is_reported_by_the_gateway(world):  # noqa: F811
@@ -256,7 +265,7 @@ def deployed(world, monkeypatch):  # noqa: F811
     ctx, cli, idp = world
     apply(ctx)
     monkeypatch.setattr(cli_mod, "_ctx", lambda a: again(ctx, cli, idp))
-    monkeypatch.setattr(cli_mod.httpx, "get", lambda url, **kw: httpx.Response(200, request=httpx.Request("GET", url)))
+    monkeypatch.setattr(cli_mod.httpx, "get", fake_get(idp))
     monkeypatch.setattr(cli_mod, "Identity", lambda url, key: type("I", (), {"apps": lambda self: idp_apps(idp)})())
     return ctx, cli, idp
 

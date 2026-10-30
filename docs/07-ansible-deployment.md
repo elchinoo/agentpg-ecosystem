@@ -71,7 +71,8 @@ cd ecosystem/ansible
 .venv/bin/ansible-playbook site.yml                                  # everything (inventories/agentpg is the default inventory)
 .venv/bin/ansible-playbook site.yml -e '{"eco_only": ["shopfront"]}' # one app and what it needs (the gateway, PayBroker, identity)
 .venv/bin/ansible-playbook site.yml --tags identity,gateway          # one stage
-.venv/bin/ansible-playbook verify.yml                                # a report like `ecoctl status`; fails when an app is unhealthy
+.venv/bin/ansible-playbook verify.yml                                # a report like `ecoctl status`; fails when an app is unhealthy or a password vault is locked
+.venv/bin/ansible-playbook unlock.yml                                # after a platform restart: open the vaults of identity and the gateway (section 7a)
 ```
 
 Stages, their tags, and what each does on AgentPG:
@@ -79,12 +80,13 @@ Stages, their tags, and what each does on AgentPG:
 | Stage (tag) | What it does | `ecoctl` equivalent |
 |---|---|---|
 | prepare (always) | reads `ecosystem.yaml`, checks the variables, generates the secrets once | `State`, `validate` |
-| `identity` | instance `eco-identity-db`, its extensions, sandbox `eco-identity`; waits for `/readyz`; checks the issuer equals the sandbox URL | `_deploy`, `_ready` |
-| `gateway` | registers the gateway with identity, then its instance, extensions, sandbox; waits for `/readyz` | `_register`, `_deploy` of `llmgw` |
+| `identity` | instance `eco-identity-db`, its extensions, sandbox `eco-identity`; waits for `/healthz`; **creates or opens its vault with the admin password**; waits for `/readyz` (it answers only once it can sign); checks the issuer equals the sandbox URL | `_deploy`, vault step, `_ready` |
+| `gateway` | registers the gateway with identity, then its instance, extensions, sandbox; **creates or opens its vault**; waits for `/readyz` | `_register`, `_deploy`, vault step of `llmgw` |
 | `apps` | per app, **callees before callers**: register its web and service clients, create its gateway client and key, create instance, extensions and sandbox with the app's environment, point its redirect URI at the sandbox URL | `_register`, `_llm_client`, `_deploy`, `_finish_urls` |
 | `access` | groups and role grants of `access.groups` (`*` means every web app that has the role) | `_group` |
 | `connect` | ShopFront to PayBroker: service tokens, merchant, one allowed origin, two keys, the webhook (the signing secret rotates only when needed), the shop's settings by fingerprint, the shop's own test | `ecoctl connect` |
-| `verify` | `/healthz`, `/readyz`, one chat call per gateway client, the registry | `ecoctl status` |
+| `verify` | `/healthz`, `/readyz`, the vault state of every app, one chat call per gateway client, the registry | `ecoctl status` |
+| `unlock` (playbook `unlock.yml`) | opens the vault of every app with `vault: password`, identity first; never creates one | `ecoctl unlock` |
 
 The commands are those of `ecoctl` (`agentpg create --name N --size S --json`, `extensions create <ext> <instance>`, `sandbox create N --image I --instance ID --port P
 [--auto-pause=false] [--plan X] --env K=V ...`, `sandbox delete ID --force`); `tests/test_ansible_recipe.py` compares their arguments with `ecoctl.agentpg.AgentPG`, and the
@@ -211,6 +213,27 @@ ansible-vault encrypt_string --stdin-name eco_llm_api_key            # one value
 secret-looking literal appears in `ansible/`. Tasks that handle secrets use `no_log`; the modules take secrets in `no_log` parameters and never return them; do not run with `-vvv`
 on a shared terminal. Check mode still creates missing generated secrets (section 4).
 
+## 7a. The vault password (identity and the gateway)
+
+The manifest sets `vault: password` for identity and the gateway: their sandboxes get **no** `IDENTITY_ENCRYPTION_KEY` / `LLMGW_ENCRYPTION_KEY`, and their vaults are created and opened with an admin password that
+the platform never stores (policy, threat model and limits: [GUIDE section 9a](GUIDE.md#9a-the-vault-policy-identity-and-the-gateway-are-opened-by-the-operator), [SECURITY.md](../SECURITY.md)). The recipe does what
+`ecoctl` does, over the apps' own API (`GET /api/session`, `POST /api/admin-password` the first time, `POST /api/vault/unlock` after a restart). Where the password comes from:
+
+| Source | How |
+|---|---|
+| Your own, in Ansible Vault | `eco_admin_password: "..."` in `inventories/agentpg/group_vars/all/vault.yml` (encrypted, see above) |
+| Your own, from the environment | `ECO_ADMIN_PASSWORD` on the control node (the default of `eco_admin_password`); use your password manager's CLI, not a typed value in shell history |
+| Prompt | `-e eco_admin_password_prompt=true` (hidden, never written down) |
+| Generated once | none of the above: a strong one is written to `.secrets/<fleet>/vault/admin_password` (mode 0600, git-ignored) on the first run; the run says so, and you copy it to your password manager. The password is not printed |
+
+A vault that already exists is never given a made-up password: if no password was given and the generated file did not exist before the run, the play stops. Every task that touches the password or the operator keys has
+`no_log: true` (a test checks all of them, and a real run at `-vvv` against local services checks nothing leaks).
+
+`site.yml` creates the vaults in order (identity: container, `/healthz`, **vault**, `/readyz`, issuer; the gateway: container, vault; only then clients and dependents), and re-runs change nothing (`changed=0`: an open vault is
+left alone). **After a platform restart** run `ansible-playbook unlock.yml`: it opens what is locked (`changed` counts the vaults it opened) and never creates one (`-e eco_vault_create=true` lifts that). Until it has run,
+identity cannot sign (new sign-ins and service tokens fail; issued tokens keep working until they expire) and the gateway cannot use a stored provider key. `verify.yml` reports each app's vault (`unlocked`, `LOCKED`, `auto`) and
+fails while a `vault: password` app is locked. With `eco_identity_mode` or `eco_llm_mode` other than `managed` the recipe does not run that app and leaves its vault to its owner.
+
 ## 8. What Ansible does not do that `ecoctl` does
 
 - `status` beyond `verify.yml`: no live CPU/memory/network, no drift table of gateway limits (`ecoctl llm sync`), no connection table.
@@ -227,9 +250,9 @@ AgentPG's whichever tool created the fleet.
 
 ## 9. Tags, files
 
-`ansible/`: `site.yml` (the stages), `destroy.yml` (teardown), `infra_hosts.yml` (hosts target only), `verify.yml`, `library/agentpg_{instance,extension,sandbox}.py` with `module_utils/eco_agentpg.py`
+`ansible/`: `site.yml` (the stages), `unlock.yml` (open the password vaults after a restart), `destroy.yml` (teardown), `infra_hosts.yml` (hosts target only), `verify.yml`, `library/agentpg_{instance,extension,sandbox}.py` with `module_utils/eco_agentpg.py`
 (the CLI wrapper; `ansible-doc -M library agentpg_sandbox` shows each module), `plugins/filter/eco.py` (reads the manifest), `roles/` (`common`, `identity`, `llm_gateway`, `app`,
-`connect`, `verify`; for hosts also `container_host`, `postgres_db`, `proxy`), `inventories/agentpg` (default), `inventories/own-infra`, `inventories/own-infra-local`.
+`connect`, `verify`, `vault`; for hosts also `container_host`, `postgres_db`, `proxy`), `inventories/agentpg` (default), `inventories/own-infra`, `inventories/own-infra-local`.
 All variables and their defaults: `roles/common/defaults/main.yml`.
 
 ## 10. What was verified (and what was not)
@@ -240,6 +263,7 @@ All variables and their defaults: `roles/common/defaults/main.yml`.
 | `tests/test_ansible_recipe.py` (manifest sync, env of every app equal to `ecoctl.plan.app_env` for both targets, order, specs, command arguments equal to `ecoctl.agentpg.AgentPG`, the modules' behaviour against ecoctl's in-memory fake CLI (plus an `instances delete`): teardown leaves the fake account empty, a second one changes nothing, wrong confirmation refused, a similarly named foreign instance untouched, check mode deletes nothing; create, converge, changed environment, recreate, deleted sandbox, existing sandbox, check mode, wait loops, state mode 0600) | pass |
 | The **whole AgentPG-target playbook** against a **stand-in `agentpg` executable** (ecoctl's fake CLI, with state kept between calls) and ecoctl's in-memory identity, gateway, PayBroker and ShopFront fakes served over HTTP: create, no-op re-run (0 mutating calls), `--check` (only `instances list` and `sandbox list`), `eco_recreate` of the gateway (sandbox deleted and created again for it and its dependents, instances and extensions untouched), changed environment reported then applied, interrupted run resumed | ran |
 | The AgentPG path in a **clean venv with only `ansible-core`** and no collections visible (`ANSIBLE_COLLECTIONS_PATH=/nonexistent`): syntax check, inventory, `--check` and apply | ran |
+| The vault tasks (`unlock.yml`, the role `vault`) with real Ansible against **local stand-ins** of the two APIs (`tests/test_ansible_recipe.py`), and against the **real identity and llm-gateway** started locally on a throwaway Postgres: create, `changed=0` re-run, restart, unlock (`changed=2`), wrong password refused, password never in the output at `-vvv` | ran |
 | The real `agentpg` CLI, a real AgentPG account, the real identity, gateway, PayBroker and ShopFront servers | **not run** |
 | The `hosts` target: its `db` stage against a real scratch Postgres 17, the rest against a stand-in `docker` | ran; real Docker, Caddy and TLS **not run** |
 

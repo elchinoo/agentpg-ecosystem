@@ -36,6 +36,13 @@ class State:
             self.data["identity_admin_key"] = secrets.token_urlsafe(32)
         return self.data["identity_admin_key"]
 
+    def vault_admin_password(self) -> str | None:
+        """The operator's admin password for the apps with `vault: password`, when this machine keeps it (see vault.py). None: not kept here."""
+        return (self.data.get("vault") or {}).get("admin_password")
+
+    def keep_vault_admin_password(self, password: str) -> None:
+        self.data.setdefault("vault", {})["admin_password"] = password
+
     def mcp_jwt_secret(self) -> str:
         """The secret `ecoctl mcp serve --transport http` gives AgentPG's MCP server (A1P_JWT_SECRET): generated once, kept here, never printed."""
         mcp = self.data.setdefault("mcp", {})

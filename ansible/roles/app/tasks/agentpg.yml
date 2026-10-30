@@ -76,7 +76,7 @@
     url: "{{ eco_urls[eco_item.key] }}{{ eco_wait_path }}"
     validate_certs: "{{ eco_validate_certs }}"
   vars:
-    eco_wait_path: "{{ '/readyz' if eco_item.key in ['identity', eco_fleet.llm.gateway] else eco_item.health }}"
+    eco_wait_path: "{{ '/readyz' if eco_item.key in ['identity', eco_fleet.llm.gateway] and eco_item.vault != 'password' else eco_item.health }}"        # a password vault is locked until the unlock task has run (right after this one): /readyz comes after it
   register: eco_up
   until: eco_up.status | default(0) == 200
   retries: 60

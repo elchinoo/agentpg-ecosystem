@@ -15,6 +15,7 @@ from ecoctl.connect_client import ConnectError, ServiceTokens, check_url, finger
 from ecoctl.manifest import ManifestError, load, parse
 from ecoctl.plan import build, ecoctl_spec
 from ecoctl.state import State
+from tests.fakes import fake_get
 from tests.fakes_connect import fp
 from tests.test_plan import MANIFEST, again, apply, world  # noqa: F401  (the fixture)
 
@@ -401,7 +402,7 @@ def test_status_shows_a_connections_table_from_read_only_calls(world, monkeypatc
     ctx, cli, idp = world
     apply(ctx)
     monkeypatch.setattr(cli_mod, "_ctx", lambda a: again(ctx, cli, idp))
-    monkeypatch.setattr(cli_mod.httpx, "get", lambda url, **kw: httpx.Response(200, request=httpx.Request("GET", url)))
+    monkeypatch.setattr(cli_mod.httpx, "get", fake_get(idp))
     monkeypatch.setattr(cli_mod, "Identity", lambda url, key: type("I", (), {"apps": lambda self: {k: {**a, "client_id": k} for k, a in idp.apps.items()}})())
     idp.connect.pb.writes.clear()
     idp.connect.shop.writes.clear()
@@ -460,7 +461,7 @@ def test_no_secret_reaches_the_output_the_logs_a_url_or_an_error(world, monkeypa
     run(ctx, cli, idp, monkeypatch)                                        # a failing test
     take()
     monkeypatch.setattr(cli_mod, "_ctx", lambda a: again(ctx, cli, idp))
-    monkeypatch.setattr(cli_mod.httpx, "get", lambda url, **kw: httpx.Response(200, request=httpx.Request("GET", url)))
+    monkeypatch.setattr(cli_mod.httpx, "get", fake_get(idp))
     monkeypatch.setattr(cli_mod, "Identity", lambda url, key: type("I", (), {"apps": lambda self: {k: {**a, "client_id": k} for k, a in idp.apps.items()}})())
     cli_mod.cmd_status(argparse.Namespace(file=str(MANIFEST), state=str(ctx.state.dir)))
     take()

@@ -68,3 +68,14 @@ eco_connect: true                  # wire ShopFront to PayBroker (merchant, keys
 # ---- secrets ------------------------------------------------------------------------------------------------------------
 eco_secrets_dir: "{{ playbook_dir }}/.secrets/{{ eco_manifest.fleet | default('fleet') }}"
 eco_secret_overrides: {}           # "<app>/<NAME>": value, e.g. "identity/IDENTITY_API_KEY"; put the values in an ansible-vault file
+
+# ---- the vault password (apps with `vault: password` in the manifest: identity, the LLM gateway) ----------------------------------------------------------
+# Their vault is created and opened with an admin password that the platform never stores: no <PREFIX>_ENCRYPTION_KEY is set in their environment. Where it comes from:
+#   1. eco_admin_password, from an Ansible Vault file (inventories/*/group_vars/all/vault.yml) or the ECO_ADMIN_PASSWORD environment variable of the control node
+#   2. eco_admin_password_prompt: true asks for it (never written anywhere)
+#   3. otherwise a strong one is generated once into eco_admin_password_file (mode 0600, git-ignored .secrets/): copy it to your password manager
+# After a platform restart the vaults are locked until `ansible-playbook unlock.yml` (or site.yml) runs; existing tokens keep working until they expire.
+eco_admin_password: "{{ lookup('ansible.builtin.env', 'ECO_ADMIN_PASSWORD') }}"
+eco_admin_password_prompt: false
+eco_vault_create: true                 # false (unlock.yml): only open vaults that exist, never create one
+eco_admin_password_file: "{{ eco_secrets_dir }}/vault/admin_password"

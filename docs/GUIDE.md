@@ -100,7 +100,7 @@ flowchart LR
 |---|---|---|
 | identity | Point `<PREFIX>_OIDC_ISSUER`, `_CLIENT_ID`, `_CLIENT_SECRET` at another provider | It must speak standard OpenID Connect (discovery, JWKS, PKCE) **and** be configured to emit a `roles` claim with app-namespaced role names (for example `trustdesk:admin`) and, for service clients, a `scope` claim. Only our own identity has been tested. |
 | llm-gateway | Point `LLM_BASE_URL` and `LLM_API_KEY` at any OpenAI-compatible endpoint | Embedding size must match `EMBEDDING_DIM`; budgets and per-app limits are a gateway feature you give up with a plain provider endpoint. |
-| vault | One module of the kit (`apgkit.vault`): replace it, or replace where its key comes from | Not a setting. The key comes from `<PREFIX>_ENCRYPTION_KEY` (platform-managed) or the admin password. |
+| vault | One module of the kit (`apgkit.vault`): replace it, or replace where its key comes from | Per app in the manifest: `vault: platform` (default; the key comes from `<PREFIX>_ENCRYPTION_KEY`, the app unlocks itself) or `vault: password` (identity and the gateway; the operator's admin password, nothing on the platform; section 9a). |
 | ecoctl | Not needed to run any app; it only deploys the fleet | Any other way of creating the instances and sandboxes works. |
 
 ## 2. The projects
@@ -360,12 +360,13 @@ prefix. Every key below is optional unless said.
 | `plan` | `small`, `medium`, `large` | Overrides `agentpg.plan` for this app |
 | `llm` | `true`, `false` or a mapping | Wires the app to the gateway (6.3). Needs `deploy: true` |
 | `connect` | mapping peer -> `{merchant}` | After both are up, `ecoctl` connects the app to the peer. Only `paybroker` is a valid peer today (6.5) |
+| `vault` | `platform` (default) or `password` | How the app's vault is opened after a restart (section 9a). `platform`: list `<PREFIX>_ENCRYPTION_KEY` under `generate` and the app unlocks itself. `password`: no such key is set; `ecoctl` creates the vault on `apply` and opens it with the operator's admin password (`ecoctl unlock` after a restart). Supported only for `identity` and the app named by `llm.gateway` (the only ones whose code has the password-only mode and for which `ecoctl` holds an operator key); any other app is refused with that message. `<PREFIX>_ENCRYPTION_KEY` must not be listed under `generate` for a `password` app. A manifest without the option behaves as before |
 
 What `ecoctl` puts in an app's environment (`plan.app_env`), layered in this order (a later layer wins): the manifest `env`; each `generate` name; for the
 identity provider `IDENTITY_API_KEY`; for any other app `<PREFIX>_OIDC_ISSUER` (the identity URL), and when `web`, `<PREFIX>_OIDC_CLIENT_ID` and
 `_OIDC_CLIENT_SECRET`; when it has `calls`, `<PREFIX>_SERVICE_CLIENT_ID` and `_SERVICE_CLIENT_SECRET`; the URL of every `calls` and `uses` app
 (`identity` included); and, for an LLM app, the five `LLM_*` and `EMBEDDING_*` names. Secrets are marked as secret in the `agentpg` command and
-printed as `***` in plans and by `ecoctl env`.
+printed as `***` in plans and by `ecoctl env`. An app with `vault: password` never gets its `<PREFIX>_ENCRYPTION_KEY`; the gateway gets its operator key `LLMGW_API_KEY` in that case too (it creates the clients and, with the password, opens the vault through the API).
 
 ### 6.3 `llm`: the gateway wiring
 
@@ -434,7 +435,7 @@ characters (the merchant's exact name in PayBroker). Section 7.8 says what it do
 | `cpsim` | yes | `citypulse`: `.ingest`; `trustdesk`: `.requests.write`; `pagerlens`: `.ingest`; `llmgw`: `llmgw.use`; `shopfront`: `.api` | `paybroker`, `identity` | `cpsim.read`, `.metrics` | `extensions: [query_advisor, edb_stat_monitor, edb_pg_tuner]`, `env_prefix: CPSIM`, image `citypulsesimulator` |
 | `paybroker` | yes | | | `paybroker.read`, `.metrics`, `.admin` | `extensions: [vector, query_advisor, edb_stat_monitor, edb_pg_tuner, fuzzystrmatch]`; five roles |
 | `shopfront` | yes | | `paybroker` | `shopfront.api`, `.read`, `.metrics`, `.admin` | `extensions: [vector, pg_trgm, query_advisor, edb_stat_monitor, edb_pg_tuner, unaccent, fuzzystrmatch]`, `connect.paybroker.merchant: ShopFront`, `SHOPFRONT_TRUSTED_HOPS=1`, `url_env.paybroker=SHOPFRONT_PAYBROKER_URL` |
-| `llmgw` | (is the gateway) | | | `llmgw.use`, `.read`, `.metrics` | `extensions: [query_advisor, edb_stat_monitor, edb_pg_tuner]`, `env_prefix: LLMGW`, image `llm-gateway` |
+| `llmgw` | (is the gateway) | | | `llmgw.use`, `.read`, `.metrics` | `extensions: [query_advisor, edb_stat_monitor, edb_pg_tuner]`, `env_prefix: LLMGW`, image `llm-gateway`, `vault: password` |
 | `pagerlens-agent` | | `pagerlens`: `pagerlens.ingest` | | | `web: false`, `deploy: false`, `url_env.pagerlens=PAGERLENS_URL` |
 
 ## 7. Commands
@@ -482,6 +483,10 @@ every step, printing `[n/N] title ...` and a one-line outcome.
 .venv/bin/ecoctl apply --execute --rotate   # section 9
 ```
 
+Where the admin password of the `vault: password` apps comes from (identity and the gateway; section 9a): `ECOCTL_ADMIN_PASSWORD`, else `--admin-password-prompt` (asked twice when a
+vault is created, never kept), else the state file; when none exists and the vault does not exist yet, `apply` generates one (`token_urlsafe(24)`), keeps it in the state
+file and **shows it once**. A vault that already exists is never given a made-up password: without the real one `apply` stops and says so.
+
 What each step does (idempotent; every step checks what exists):
 
 1. **Database and sandbox** (`_deploy`): find the instance by name (`<fleet>-<app>-db`) or create it, keeping the database key that `agentpg create --json` returns
@@ -489,6 +494,11 @@ What each step does (idempotent; every step checks what exists):
    (`<fleet>-<app>`) or create it with the image, port, instance, `--auto-pause=false` when not pausing, `--plan` when set, and every `--env`; wait (up to 7 minutes) for a URL.
    A sandbox that disappeared behind your back is noticed and created again. If the sandbox exists and its environment now differs from what the
    manifest would give it, the outcome says "exists with a different environment: delete the sandbox and re-run" (use `recreate`).
+   For an app with `vault: password` no encryption key is in the environment, so the sandbox starts with its vault locked.
+1b. **Vault** (identity first, the gateway right after its own sandbox; only for `vault: password`): `GET /api/session` (public) tells whether the vault exists and is open; if it does
+   not exist, `POST /api/admin-password` creates it (the data key is wrapped under the password alone, and the app unlocks and, for identity, creates its signing key); if it exists
+   and is locked (a restart or `recreate`), `POST /api/vault/unlock` opens it; if it is open, nothing. This happens **before** anything waits for the app's `/readyz` (identity answers
+   `locked` until it can sign) and before any client is registered or any dependent is created. After `recreate` the same step runs again, so the unlock comes before the health waits.
 2. **Register** (`_register`): create or patch the web client and the service client in the identity provider; the client secret is returned once and kept.
    An existing client of the wrong kind is an error.
 3. **LLM gateway client** (`_llm_client`): wait for `/readyz` on the gateway, then create one client per app named after the app, with limits and aliases from the manifest; keep its `lg_` key.
@@ -515,6 +525,19 @@ It prints which apps were added by the cascade and which sandboxes it will delet
 touched. Unknown names exit 1. The following apply never passes `--rotate`. The new URL of each recreated app is registered, and `connect` runs again, so the ShopFront origin and webhook follow a recreated shop or PayBroker.
 Allow a couple of minutes per app (section 12).
 
+### 7.4a `unlock [APP ...] [--admin-password-prompt]`
+
+Opens the vault of the apps with `vault: password` (identity first, then the gateway; or the apps you name) with the operator's admin password. Run it after any platform restart,
+and whenever `status` shows `LOCKED`. It never creates a vault and never makes up a password (`apply` creates them). Exit 0 when each app is open, 2 when one could not be opened
+(wrong password, no password available, app not deployed), 1 for an unknown app. An app with `vault: platform` is named and left alone. The password is never printed; a wrong one is reported with
+where it came from, not with its value.
+
+```bash
+.venv/bin/ecoctl unlock                                  # the password from ECOCTL_ADMIN_PASSWORD or the state file
+ECOCTL_ADMIN_PASSWORD=... .venv/bin/ecoctl unlock        # (use a password manager's CLI rather than typing it into your shell history)
+.venv/bin/ecoctl unlock --admin-password-prompt identity
+```
+
 ### 7.5 `status`
 
 Read-only. Prints one table and three sections, and exits 1 if anything is wrong.
@@ -527,9 +550,13 @@ Read-only. Prints one table and three sections, and exits 1 if anything is wrong
 5. **identity registry**: for every client the deployment holds, whether it is registered, its kind, and `launcher URL differs` drift.
 
 ```
-app             health    ready     cpu     mem     net in/out        url
-identity        200       200       0.5%    12.6%   1 kbps / 1 kbps   https://...
+app             health    ready     vault            cpu     mem     net in/out        url
+identity        200       200       unlocked         0.5%    12.6%   1 kbps / 1 kbps   https://...
 ```
+
+The `vault` column comes from each app's public `GET /api/session`: `unlocked` (a `vault: password` app that is open), `LOCKED` (a restart happened: run `ecoctl unlock`; counted as a failure for a
+`vault: password` app, shown but not counted for a platform one, which retries by itself), `not initialised` (run `apply`), `auto` (a platform wrap opens it by itself), `empty` (a platform vault nothing has used yet),
+`?` (the app did not say; a failure only for a `vault: password` app).
 
 The first column holds manifest keys, identity first. The sample row is illustrative of the layout in `cmd_status`, not captured output.
 
@@ -628,6 +655,7 @@ of everything `ecoctl` generated or was shown once.
 | Path | Holds |
 |---|---|
 | `identity_admin_key` | The static admin key `ecoctl` created and gave the identity sandbox as `IDENTITY_API_KEY` |
+| `vault.admin_password` | The operator's admin password for the `vault: password` apps, generated by `apply` when none was supplied (absent when you supply it through `ECOCTL_ADMIN_PASSWORD` or the prompt). It is the key to the identity signing key and the provider keys: guard this file accordingly |
 | `apps.<key>.instance_id`, `sandbox_id`, `url` | Ids and the public URL |
 | `apps.<key>.db_key` | The database key (the database password) shown once at creation |
 | `apps.<key>.extensions` | The extensions `ecoctl` created on the instance (a state from before this list existed has `extensions_done: true`, read as `vector` and `pg_trgm`) |
@@ -671,6 +699,19 @@ and the connect code keeps values out of URLs, logs and exceptions (a unit test 
 
 A rotated secret reaches a running sandbox only when the sandbox is created again: **old keys stop working immediately**, so follow a rotation with `ecoctl recreate <apps>` (or
 `recreate identity`, which recreates all of them). A secret that is lost, not just stale, is reissued by a plain `apply` without `--rotate`.
+
+### 9a. The vault policy: identity and the gateway are opened by the operator
+
+Each app stores its secrets encrypted under a data key that sits in its database only wrapped. With `vault: platform` the wrap is opened by `<PREFIX>_ENCRYPTION_KEY`, a value in the sandbox
+environment, so a restart is unattended. The manifest sets `vault: password` for the two apps whose secrets matter most, the identity provider (the signing key: it mints a token for any app and
+role) and the LLM gateway (the real provider keys: money). For them there is no key in the environment; the vault is created by `apply` and opened after every restart with the admin password.
+
+- **Threat addressed.** A disclosure of the platform environment (sandbox environment, injected files, database credentials, a database copy) does not open the signing key or the provider keys: the unwrap secret is not on the platform.
+- **Not addressed.** Write access to an app's database is still control of that app. The data key sits in process memory while the app runs unlocked, so code execution inside the process reaches it (and the static `IDENTITY_API_KEY` / `LLMGW_API_KEY` stay wildcard operator credentials in the environment). The admin password is a high-value secret: keep it in a password manager and `.ecosystem/` private; a stolen database copy can be guessed against offline at the scrypt cost, so it must be long and random (the generated one is). Restarts need a human.
+- **Operational consequence.** After a platform restart, a recreate outside `ecoctl`, or a crash, identity and the gateway stay **locked** until `ecoctl unlock` (or the Ansible `unlock.yml`) runs. Locked identity cannot sign: new sign-ins and service tokens fail, `/readyz` says `locked`. Tokens already issued keep working until they expire, because the apps verify them offline against the published keys. A locked gateway answers `423`/`vault_locked` only for a stored real provider key; the built-in echo model needs none. `ecoctl status` shows `LOCKED`; `connect` refuses to start while identity is locked.
+- **Ordering.** In `apply`/`recreate` identity's vault is created or opened right after its sandbox exists and before its `/readyz` wait, before any client is registered and before any dependent starts; the gateway's right after its sandbox, before its clients' keys are used. A recreate therefore never leaves a health wait on a locked identity.
+- **Password sources.** `ECOCTL_ADMIN_PASSWORD`, `--admin-password-prompt`, the state file; generated once (shown once) when none exists and no vault does. Never in a sandbox environment, a plan, `ecoctl env`, an error or a log line.
+- **Choosing a mode.** `vault: platform` stays the default and the right choice for apps that must restart unattended (everything else in the shipped manifest). `vault: password` is accepted only for identity and the gateway; the manifest refuses it for any other app and says why.
 
 **Rotating the encryption keys** (`*_ENCRYPTION_KEY`): there is no command. They protect each app's stored provider keys; changing one without the vault's data key being rewrapped
 locks that vault. Not covered by `ecoctl` **(not verified in the apps)**.
@@ -730,7 +771,8 @@ Every `ecoctl` command that changes things is safe to repeat. Start with `ecoctl
 | Sign-in bounces with `sso_error=...unavailable` | Identity paused or crashed, or the app's issuer variable is wrong | `ecoctl status`; `agentpg sandbox logs <identity-id>`; the issuer must equal the identity URL exactly |
 | `sso_error=...issuer or audience` | Identity was first reached under another URL | Set `IDENTITY_PUBLIC_URL` in the identity `env` and recreate it (`pin_issuer` checks this and stops `apply`) |
 | `sso_error=your account has no role in <App>` | No role there | Add yourself to `ecosystem-admins` and sign in again |
-| Identity `/readyz` says `locked` | Vault locked: `IDENTITY_ENCRYPTION_KEY` missing, or the database was replaced | Recreate with the same key from `.ecosystem/`, or sign in as admin to unlock |
+| Identity `/readyz` says `locked`, or `status` shows `LOCKED` | Identity's vault is opened by the admin password and the platform restarted (or the sandbox was recreated) | `ecoctl unlock` (password from `ECOCTL_ADMIN_PASSWORD`, `--admin-password-prompt` or the state file). A `vault: platform` identity instead needs its `IDENTITY_ENCRYPTION_KEY` |
+| `unlock`: "did not open the vault" | Not the password the vault was created with, or the vault was created in platform mode and has no password wrap | Supply the right password; for a vault created in platform mode see DEPLOY section 11a |
 | A service call gets `401`, `invalid_scope` or `access_denied` | The caller's service client lacks the scope or audience | `ecoctl validate`; compare `calls` and `exposes` with the identity console; `ecoctl apply --execute` |
 | `connect`: the provider refused the `ecoctl` service client | `ecoctl` is not registered, or its secret in the state is stale | `ecoctl apply --execute` (add `--rotate` for a new secret) |
 | `connect`: vault still locked after 60 s | The shop's vault opens only after a sign-in or with its platform key | Unlock it, run `ecoctl connect` |

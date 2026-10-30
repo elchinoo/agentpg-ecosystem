@@ -1,0 +1,31 @@
+---
+# After a platform restart (or a sandbox that was recreated outside this recipe), the identity provider and the LLM gateway are LOCKED: their vaults have no
+# platform key (`vault: password` in ecosystem.yaml), so only the operator's admin password opens them. Until then identity cannot sign tokens (new sign-ins and
+# service tokens fail; tokens already issued keep working until they expire, the apps verify them offline) and the gateway cannot use a stored provider key.
+#
+#   ansible-playbook -i inventories/agentpg unlock.yml                          the password from ECO_ADMIN_PASSWORD, an Ansible Vault file (eco_admin_password), or the generated-once file
+#   ansible-playbook -i inventories/agentpg unlock.yml -e eco_admin_password_prompt=true      ask for it (hidden, never written down)
+#
+# Never creates a vault by itself: a vault that does not exist yet is created by site.yml. Idempotent: an open vault changes nothing (changed=0).
+- name: "Unlock - open the vault of every app with `vault: password`, identity first"
+  hosts: localhost
+  gather_facts: false
+  tags: [unlock]
+  roles: [common]
+  vars:
+    eco_vault_create: false
+  tasks:
+    - name: Nothing to do without a password vault
+      ansible.builtin.debug:
+        msg: "no app has `vault: password` in {{ eco_manifest_path }}: every vault opens itself from the platform key"
+      when: eco_fleet.vault_apps | length == 0
+
+    - name: Open the vaults (check mode touches nothing)
+      ansible.builtin.include_role:
+        name: vault
+        tasks_from: one.yml
+      vars:
+        eco_item: "{{ eco_fleet | eco_get(item) }}"
+      loop: "{{ eco_fleet.vault_apps | select('in', eco_run_list) | list }}"
+      loop_control: {label: "{{ item }}"}
+      when: eco_http | bool

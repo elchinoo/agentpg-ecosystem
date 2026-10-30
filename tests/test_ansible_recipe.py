@@ -519,3 +519,283 @@ def test_signin_redirect_is_compared_with_the_full_record():
     text = (ANSIBLE / "roles/app/tasks/one_app.yml").read_text()
     assert "register: eco_signin_now" in text and "eco_signin_now.json.redirect_uris" in text
     assert "eco_registered.json | selectattr('client_id', 'equalto', eco_item.key) | map(attribute='redirect_uris')" not in text
+
+
+# ---- vault: password (identity, the LLM gateway) -------------------------------------------------------------------------------
+def _tasks(node):
+    """Every task dict of a parsed playbook or task file, blocks flattened."""
+    if isinstance(node, list):
+        for item in node:
+            yield from _tasks(item)
+    elif isinstance(node, dict):
+        if any(k in node for k in ("block", "rescue", "always")):
+            for k in ("block", "rescue", "always"):
+                yield from _tasks(node.get(k) or [])
+        else:
+            yield node
+        for k in ("tasks", "pre_tasks", "post_tasks"):
+            yield from _tasks(node.get(k) or [])
+
+
+def test_the_filter_knows_the_vault_option_like_ecoctl(manifest, fleet):
+    for key, app in manifest.everything().items():
+        assert eco.eco_get(fleet, key)["vault"] == app.vault and eco.eco_get(fleet, key)["encryption_key_name"] == app.encryption_key_name
+    assert fleet["vault_apps"] == [a.key for a in manifest.password_vault_apps()] == ["identity", "llmgw"]
+
+
+def test_a_manifest_without_the_option_is_all_platform_in_the_recipe_too():
+    doc = yaml.safe_load(MANIFEST.read_text())
+    del doc["identity"]["vault"], doc["apps"]["llmgw"]["vault"]
+    doc["identity"]["generate"] = ["IDENTITY_ENCRYPTION_KEY"]
+    doc["apps"]["llmgw"]["generate"] = ["LLMGW_ENCRYPTION_KEY"]
+    f = eco.eco_fleet(doc)
+    assert f["vault_apps"] == [] and "identity/IDENTITY_ENCRYPTION_KEY" in eco.eco_secret_names(f) and "llmgw/LLMGW_ENCRYPTION_KEY" in eco.eco_secret_names(f)
+
+
+@pytest.mark.parametrize("mutate, message", [
+    (lambda d: d["apps"]["trustdesk"].update(vault="password"), "not supported for trustdesk"),
+    (lambda d: d["identity"].update(vault="kms"), "must be one of platform, password"),
+    (lambda d: d["identity"].update(generate=["IDENTITY_ENCRYPTION_KEY"]), "must not be listed under `generate:`"),
+    (lambda d: d["apps"]["pagerlens-agent"].update(vault="password"), "not supported for pagerlens-agent"),
+])
+def test_the_recipe_refuses_the_same_vault_settings_as_ecoctl(mutate, message):
+    from ecoctl.manifest import ManifestError, parse
+    doc = yaml.safe_load(MANIFEST.read_text())
+    mutate(doc)
+    with pytest.raises(ManifestError, match=message):
+        parse(doc)
+    with pytest.raises(ValueError, match=message):
+        eco.eco_fleet(doc)
+
+
+def test_no_encryption_key_for_identity_or_the_gateway_anywhere_in_the_recipes_secrets_or_env(manifest, fleet, tmp_path):
+    names = eco.eco_secret_names(fleet)
+    assert not [n for n in names if n.startswith(("identity/", "llmgw/")) and n.endswith("ENCRYPTION_KEY")]
+    assert "trustdesk/TRUSTDESK_ENCRYPTION_KEY" in names and "llmgw/LLMGW_API_KEY" in names          # the others keep theirs; the operator key stays
+    jinja2 = pytest.importorskip("jinja2")
+    secrets_ = {n: "x" * 43 for n in names}
+    for key in ("identity", "llmgw"):
+        item = eco.eco_get(fleet, key)
+        env = jinja2.Environment(loader=jinja2.FileSystemLoader(str(ANSIBLE / "roles/app/templates")), undefined=jinja2.StrictUndefined)
+        env.filters.update({"eco_get": eco.eco_get})
+        text = env.get_template("app.env.j2").render(eco_item=item, eco_fleet=fleet, eco_secrets=secrets_, eco_issued={}, eco_urls={"identity": "https://i", "llmgw": "https://g"},
+                                                     eco_oidc_clients={}, eco_identity_mode="managed", eco_llm_mode="managed", eco_llm_base_url="", eco_llm_api_key="", eco_target="agentpg")
+        assert "ENCRYPTION_KEY" not in text
+
+
+@pytest.mark.parametrize("mode, state, label", [
+    ("password", {"initialized": True, "unlocked": True}, "unlocked"), ("password", {"initialized": True, "unlocked": False}, "LOCKED"),
+    ("password", {"initialized": False, "unlocked": False}, "not initialised"), ("password", None, "?"),
+    ("platform", {"initialized": True, "unlocked": True, "auto_unlock": True}, "auto"), ("platform", {"initialized": True, "unlocked": False}, "LOCKED"),
+    ("platform", {"initialized": False, "unlocked": False}, "empty"), ("platform", None, "?"),
+])
+def test_vault_labels_match_ecoctls(mode, state, label):
+    from ecoctl.vault import describe, parse_state
+    assert eco.eco_vault_label(mode, state) == label == describe(mode, parse_state({"vault": state} if state else {}))[0]
+
+
+def test_locked_password_apps_are_found_from_the_probes(fleet):
+    ok = {"item": "identity", "status": 200, "json": {"vault": {"initialized": True, "unlocked": True}}}
+    shut = {"item": "llmgw", "status": 200, "json": {"vault": {"initialized": True, "unlocked": False}}}
+    assert eco.eco_vault_failures(fleet, [ok, shut]) == ["llmgw"]
+    assert eco.eco_vault_failures(fleet, [ok, {"item": "llmgw", "status": 503}]) == ["llmgw"]            # unreachable is not open
+    assert eco.eco_vault_failures(fleet, [ok, {**shut, "json": {"vault": {"initialized": True, "unlocked": True}}}]) == []
+
+
+SECRET_WORDS = re.compile(r"\beco_admin_pw\b|\beco_admin_password\b|eco_admin_prompted|eco_vault_operator_key")
+
+
+def test_every_task_that_handles_the_admin_password_or_the_operator_key_has_no_log():
+    seen = 0
+    for path in [*ANSIBLE.glob("*.yml"), *ANSIBLE.glob("roles/*/tasks/*.yml")]:
+        for task in _tasks(yaml.safe_load(path.read_text())):
+            body = {k: v for k, v in task.items() if k not in {"name", "when", "register", "changed_when", "failed_when", "until", "loop_control", "tags", "retries", "delay"}}
+            if SECRET_WORDS.search(yaml.safe_dump(body)):
+                seen += 1
+                assert task.get("no_log") is True, f"{path.relative_to(ANSIBLE)}: {task.get('name')} handles the admin password or operator key without no_log: true"
+    assert seen >= 5
+
+
+def test_the_vault_tasks_are_ordered_and_idempotent_by_construction():
+    one = yaml.safe_load((ANSIBLE / "roles/vault/tasks/one.yml").read_text())
+    by = {t["name"].split(": ", 1)[-1]: t for t in one}
+    state = by["is its vault created, is it open"]
+    assert state["check_mode"] is False and state["changed_when"] is False                                    # a read: never a change
+    create, unlock = by["create its vault with the admin password"], by["open its vault with the admin password"]
+    assert "not eco_vault_now.json.vault.initialized" in create["when"] and "== 200" in create["changed_when"]
+    assert "initialized and not eco_vault_now.json.vault.unlocked" in unlock["when"] and "== 200" in unlock["changed_when"]       # an open vault changes nothing
+    names = [t["name"].split(": ", 1)[-1] for t in one]
+    guard = "a vault that does not exist yet is created only where that is asked for (site.yml), not by unlock.yml"
+    assert names.index(guard) < names.index("create its vault with the admin password")
+    assert names.index("open its vault with the admin password") < names.index("the vault is open now") < names.index("wait until it answers /readyz")
+    assert one[0]["when"] == "eco_admin_pw is not defined"
+    pw = (ANSIBLE / "roles/vault/tasks/password.yml").read_text()
+    assert "mode: \"0600\"" in pw and "eco_admin_password_file" in pw and "echo: false" in pw
+
+
+def test_the_vault_is_opened_before_identity_or_the_gateway_is_waited_for_and_before_dependents():
+    ident = [t.get("name", "") for t in _tasks(yaml.safe_load((ANSIBLE / "roles/identity/tasks/main.yml").read_text()))]
+    vault_at = next(i for i, n in enumerate(ident) if "create or open its vault" in n)
+    assert ident.index("Identity provider container and readiness") < vault_at < ident.index("Read the issuer (the first request fixes it when IDENTITY_PUBLIC_URL is unset)")
+    app = [t.get("name", "") for t in _tasks(yaml.safe_load((ANSIBLE / "roles/app/tasks/one_app.yml").read_text()))]
+    probes = (("container", ": container"), ("vault", "create or open its vault"), ("signin", "where its sign-in points now"))
+    at = {k: next(i for i, n in enumerate(app) if probe in n) for k, probe in probes}
+    assert at["container"] < at["vault"] < at["signin"]
+    for f in ("agentpg.yml", "container.yml"):  # a locked app answers 503 on /readyz: deploy waits on /healthz, the unlock task on /readyz
+        assert "eco_item.vault != 'password'" in (ANSIBLE / "roles/app/tasks" / f).read_text()
+
+
+def test_unlock_and_verify_playbooks_exist_and_say_what_they_do():
+    unlock = yaml.safe_load((ANSIBLE / "unlock.yml").read_text())
+    assert unlock[0]["vars"]["eco_vault_create"] is False and "unlock" in unlock[0]["tags"]
+    assert any(t.get("ansible.builtin.include_role", {}).get("name") == "vault" for t in _tasks(unlock))
+    verify = (ANSIBLE / "roles/verify/tasks/main.yml").read_text()
+    assert "/api/session" in verify and "eco_vault_failures" in verify and "eco_vault_locked | length == 0" in verify
+    assert "Vaults" in (ANSIBLE / "roles/verify/templates/report.j2").read_text()
+    defaults = (ANSIBLE / "roles/common/defaults/main.yml").read_text()
+    assert "ECO_ADMIN_PASSWORD" in defaults and "{{ eco_secrets_dir }}/vault/admin_password" in defaults and "eco_admin_password_prompt: false" in defaults
+    assert ".secrets/" in (ANSIBLE / ".gitignore").read_text()                                                  # where a generated password lives
+
+
+# A real Ansible run of the vault tasks against a local stand-in for the two services (no network beyond 127.0.0.1, nothing on AgentPG).
+class _Services:
+    def __init__(self):
+        import http.server
+        import json as _json
+        import threading
+
+        from tests.fakes import FakeVault
+        self.vaults = {"identity": FakeVault(), "llmgw": FakeVault()}
+        self.keys = {"identity": "idk-test-operator-key", "llmgw": "gwk-test-operator-key"}
+        self.log: list[tuple[str, str, str]] = []
+        outer = self
+
+        def make(name):
+            class H(http.server.BaseHTTPRequestHandler):
+                def log_message(self, *a):
+                    pass
+
+                def _send(self, code, body):
+                    data = _json.dumps(body).encode()
+                    self.send_response(code)
+                    self.send_header("content-type", "application/json")
+                    self.send_header("content-length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+
+                def do_GET(self):  # noqa: N802
+                    outer.log.append((name, "GET", self.path))
+                    v = outer.vaults[name]
+                    if self.path == "/api/session":
+                        return self._send(200, {"state": "logged_out", "vault": v.session()})
+                    if self.path == "/readyz":
+                        return self._send(503 if name == "identity" and not v.unlocked else 200, {"status": "x"})
+                    return self._send(200, {"status": "ok"})
+
+                def do_POST(self):  # noqa: N802
+                    outer.log.append((name, "POST", self.path))
+                    body = _json.loads(self.rfile.read(int(self.headers.get("content-length", 0))) or b"{}")
+                    if self.headers.get("authorization") != "Bearer " + outer.keys[name]:
+                        return self._send(401, {"detail": "authentication required"})
+                    r = outer.vaults[name].handle(self.path, body)
+                    return self._send(r.status_code, r.json()) if r else self._send(404, {})
+            return H
+
+        self.servers = {n: http.server.ThreadingHTTPServer(("127.0.0.1", 0), make(n)) for n in self.vaults}
+        for s in self.servers.values():
+            threading.Thread(target=s.serve_forever, daemon=True).start()
+
+    def url(self, name):
+        return f"http://127.0.0.1:{self.servers[name].server_address[1]}"
+
+    def close(self):
+        for s in self.servers.values():
+            s.shutdown()
+            s.server_close()
+
+    def restart(self):
+        for v in self.vaults.values():
+            v.restart()
+
+
+@pytest.fixture
+def services():
+    s = _Services()
+    yield s
+    s.close()
+
+
+def _ansible(services, tmp_path, playbook, *extra, verbose=False):
+    import json
+    import os
+    import shutil
+    import subprocess
+    if not shutil.which("ansible-playbook"):
+        pytest.skip("ansible-playbook is not installed")
+    secrets_dir = tmp_path / "secrets"
+    (secrets_dir / "agentpg").mkdir(parents=True, exist_ok=True)
+    for name in ("identity", "llmgw"):
+        (secrets_dir / "agentpg" / f"{name}.json").write_text(json.dumps({"url": services.url(name)}))
+    evars = {"eco_secrets_dir": str(secrets_dir), "eco_manifest_path": str(MANIFEST), "eco_only": ["llmgw"],
+             "eco_secret_overrides": {"identity/IDENTITY_API_KEY": services.keys["identity"], "llmgw/LLMGW_API_KEY": services.keys["llmgw"]}}
+    env = {k: v for k, v in os.environ.items() if k != "ECO_ADMIN_PASSWORD"} | {"ANSIBLE_LOCALHOST_WARNING": "False", "ANSIBLE_INVENTORY_UNPARSED_WARNING": "False"}
+    p = subprocess.run(["ansible-playbook", "-i", "inventories/agentpg", playbook, "-e", json.dumps(evars), *extra, *(["-vvv"] if verbose else [])],
+                       cwd=ANSIBLE, env=env, capture_output=True, text=True, timeout=300)
+    return p.returncode, p.stdout + p.stderr, secrets_dir
+
+
+def _changed(out: str) -> int:
+    return int(re.search(r"localhost\s*:.*changed=(\d+)", out).group(1))
+
+
+def test_a_real_ansible_run_creates_then_opens_the_vaults_and_a_rerun_changes_nothing(services, tmp_path):
+    import stat as _stat
+    code, out, secrets_dir = _ansible(services, tmp_path, "unlock.yml", "-e", "eco_vault_create=true", verbose=True)
+    assert code == 0, out[-3000:]
+    pw = (secrets_dir / "vault/admin_password").read_text().strip()
+    assert len(pw) == 32 and _stat.S_IMODE((secrets_dir / "vault/admin_password").stat().st_mode) == 0o600
+    assert all(v.initialized and v.unlocked and v.password == pw for v in services.vaults.values())
+    assert pw not in out and services.keys["identity"] not in out and services.keys["llmgw"] not in out                  # nothing secret in the log, even at -vvv
+    assert services.vaults["identity"].initializations == 1 == services.vaults["llmgw"].initializations
+    order = [(n, m, p) for n, m, p in services.log if m == "POST"]
+    assert order[0] == ("identity", "POST", "/api/admin-password")                                                       # identity first
+    code, out2, _ = _ansible(services, tmp_path, "unlock.yml")
+    assert code == 0 and _changed(out2) == 0, out2[-2000:]                                                               # idempotent
+    services.restart()                                                                                                   # a platform restart
+    assert not any(v.unlocked for v in services.vaults.values())
+    code, out3, _ = _ansible(services, tmp_path, "unlock.yml")
+    assert code == 0 and _changed(out3) == 2 and all(v.unlocked for v in services.vaults.values()), out3[-2000:]
+    assert all(v.initializations == 1 and v.unlocks == 1 for v in services.vaults.values())
+    code, out4, _ = _ansible(services, tmp_path, "unlock.yml")
+    assert code == 0 and _changed(out4) == 0
+
+
+def test_a_real_ansible_run_gets_the_password_from_the_environment_and_never_writes_it_down(services, tmp_path, monkeypatch):
+    import json
+    monkeypatch.setenv("ECO_ADMIN_PASSWORD", "operator-held-passphrase-one")
+    import os
+    import subprocess
+    secrets_dir = tmp_path / "secrets"
+    (secrets_dir / "agentpg").mkdir(parents=True)
+    for name in ("identity", "llmgw"):
+        (secrets_dir / "agentpg" / f"{name}.json").write_text(json.dumps({"url": services.url(name)}))
+    evars = {"eco_secrets_dir": str(secrets_dir), "eco_manifest_path": str(MANIFEST), "eco_only": ["llmgw"], "eco_vault_create": True,
+             "eco_secret_overrides": {"identity/IDENTITY_API_KEY": services.keys["identity"], "llmgw/LLMGW_API_KEY": services.keys["llmgw"]}}
+    import shutil
+    if not shutil.which("ansible-playbook"):
+        pytest.skip("ansible-playbook is not installed")
+    p = subprocess.run(["ansible-playbook", "-i", "inventories/agentpg", "unlock.yml", "-e", json.dumps(evars), "-vvv"], cwd=ANSIBLE, env=dict(os.environ), capture_output=True, text=True, timeout=300)
+    assert p.returncode == 0, (p.stdout + p.stderr)[-3000:]
+    assert all(v.password == "operator-held-passphrase-one" for v in services.vaults.values())
+    assert "operator-held-passphrase-one" not in p.stdout + p.stderr and not (secrets_dir / "vault").exists()
+
+
+def test_a_real_ansible_unlock_never_creates_a_vault_and_a_vault_that_exists_never_gets_a_made_up_password(services, tmp_path):
+    code, out, _ = _ansible(services, tmp_path, "unlock.yml")
+    assert code != 0 and "does not exist yet" in out and not any(v.initialized for v in services.vaults.values())
+    code, out, secrets_dir = _ansible(services, tmp_path, "unlock.yml", "-e", "eco_vault_create=true")
+    assert code == 0
+    services.restart()
+    (secrets_dir / "vault/admin_password").unlink()                                                                       # the generated file was lost
+    code, out, _ = _ansible(services, tmp_path, "unlock.yml")
+    assert code != 0 and "made up" in out and not any(v.unlocked for v in services.vaults.values())

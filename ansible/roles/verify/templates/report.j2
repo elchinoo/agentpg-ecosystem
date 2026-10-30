@@ -19,3 +19,8 @@ Identity registry
 {% else %}
   (not checked)
 {% endif %}
+
+Vaults (unlocked = open; LOCKED = run unlock.yml; auto = the platform key opens it)
+{% for r in eco_vault_probe.results | default([]) %}
+  {{ r.item.ljust(16) }}{{ (eco_fleet | eco_get(r.item)).vault.ljust(10) }}{{ (eco_fleet | eco_get(r.item)).vault | eco_vault_label((r.json | default({})).vault | default(none) if r.status == 200 else none) }}
+{% endfor %}

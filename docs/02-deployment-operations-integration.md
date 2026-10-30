@@ -66,7 +66,7 @@ A sandbox can reuse a stale image after pause/resume; recreate is the reliable w
 
 ### 2.3 State, secrets and backups
 - **`ecosystem/.ecosystem/state.json`** is the only copy of: identity client secrets (shown once), per-app **database API keys** (also the database password; AgentPG does not show them again), gateway client keys, generated encryption keys. Back it up somewhere private. Losing it means rotating (`apply --rotate`) and re-entering credentials.
-- Vault behavior: each app's `<PREFIX>_ENCRYPTION_KEY` lets it unlock stored provider keys after a restart. Without it, a restart locks them until an admin signs in.
+- Vault behavior: each app with `vault: platform` (the default) unlocks its stored secrets after a restart from `<PREFIX>_ENCRYPTION_KEY`. Identity and the LLM gateway are `vault: password`: no such key is set, and a restart locks them until `ecoctl unlock` supplies the admin password (GUIDE section 9a).
 - Data lives in each app's Postgres. Back up with the platform's snapshot tools or `pg_dump` using `ecoctl db <app>`.
 
 ### 2.4 Monitoring the fleet

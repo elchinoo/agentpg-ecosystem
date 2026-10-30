@@ -1,0 +1,119 @@
+---
+# Create (first run) or open (after a restart or recreate) the vault of one app (eco_item) with the operator's admin password, over its documented API:
+#   GET  /api/session         public: {"vault": {"initialized", "unlocked", ...}}
+#   POST /api/admin-password  {"new": ...}     first time only: the data key is wrapped under the password alone (there is no platform wrap) and unlocked
+#   POST /api/vault/unlock    {"password": ...}   after every restart
+# Idempotent: an open vault changes nothing (changed=0). Then waits for /readyz, which the identity provider answers only once it can sign.
+# Never run in check mode (eco_http is false there): the services' APIs are not touched.
+- name: The admin password
+  ansible.builtin.include_tasks: password.yml
+  when: eco_admin_pw is not defined
+
+- name: "{{ eco_item.key }}: is its vault created, is it open"
+  ansible.builtin.uri:
+    url: "{{ eco_urls[eco_item.key] }}/api/session"
+    validate_certs: "{{ eco_validate_certs }}"
+    return_content: true
+  register: eco_vault_now
+  until: eco_vault_now.status | default(0) == 200
+  retries: 60
+  delay: 3
+  check_mode: false
+  changed_when: false
+
+- name: "{{ eco_item.key }}: it reports a vault"
+  ansible.builtin.assert:
+    that: eco_vault_now.json.vault is defined
+    fail_msg: "{{ eco_item.key }} answers /api/session without a vault state: this version has no admin-password vault (see docs/07-ansible-deployment.md)"
+    quiet: true
+
+- name: "{{ eco_item.key }}: a vault that does not exist yet is created only where that is asked for (site.yml), not by unlock.yml"
+  ansible.builtin.assert:
+    that: eco_vault_create | bool or eco_vault_now.json.vault.initialized
+    fail_msg: "the {{ eco_item.key }} vault does not exist yet: it is created by site.yml (or `-e eco_vault_create=true`)"
+    quiet: true
+
+- name: "{{ eco_item.key }}: never make up a password for a vault that exists"
+  ansible.builtin.assert:
+    that: not (eco_vault_now.json.vault.initialized and eco_admin_new | bool)
+    fail_msg: >-
+      The {{ eco_item.key }} vault exists, but no admin password was given and {{ eco_admin_password_file }} did not exist before this run, so a new one
+      would be made up and could never open it. Give the real password (an Ansible Vault file, the ECO_ADMIN_PASSWORD variable of the control node, or eco_admin_password_prompt=true).
+    quiet: true
+
+- name: "{{ eco_item.key }}: create its vault with the admin password"
+  ansible.builtin.uri:
+    url: "{{ eco_urls[eco_item.key] }}/api/admin-password"
+    method: POST
+    body_format: json
+    body: {new: "{{ eco_admin_pw }}"}
+    headers: {Authorization: "Bearer {{ eco_vault_operator_key }}"}
+    validate_certs: "{{ eco_validate_certs }}"
+    status_code: [200, 401, 403, 409, 422]
+    return_content: false
+  vars:
+    eco_vault_operator_key: >-
+      {{ eco_secrets['identity/IDENTITY_API_KEY'] if eco_item.key == 'identity'
+         else eco_secrets[eco_item.key ~ '/' ~ eco_item.env_prefix ~ '_API_KEY'] }}
+  register: eco_vault_created
+  no_log: true
+  changed_when: eco_vault_created.status | default(0) == 200
+  when: not eco_vault_now.json.vault.initialized
+
+- name: "{{ eco_item.key }}: the vault was created"
+  ansible.builtin.assert:
+    that: eco_vault_created.status | default(0) == 200
+    fail_msg: "{{ eco_item.key }}: POST /api/admin-password answered HTTP {{ eco_vault_created.status | default('?') }} (401/403: the app does not know the operator key, recreate it; 422: the password is too weak)"
+    quiet: true
+  when: eco_vault_created is not skipped
+
+- name: "{{ eco_item.key }}: open its vault with the admin password"
+  ansible.builtin.uri:
+    url: "{{ eco_urls[eco_item.key] }}/api/vault/unlock"
+    method: POST
+    body_format: json
+    body: {password: "{{ eco_admin_pw }}"}
+    headers: {Authorization: "Bearer {{ eco_vault_operator_key }}"}
+    validate_certs: "{{ eco_validate_certs }}"
+    status_code: [200, 401, 403, 409, 422]
+    return_content: false
+  vars:
+    eco_vault_operator_key: >-
+      {{ eco_secrets['identity/IDENTITY_API_KEY'] if eco_item.key == 'identity'
+         else eco_secrets[eco_item.key ~ '/' ~ eco_item.env_prefix ~ '_API_KEY'] }}
+  register: eco_vault_unlocked
+  no_log: true
+  changed_when: eco_vault_unlocked.status | default(0) == 200
+  when: eco_vault_now.json.vault.initialized and not eco_vault_now.json.vault.unlocked
+
+- name: "{{ eco_item.key }}: the vault was opened"
+  ansible.builtin.assert:
+    that: eco_vault_unlocked.status | default(0) == 200
+    fail_msg: >-
+      {{ eco_item.key }}: POST /api/vault/unlock answered HTTP {{ eco_vault_unlocked.status | default('?') }}. 403: that is not the password the vault was created with
+      (or the vault was created in platform mode and has no password wrap: see docs/DEPLOY.md, moving an existing fleet); 401: the app does not know the operator key.
+    quiet: true
+  when: eco_vault_unlocked is not skipped
+
+- name: "{{ eco_item.key }}: the vault is open now"
+  ansible.builtin.uri:
+    url: "{{ eco_urls[eco_item.key] }}/api/session"
+    validate_certs: "{{ eco_validate_certs }}"
+    return_content: true
+  register: eco_vault_after
+  until: eco_vault_after.json.vault.unlocked | default(false)
+  retries: 5
+  delay: 2
+  check_mode: false
+  changed_when: false
+
+- name: "{{ eco_item.key }}: wait until it answers /readyz"
+  ansible.builtin.uri:
+    url: "{{ eco_urls[eco_item.key] }}/readyz"
+    validate_certs: "{{ eco_validate_certs }}"
+  register: eco_up
+  until: eco_up.status | default(0) == 200
+  retries: 60
+  delay: 3
+  check_mode: false
+  changed_when: false

@@ -1,4 +1,4 @@
-"""ecoctl: validate, plan, apply, status, env, insights, mcp."""
+"""ecoctl: validate, plan, apply, recreate, unlock, status, env, insights, mcp."""
 import argparse
 import json
 import sys
@@ -18,6 +18,7 @@ from .llm_sync import diff_app, table
 from .manifest import ManifestError, load
 from .plan import Context, app_env, build, installed_extensions
 from .state import DEFAULT_DIR, State
+from .vault import ENV_PASSWORD, VaultError, describe, ensure_unlocked, probe
 
 
 def _print_plan(steps) -> None:
@@ -29,7 +30,8 @@ def _print_plan(steps) -> None:
 
 def _ctx(args) -> Context:
     only = {a.strip() for a in args.only.split(",") if a.strip()} if getattr(args, "only", None) else None
-    ctx = Context(load(args.file), State(Path(args.state)), AgentPG(), rotate=getattr(args, "rotate", False), only=only)
+    ctx = Context(load(args.file), State(Path(args.state)), AgentPG(), rotate=getattr(args, "rotate", False), only=only,
+                  prompt_password=getattr(args, "admin_password_prompt", False))
     if only:
         ctx.manifest.closure(only)                      # unknown names fail now
     return ctx
@@ -65,11 +67,15 @@ def cmd_apply(args) -> int:
         print(f"[{i}/{len(steps)}] {s.title} ...", flush=True)
         try:
             print(f"      {s.run(ctx)}")
-        except (AgentPGError, IdentityError, GatewayError, ConnectError, httpx.HTTPError) as exc:
+        except (AgentPGError, IdentityError, GatewayError, ConnectError, VaultError, httpx.HTTPError) as exc:
             ctx.state.save()
             print(f"      FAILED: {exc}\n\nProgress is saved; fix the cause and run the same command again.", file=sys.stderr)
             return 2
     ctx.state.save()
+    pw_apps = [a.key for a in ctx.manifest.password_vault_apps() if ctx.state.app(a.key).get("url")]
+    if pw_apps:
+        print(f"\nThe vault of {', '.join(pw_apps)} is opened with the admin password, which the platform does not store: after a platform restart they stay locked "
+              f"until you run `ecoctl unlock` (existing tokens keep working until they expire).")
     print("\nDone. Open the identity provider's admin console, add yourself to the group(s) above, then open the apps:")
     for key, entry in sorted(ctx.state.data["apps"].items()):
         if entry.get("url"):
@@ -115,17 +121,49 @@ def cmd_recreate(args) -> int:
     return cmd_apply(args)
 
 
+def cmd_unlock(args, ctx: Context | None = None) -> int:
+    """`ecoctl unlock [app ...]`: open the vault of the apps with `vault: password` (identity, the LLM gateway) with the operator's admin password.
+    Needed after a platform restart (identity cannot sign tokens, and the gateway cannot use a stored provider key, until then). Never creates a
+    vault and never makes up a password: `apply` creates them. The password comes from ECOCTL_ADMIN_PASSWORD, --admin-password-prompt or the state file."""
+    ctx = ctx or _ctx(args)
+    m = ctx.manifest
+    known = m.everything()
+    bad = [a for a in args.apps if a not in known]
+    if bad:
+        print(f"no such app: {', '.join(bad)}", file=sys.stderr)
+        return 1
+    plain = [a for a in args.apps if known[a].vault != "password"]
+    for a in plain:
+        print(f"{a}: `vault: platform`, the platform's key opens it by itself; nothing to unlock here")
+    targets = [a for a in m.password_vault_apps() if not args.apps or a.key in args.apps]
+    if not targets:
+        print("no app with `vault: password` in this manifest" if not args.apps else "nothing to unlock")
+        return 0
+    failed = 0
+    for app in targets:
+        if not ctx.state.app(app.key).get("url"):
+            print(f"{app.key}: not deployed yet (run `ecoctl apply --execute`)")
+            failed += 1
+            continue
+        try:
+            print(f"{app.key}: {ensure_unlocked(ctx, app, allow_init=False)}")
+        except (VaultError, IdentityError, httpx.HTTPError) as exc:
+            print(f"{app.key}: FAILED: {exc}", file=sys.stderr)
+            failed += 1
+    return 2 if failed else 0
+
+
 def cmd_status(args) -> int:
     ctx = _ctx(args)
     bad = 0
     live = _live_metrics(ctx)
-    print(f"{'app':<16}{'health':<10}{'ready':<10}{'cpu':<8}{'mem':<8}{'net in/out':<26}url")
+    print(f"{'app':<16}{'health':<10}{'ready':<10}{'vault':<17}{'cpu':<8}{'mem':<8}{'net in/out':<26}url")
     for key, app in ctx.manifest.everything().items():
         url = ctx.state.data["apps"].get(key, {}).get("url")
         if not app.deploy:
             continue
         if not url:
-            print(f"{key:<16}{'-':<10}{'-':<10}{'-':<8}{'-':<8}{'-':<18}(not deployed)")
+            print(f"{key:<16}{'-':<10}{'-':<10}{'-':<17}{'-':<8}{'-':<8}{'-':<18}(not deployed)")
             continue
         row = []
         for path in (app.health, "/readyz"):
@@ -134,9 +172,14 @@ def cmd_status(args) -> int:
             except httpx.HTTPError:
                 row.append("down")
         bad += row[0] != "200"
+        vault_text, vault_ok = describe(app.vault, probe(url))
+        bad += not vault_ok
         m = live.get(key, {})
         net = f"{m.get('network_in', '-')} / {m.get('network_out', '-')}" if "network_in" in m or "network_out" in m else "-"
-        print(f"{key:<16}{row[0]:<10}{row[1]:<10}{m.get('cpu', '-'):<8}{m.get('memory', '-'):<8}{net:<26}{url}")
+        print(f"{key:<16}{row[0]:<10}{row[1]:<10}{vault_text:<17}{m.get('cpu', '-'):<8}{m.get('memory', '-'):<8}{net:<26}{url}")
+    if ctx.manifest.password_vault_apps():
+        print("\nvault: `unlocked` = open; `LOCKED` = after a restart, opened only by the admin password: run `ecoctl unlock` (identity cannot sign tokens, the gateway cannot "
+              "use a stored provider key, until then); `auto` = the platform key opens it by itself")
     bad += _features_status(ctx)
     bad += _llm_status(ctx)
     bad += print_status(ctx)
@@ -311,6 +354,14 @@ def cmd_connect(args) -> int:
     if not todo:
         print(f"{args.app or 'no app'} has no `connect:` block in the manifest", file=sys.stderr)
         return 1
+    if not args.dry_run and m.identity.vault == "password" and ctx.state.app("identity").get("url"):
+        try:
+            closed = not ctx.vault_admin(m.identity).state().unlocked
+        except (VaultError, IdentityError, httpx.HTTPError):
+            closed = False                                  # unreachable: the connection itself will say so
+        if closed:
+            print("identity is locked (its vault is opened with the admin password): it cannot issue the tokens `connect` needs. Run `ecoctl unlock`, then this again.", file=sys.stderr)
+            return 2
     for k, p in todo:
         print(f"{k} -> {p}{' (dry run: nothing is written)' if args.dry_run else ''}")
         try:
@@ -446,9 +497,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--yes", action="store_true", help="do not ask for confirmation")
     ap.add_argument("--only", help="comma-separated apps to deploy (plus what they call); the identity provider is always included")
     ap.add_argument("--rotate", action="store_true", help="issue new client secrets for apps that already exist")
+    prompt_help = f"ask for the admin password of the `vault: password` apps (identity, the LLM gateway) instead of {ENV_PASSWORD} or the state file; it is not kept"
+    ap.add_argument("--admin-password-prompt", action="store_true", help=prompt_help)
     rc = sub.add_parser("recreate", help="delete sandboxes and create them afresh (new image or environment); cascades to apps that depend on them")
     rc.add_argument("apps", help="comma-separated app keys, or identity (which recreates everything)")
     rc.add_argument("--yes", action="store_true")
+    rc.add_argument("--admin-password-prompt", action="store_true", help=prompt_help)
+    ul = sub.add_parser("unlock", help="open the vault of the apps with `vault: password` (identity, the LLM gateway) with the admin password; needed after a platform restart")
+    ul.add_argument("apps", nargs="*", metavar="APP", help="apps to unlock (default: every app with `vault: password`)")
+    ul.add_argument("--admin-password-prompt", action="store_true", help=prompt_help)
     db = sub.add_parser("db", help="print the database key (the database password) of an app's instance")
     db.add_argument("app")
     db.add_argument("--reset", action="store_true", help="rotate the instance's default key and keep the new one")
@@ -492,7 +549,7 @@ def main(argv: list[str] | None = None) -> int:
             sp.add_argument("--write", action="store_true", help="with --project: merge the entries into ./.mcp.json")
     args = p.parse_args(argv)
     try:
-        commands = {"validate": cmd_validate, "plan": cmd_plan, "apply": cmd_apply, "status": cmd_status, "env": cmd_env, "db": cmd_db, "recreate": cmd_recreate,
+        commands = {"validate": cmd_validate, "plan": cmd_plan, "apply": cmd_apply, "status": cmd_status, "env": cmd_env, "db": cmd_db, "recreate": cmd_recreate, "unlock": cmd_unlock,
                     "llm": cmd_llm, "connect": cmd_connect, "insights": cmd_insights, "mcp": cmd_mcp}
         return commands[args.cmd](args)
     except ManifestError as exc:
