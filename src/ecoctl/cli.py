@@ -9,6 +9,7 @@ import httpx
 
 from . import insights as insights_mod
 from . import mcp as mcp_mod
+from . import seal as seal_mod
 from .agentpg import AgentPG, AgentPGError, token_from
 from .connect import print_status, reconcile
 from .connect_client import ConnectError
@@ -153,6 +154,42 @@ def cmd_unlock(args, ctx: Context | None = None) -> int:
     return 2 if failed else 0
 
 
+def cmd_unseal(args, ctx: Context | None = None) -> int:
+    """`ecoctl unseal [app ...]`: open sealed apps with the operator's passphrase (ECOCTL_SEAL_PASSPHRASE or a prompt; stored nowhere). Needed after every
+    platform restart. The passphrase travels encrypted to a key that exists only in the app's process. Identity first, then the gateway, then the rest."""
+    ctx = ctx or _ctx(args)
+    m = ctx.manifest
+    if not m.seal:
+        print("this manifest does not use sealed boot (agentpg.seal: true)")
+        return 0
+    known = m.everything()
+    bad = [a for a in args.apps if a not in known]
+    if bad:
+        print(f"no such app: {', '.join(bad)}", file=sys.stderr)
+        return 1
+    order = [m.identity, *m.order()]
+    failed = 0
+    for app in order:
+        if not app.deploy or (args.apps and app.key not in args.apps):
+            continue
+        if not ctx.state.app(app.key).get("url"):
+            print(f"{app.key}: not deployed yet (run `ecoctl apply --execute`)")
+            failed += 1
+            continue
+        try:
+            print(f"{app.key}: {seal_mod.unseal(ctx, app)}")
+        except (seal_mod.SealError, httpx.HTTPError) as exc:
+            print(f"{app.key}: FAILED: {exc}", file=sys.stderr)
+            failed += 1
+    return 2 if failed else 0
+
+
+def cmd_seal_passphrase(args) -> int:
+    """A random passphrase (about 124 bits). Shown once, kept nowhere: put it in your password manager."""
+    print(seal_mod._kit().generate_passphrase())
+    return 0
+
+
 def cmd_status(args) -> int:
     ctx = _ctx(args)
     bad = 0
@@ -172,7 +209,11 @@ def cmd_status(args) -> int:
             except httpx.HTTPError:
                 row.append("down")
         bad += row[0] != "200"
-        vault_text, vault_ok = describe(app.vault, probe(url))
+        sealed_state = seal_mod.state_of(url) if ctx.manifest.seal else None
+        if sealed_state == "sealed":
+            vault_text, vault_ok = "SEALED", False
+        else:
+            vault_text, vault_ok = describe(app.vault, probe(url))
         bad += not vault_ok
         m = live.get(key, {})
         net = f"{m.get('network_in', '-')} / {m.get('network_out', '-')}" if "network_in" in m or "network_out" in m else "-"
@@ -503,6 +544,9 @@ def main(argv: list[str] | None = None) -> int:
     rc.add_argument("apps", help="comma-separated app keys, or identity (which recreates everything)")
     rc.add_argument("--yes", action="store_true")
     rc.add_argument("--admin-password-prompt", action="store_true", help=prompt_help)
+    us = sub.add_parser("unseal", help="open sealed apps (agentpg.seal: true) with the operator's passphrase; needed after every platform restart")
+    us.add_argument("apps", nargs="*", metavar="APP", help="apps to unseal (default: every deployed app)")
+    sub.add_parser("seal-passphrase", help="print a random passphrase for sealing (kept nowhere: store it in your password manager)")
     ul = sub.add_parser("unlock", help="open the vault of the apps with `vault: password` (identity, the LLM gateway) with the admin password; needed after a platform restart")
     ul.add_argument("apps", nargs="*", metavar="APP", help="apps to unlock (default: every app with `vault: password`)")
     ul.add_argument("--admin-password-prompt", action="store_true", help=prompt_help)
@@ -550,6 +594,7 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     try:
         commands = {"validate": cmd_validate, "plan": cmd_plan, "apply": cmd_apply, "status": cmd_status, "env": cmd_env, "db": cmd_db, "recreate": cmd_recreate, "unlock": cmd_unlock,
+                    "unseal": cmd_unseal, "seal-passphrase": cmd_seal_passphrase,
                     "llm": cmd_llm, "connect": cmd_connect, "insights": cmd_insights, "mcp": cmd_mcp}
         return commands[args.cmd](args)
     except ManifestError as exc:

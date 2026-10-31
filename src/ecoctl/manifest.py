@@ -150,6 +150,7 @@ class Manifest:
     apps: dict[str, App]
     groups: tuple[Group, ...] = field(default_factory=tuple)
     auto_pause: bool = True
+    seal: bool = False                        # sealed boot: every secret travels in one blob only the operator's passphrase opens (see seal.py)
     plan: str | None = None
     llm: LLM = field(default_factory=LLM)
 
@@ -476,7 +477,7 @@ def parse(doc: dict) -> Manifest:
     if not re.match(r"^[a-z0-9][a-z0-9-]{0,19}$", fleet):
         raise ManifestError("fleet must be lowercase letters, digits and dashes (at most 20)")
     ag = _dict(doc.get("agentpg"), "agentpg")
-    _only(ag, {"registry", "tag", "size", "auto_pause", "plan"}, "agentpg")
+    _only(ag, {"registry", "tag", "size", "auto_pause", "plan", "seal"}, "agentpg")
     registry = _text(ag.get("registry"), "agentpg.registry", "ghcr.io/elchinoo", 100).rstrip("/")
     if not re.match(r"^[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)*$", registry):
         raise ManifestError("agentpg.registry must look like ghcr.io/owner")
@@ -485,6 +486,9 @@ def parse(doc: dict) -> Manifest:
     fleet_pause = ag.get("auto_pause", True)
     if not isinstance(fleet_pause, bool):
         raise ManifestError("agentpg.auto_pause must be true or false")
+    seal = ag.get("seal", False)
+    if not isinstance(seal, bool):
+        raise ManifestError("agentpg.seal must be true or false")
     fleet_plan = ag.get("plan")
     if fleet_plan is not None and fleet_plan not in PLANS:
         raise ManifestError(f"agentpg.plan must be one of {', '.join(sorted(PLANS))}")
@@ -559,7 +563,7 @@ def parse(doc: dict) -> Manifest:
         if app.encryption_key_name in app.generate:
             raise ManifestError(f"{where}: `vault: password` means the platform holds no key for the vault, so {app.encryption_key_name} must not be listed under `generate:` "
                                 "(a generated key in the sandbox environment would be a second way to open it)")
-    m = Manifest(fleet=fleet, registry=registry, tag=tag, size=size, identity=ident, apps=apps, groups=tuple(groups), auto_pause=fleet_pause, plan=fleet_plan, llm=llm)
+    m = Manifest(fleet=fleet, registry=registry, tag=tag, size=size, identity=ident, apps=apps, groups=tuple(groups), auto_pause=fleet_pause, plan=fleet_plan, llm=llm, seal=seal)
     m.order()                                                  # raises on a cycle
     return m
 

@@ -921,3 +921,23 @@ Available in the allow-list but listed by no app yet: `citext`, `btree_gin`, `bt
 | `aidb` | Installs, but the instance role has no grants on its schema | section 15 |
 | Hosted per-instance MCP endpoint as a read-only AI path | Its JWT session runs as a read-write role; API keys are not accepted as bearer | `ecoctl mcp` is the read-only path |
 | `agentpg memory` | Not implemented by the platform yet | |
+
+
+## Sealed boot (`agentpg.seal: true`)
+
+With `seal: true`, no secret is put in a sandbox environment. For each app ecoctl collects its secrets (the database URL, client secrets, the identity and
+gateway keys, the LLM key) into one blob encrypted with your passphrase (AES-256-GCM, scrypt key; agentpg-kit `apgkit.sealed`) and creates the sandbox with only
+that blob (`APGKIT_SEALED`) and the non-secret settings. The app starts sealed and serves nothing until you open it.
+
+| Command | What it does |
+|---|---|
+| `ecoctl seal-passphrase` | prints a random passphrase (about 124 bits). Kept nowhere: store it in your password manager |
+| `ecoctl apply --execute` | creates sandboxes with the blob, then unseals each app (identity first). Asks for the passphrase twice on the first run |
+| `ecoctl unseal [APP...]` | opens sealed apps after a platform restart. The passphrase comes from `ECOCTL_SEAL_PASSPHRASE` or a prompt, and travels encrypted to a key that exists only in the app's process |
+| `ecoctl status` | shows `SEALED` for an app that is waiting |
+
+The same passphrase creates and opens each app's vault, so the platform holds nothing that opens it. The passphrase is never written to `.ecosystem/state.json`,
+a sandbox, a log or an error message. State kept on your machine (the identity admin key, generated secrets, the instance keys) is not on the platform, but
+protect that file as you do the passphrase. Limits: someone with debugger-level access to a running, unsealed process can read its memory; the database
+credentials AgentPG itself provisions are known to the platform (the vault contents in that database are not readable without the passphrase). Not yet verified
+on a live fleet: the first redeploy after the platform is rebuilt is where the unseal, the proxy headers and the SSO redirects are checked.

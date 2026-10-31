@@ -10,6 +10,7 @@ agentpg:
   size: small                    # database size
   auto_pause: false              # the fleet stays up while it is being tested (set true to save cost; resume with `agentpg sandbox resume <id>`)
   # plan: small                  # compute plan of every sandbox (small|medium|large)
+  # seal: true                   # sealed boot: sandboxes get one encrypted blob instead of secrets; `ecoctl unseal` opens them (needs apps built on agentpg-kit >= 0.4.1 and `pip install 'agentpg-ecosystem[seal]'`)
 
 llm:                             # apps with `llm: true` are wired to the LLM gateway automatically (every key is optional; these are the defaults)
   gateway: llmgw                 # the app that runs the gateway; it is deployed before the apps that use it

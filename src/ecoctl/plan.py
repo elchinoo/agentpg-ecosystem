@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
+from . import seal
 from .agentpg import AgentPG, AgentPGError, token_from
 from .connect import connect_step
 from .identity_client import PENDING_REDIRECT, Identity, IdentityError
@@ -224,7 +225,11 @@ def _deploy(ctx: Context, app: App) -> str:
             entry.pop(k, None)
         st.save()
     env, secret_names = app_env(ctx, app)
+    plain_hash = _env_hash(env)                                   # a sealed blob is different every time: compare the settings, not the ciphertext
     outcome = []
+    if not entry.get("sandbox_id") and m.seal:
+        env, secret_names, notes = seal.seal_env(ctx, app, env, secret_names)
+        outcome += notes
     if not entry.get("sandbox_id"):
         cli.wait_instance(entry["instance_id"])
         entry["sandbox_id"] = cli.sandbox_id(m.sandbox_name(app.key))
@@ -232,11 +237,11 @@ def _deploy(ctx: Context, app: App) -> str:
             cli.run(AgentPG.create_sandbox(m.sandbox_name(app.key), m.image(app), entry["instance_id"], app.port, env, secret_names,
                                            auto_pause=m.pause_enabled(app), plan=m.plan_for(app)))
             entry["sandbox_id"] = cli.sandbox_id(m.sandbox_name(app.key))
-            entry["env_hash"] = _env_hash(env)
+            entry["env_hash"] = plain_hash
             outcome.append("created")
         else:
             outcome.append("found")
-    elif entry.get("env_hash") and entry["env_hash"] != _env_hash(env):
+    elif entry.get("env_hash") and entry["env_hash"] != plain_hash:
         outcome.append("exists with a different environment: delete the sandbox and re-run to apply it (the database keeps its data)")
     if not entry["sandbox_id"]:
         raise AgentPGError(f"could not find sandbox {m.sandbox_name(app.key)} in `agentpg sandbox list`")
@@ -301,7 +306,9 @@ def build(ctx: Context) -> list[Step]:
                                               {**cmd_env, "IDENTITY_API_KEY": "<generated>"}, {"IDENTITY_API_KEY"},
                                               auto_pause=m.pause_enabled(ident), plan=m.plan_for(ident)).display()],
                       lambda c: _deploy(c, c.manifest.identity)))
-    if ident.vault == "password":
+    if m.seal:
+        steps.append(_unseal_step(ident))
+    elif ident.vault == "password":
         steps.append(_vault_step(ident))
     steps.append(Step("Identity provider: wait until it is ready and pin its issuer URL",
                       ["GET <identity>/readyz", "GET <identity>/.well-known/openid-configuration  (the first request fixes the issuer)"],
@@ -351,7 +358,9 @@ def build(ctx: Context) -> list[Step]:
                                          {k for k, v in placeholders.items() if v == "<generated>"}, auto_pause=m.pause_enabled(app),
                                          plan=m.plan_for(app)).display()]
         steps.append(Step(f"{app.name}: database and sandbox", deploy, (lambda a: lambda c: _deploy(c, a))(app)))
-        if app.vault == "password":
+        if m.seal:
+            steps.append(_unseal_step(app))
+        elif app.vault == "password":
             steps.append(_vault_step(app))                         # before anything that needs it: the gateway's provider keys, the dependents' health waits
         if app.web:
             steps.append(Step(f"{app.name}: point its sign-in at the real URL", [f"identity: set redirect URI to <{app.key} url>/auth/callback and its launcher URL"],
@@ -375,6 +384,19 @@ def build(ctx: Context) -> list[Step]:
             f"{a.key}: push base URL, keys and webhook secret (only fields whose fingerprint differs), then run its connection test"],
             (lambda ak, pk: lambda c: connect_step(c, ak, pk))(a.key, peer)))
     return steps
+
+
+def _unseal_step(app: App) -> Step:
+    """Sealed fleet: the sandbox was created holding only a sealed blob; open it with the operator's passphrase (which also creates or opens its vault)."""
+    def run(c):
+        try:
+            return seal.unseal(c, app)
+        except seal.SealError as exc:
+            raise AgentPGError(str(exc)) from None
+    return Step(f"{'Identity provider' if app.key == 'identity' else app.name}: unseal it with the operator's passphrase",
+                [f"GET <{app.key}>/_seal/key  (an ephemeral public key that exists only in that process)",
+                 f"POST <{app.key}>/_seal/unseal  (the passphrase encrypted to that key; the proxy and logs see ciphertext)",
+                 f"the passphrase is {seal.ENV_PASSPHRASE} or a prompt; it is stored nowhere, and the sandbox environment holds only the sealed blob"], run)
 
 
 def _vault_step(app: App) -> Step:
