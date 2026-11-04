@@ -38,6 +38,7 @@ class Context:
     connect_http: httpx.Client | None = None                # the identity token endpoint, PayBroker's and the shop's admin APIs; injected in tests
     connect_sleep: Callable[[float], None] | None = None    # injected in tests (waiting for a locked vault or a service that is starting)
     connect_clock: Callable[[], float] | None = None
+    aidb: bool = False                                      # the platform can run AIDB mode (the Docker stack): set the apps' AIDB switches. AgentPG: False, see aidb.py
     prompt_password: bool = False                           # ask for the admin password of the `vault: password` apps instead of using ECOCTL_ADMIN_PASSWORD (never kept)
     ask_password: Callable[[str], str] | None = None        # injected in tests (default: getpass)
     announce: Callable[[str], None] = lambda text: print(text, file=sys.stderr, flush=True)       # kept for callers; ecoctl no longer generates or shows an admin password
@@ -121,6 +122,9 @@ def app_env(ctx: Context, app: App) -> tuple[dict[str, str], set[str]]:
         url = st.app(callee).get("url")
         if url:
             env[var] = url
+    if app.aidb and ctx.aidb:
+        from .aidb import switches
+        env.update(switches(app.key, app.env_prefix, app.aidb.retrieval, app.aidb.agent))
     if app.llm:
         # the names TrustDesk and PagerLens read (config.py / embedcfg.py); environment settings are trusted by the apps, so the
         # gateway's public https URL needs no allow-private switch
@@ -362,6 +366,8 @@ def build(ctx: Context) -> list[Step]:
             steps.append(_unseal_step(app))
         elif app.vault == "password":
             steps.append(_vault_step(app))                         # before anything that needs it: the gateway's provider keys, the dependents' health waits
+        if app.aidb:
+            steps.append(_aidb_step(app))
         if app.web:
             steps.append(Step(f"{app.name}: point its sign-in at the real URL", [f"identity: set redirect URI to <{app.key} url>/auth/callback and its launcher URL"],
                               (lambda a: lambda c: _finish_urls(c, a))(app)))
@@ -384,6 +390,14 @@ def build(ctx: Context) -> list[Step]:
             f"{a.key}: push base URL, keys and webhook secret (only fields whose fingerprint differs), then run its connection test"],
             (lambda ak, pk: lambda c: connect_step(c, ak, pk))(a.key, peer)))
     return steps
+
+
+def _aidb_step(app: App) -> Step:
+    """`aidb: ...` in the manifest: the app's `aidb-setup` is an explicit step. Where the platform cannot run it (AgentPG) the step says so and the plan goes on."""
+    from .aidb import NOT_AVAILABLE_ON_AGENTPG
+    feats = ", ".join(f for f, on in (("retrieval", app.aidb.retrieval), ("agent", app.aidb.agent)) if on)
+    return Step(f"{app.name}: AIDB mode ({feats})", [f"run `{app.key} aidb-setup` with a privileged connection (Docker stack: `ecoctl dev aidb-setup`)", NOT_AVAILABLE_ON_AGENTPG],
+                lambda c: NOT_AVAILABLE_ON_AGENTPG.split(":")[0] + " (the app stays on its own search; nothing failed)")
 
 
 def _unseal_step(app: App) -> Step:

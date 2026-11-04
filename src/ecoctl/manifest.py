@@ -94,6 +94,13 @@ class Connect:
 
 
 @dataclass(frozen=True)
+class Aidb:
+    """`apps.<app>.aidb`: this app runs in AIDB mode (see aidb.py). `retrieval`: search and recall from an AIDB knowledge base; `agent`: the app's agent features (needs `llm: true`)."""
+    retrieval: bool = True
+    agent: bool = True
+
+
+@dataclass(frozen=True)
 class App:
     key: str                                  # client id, sandbox name suffix and scope prefix
     name: str
@@ -118,6 +125,7 @@ class App:
     llm_override: LLMOverride = LLMOverride() # limits and extra aliases for this app's gateway client (`llm: {rpm: ...}`)
     uses: tuple[str, ...] = ()                # apps (or `identity`) whose URL is injected without a scope: called by other means (a merchant key, ...)
     connect: dict[str, Connect] = field(default_factory=dict)      # peer app -> how ecoctl connects this app to it (merchant, keys, webhook)
+    aidb: Aidb | None = None                  # AIDB mode, off by default (aidb.py)
     vault: str = "platform"                   # platform: auto-unlock from `<PREFIX>_ENCRYPTION_KEY` | password: opened with the operator's admin password
 
     @property
@@ -303,7 +311,7 @@ def _env(raw, where: str) -> dict[str, str]:
 
 def _app(key: str, raw: dict, where: str, *, identity: bool = False) -> App:
     _only(raw, {"name", "description", "image", "port", "extensions", "env", "generate", "health", "web", "roles", "default_roles",
-                "env_prefix", "exposes", "calls", "uses", "url_env", "deploy", "auto_pause", "plan", "llm", "connect", "vault"}, where)
+                "env_prefix", "exposes", "calls", "uses", "url_env", "deploy", "auto_pause", "plan", "llm", "connect", "vault", "aidb"}, where)
     if not NAME.match(key):
         raise ManifestError(f"{where}: {key!r} must be 2-40 lowercase letters, digits or dashes")
     port = raw.get("port", 8000)
@@ -395,7 +403,17 @@ def _app(key: str, raw: dict, where: str, *, identity: bool = False) -> App:
     vault = raw.get("vault", "platform")
     if vault not in VAULT_MODES:
         raise ManifestError(f"{where}.vault must be one of {', '.join(VAULT_MODES)}")
-    return App(vault=vault, llm=llm, llm_override=override, connect=connect, deploy=deploy, auto_pause=auto_pause, plan=plan,
+    aidb = _aidb(raw.get("aidb"), key, where)
+    if aidb:
+        if not deploy:
+            raise ManifestError(f"{where}: `aidb` needs a deployed app (deploy: true)")
+        if aidb.agent and not llm:
+            raise ManifestError(f"{where}: `aidb.agent` needs `llm: true` (the agent's chat model is the gateway's)")
+        from .aidb import switches
+        clash = [n for n in switches(key, str(raw.get("env_prefix", key.upper().replace("-", "_"))), True, True) if n in env or n in generate]
+        if clash:
+            raise ManifestError(f"{where}: {', '.join(clash)} is set by ecoctl for an app with `aidb`; remove them from env/generate")
+    return App(aidb=aidb, vault=vault, llm=llm, llm_override=override, connect=connect, deploy=deploy, auto_pause=auto_pause, plan=plan,
                key=key, name=_text(raw.get("name"), f"{where}.name", key), description=str(raw.get("description", ""))[:300],
                image=_text(raw.get("image"), f"{where}.image", key, 100), port=port, extensions=exts, env=env,
                generate=generate, health=_text(raw.get("health"), f"{where}.health", "/healthz", 100), roles=tuple(roles), default_roles=default_roles,
@@ -406,6 +424,28 @@ def _int(v, where: str, lo: int, hi: int) -> int:
     if isinstance(v, bool) or not isinstance(v, int) or not lo <= v <= hi:
         raise ManifestError(f"{where} must be a whole number from {lo} to {hi}")
     return v
+
+
+def _aidb(raw, key: str, where: str) -> Aidb | None:
+    """`true` (retrieval and agent), `false`/absent (off) or a mapping `{retrieval: bool, agent: bool}` (both default true; at least one must be)."""
+    from .aidb import SUPPORTED
+    if raw is None or raw is False:
+        return None
+    if raw is True:
+        spec = Aidb()
+    elif isinstance(raw, dict):
+        _only(raw, {"retrieval", "agent"}, f"{where}.aidb")
+        for k, v in raw.items():
+            if not isinstance(v, bool):
+                raise ManifestError(f"{where}.aidb.{k} must be true or false")
+        spec = Aidb(raw.get("retrieval", True), raw.get("agent", True))
+        if not (spec.retrieval or spec.agent):
+            raise ManifestError(f"{where}.aidb turns nothing on: leave it out, or enable retrieval or agent")
+    else:
+        raise ManifestError(f"{where}.aidb must be true, false or a mapping (retrieval, agent)")
+    if key not in SUPPORTED:
+        raise ManifestError(f"{where}.aidb: {key} has no AIDB mode (apps with one: {', '.join(SUPPORTED)})")
+    return spec
 
 
 def _connect(raw, where: str) -> dict[str, Connect]:

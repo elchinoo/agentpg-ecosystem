@@ -138,11 +138,12 @@ services:
       context: ../../CityPulse
     environment:
       APGKIT_SEALED_FILE: /run/secrets/apgkit_sealed
+      CITYPULSE_CITY: paris
       CITYPULSE_OIDC_CLIENT_ID: citypulse
       CITYPULSE_OIDC_ISSUER: http://identity.localhost:8101
       CITYPULSE_PUBLIC_URL: http://citypulse.localhost:8106
       CITYPULSE_RETRIEVAL_BACKEND: aidb
-      CITYPULSE_ROLE: api
+      CITYPULSE_ROLE: all
       CITYPULSE_SERVICE_CLIENT_ID: citypulse-service
       EMBEDDING_DIM: '1536'
       EMBEDDING_MODEL: embed-default
@@ -150,6 +151,7 @@ services:
       LLM_CHAT_MODEL: chat-default
       PAGERLENS_URL: http://pagerlens.localhost:8104
       PORT: '8106'
+      SIM_SENSORS: '400'
     secrets:
     - source: sealed_citypulse
       target: apgkit_sealed
@@ -185,6 +187,7 @@ services:
       LLM_CHAT_MODEL: chat-default
       PAYBROKER_ANALYST_QA: aidb
       PAYBROKER_DEV_HTTP: '1'
+      PAYBROKER_DEV_WEBHOOK_HOSTS: shopfront,shopfront.localhost
       PAYBROKER_OIDC_CLIENT_ID: paybroker
       PAYBROKER_OIDC_ISSUER: http://identity.localhost:8101
       PAYBROKER_PUBLIC_URL: http://paybroker.localhost:8105

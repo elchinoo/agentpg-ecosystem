@@ -115,9 +115,19 @@ Two dev-only settings make that path possible, both in the stack and not in the 
 After `aidb-setup`, `ecoctl dev aidb-setup` does what an operator would: it waits for each app's `/readyz` AIDB state to become `ready` (the apps re-examine a fallback about every 60 s; TrustDesk took 15 s on a fresh stack) and, for an app whose state says `vault_locked`
 (CityPulse: its setup creates the vault the seals need, but the running process only opens its vault at unseal time and never looks again), restarts the container and unseals it. No manual step.
 
+## Dev-only switches on PayBroker, and CityPulse's data
+
+`PAYBROKER_DEV_HTTP=1` and `PAYBROKER_DEV_WEBHOOK_HOSTS=shopfront,shopfront.localhost` are set on the PayBroker container only (a test checks that no other service has any `PAYBROKER_DEV_*` and that `PAYBROKER_ALLOW_PRIVATE_URLS` is not set anywhere):
+http `*.localhost` origins, and webhooks to exactly those host names; every other private address is still refused. They are for this stack, never for a published image.
+
+CityPulse runs its own built-in simulator here (`CITYPULSE_ROLE=all`, `CITYPULSE_CITY=paris`, 400 sensors): CityPulse Simulator's targets may not be on a private address, so it cannot feed it. `ecoctl dev burst [--seconds N]` presses CityPulse's burst button so that bursts and incidents exist for
+`/api/ask` ("which districts lost the most sensors during the last burst?").
+
+`aidb:` in `ecosystem.yaml` (see docs/GUIDE.md 7.11) decides which apps run in AIDB mode; `ecoctl --state .ecosystem-dev aidb status` shows them.
+
 ## Known gaps (2026-11-04)
 
-* **`connect` ShopFront to PayBroker stops at the webhook**: PayBroker refuses a webhook URL on a private or local address (`PAYBROKER_ALLOW_PRIVATE_URLS=true` would allow it; not set without a decision).
-  The merchant, the allowed origin and the keys are created; `ecoctl dev up` finishes everything else and exits 1 with the message.
-* A real model was run once per scenario (docs/10); with the stand-in alone no agent does real work.
+* **ShopFront's connection test to PayBroker fails** (secret and publishable key): ShopFront refuses a PayBroker on a private address and its only switch is `SHOPFRONT_ALLOW_PRIVATE_URLS=true` (not set). The webhook part of `connect` now works.
+* CityPulse Simulator cannot feed CityPulse (private target; `CPSIM_ALLOW_PRIVATE_URLS` not set), so CityPulse simulates its own city.
+* Real models write wrong SQL for CityPulse's questions (docs/10, second round); PagerLens answers a failed AIDB run with HTTP 500.
 * PostGIS and EDB's platform extensions are not in the image; CityPulse's geography and the query advisor degrade as they do on a platform without them.

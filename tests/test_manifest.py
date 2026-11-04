@@ -205,6 +205,7 @@ def test_the_gateway_must_exist_be_deployed_and_not_use_itself():
         parse(d)
     for app in d["apps"].values():                       # nobody uses an LLM: the gateway is not needed at all
         app.pop("llm", None)
+        app.pop("aidb", None)                            # (an agent needs the gateway)
     assert parse(d).consumers() == []
 
 
@@ -274,3 +275,48 @@ def test_an_llm_mapping_needs_a_deployed_app_and_a_true_false_or_mapping():
     d["apps"]["trustdesk"]["llm"] = [1]
     with pytest.raises(ManifestError, match="true, false or a mapping"):
         parse(d)
+
+MANIFEST_PATH = Path(__file__).resolve().parents[1] / "ecosystem.yaml"
+
+
+def test_the_aidb_key_is_validated_and_off_by_default():
+    d = doc()
+    m = parse(d)
+    assert m.apps["trustdesk"].aidb and m.apps["trustdesk"].aidb.agent and m.apps["shopfront"].aidb is None
+    d["apps"]["trustdesk"]["aidb"] = {"retrieval": True, "agent": False}
+    assert parse(d).apps["trustdesk"].aidb.agent is False
+    for bad, match in (({"retrieval": False, "agent": False}, "turns nothing on"), ({"models": []}, "unknown"), ({"agent": "yes"}, "true or false"), ("on", "true, false or a mapping")):
+        d = doc()
+        d["apps"]["trustdesk"]["aidb"] = bad
+        with pytest.raises(ManifestError, match=match):
+            parse(d)
+    d = doc()
+    d["apps"]["shopfront"]["aidb"] = True
+    with pytest.raises(ManifestError, match="no AIDB mode"):
+        parse(d)
+    d = doc()
+    d["apps"]["trustdesk"]["env"] = {"TRUSTDESK_RETRIEVAL_BACKEND": "app"}
+    with pytest.raises(ManifestError, match="set by ecoctl"):
+        parse(d)
+    d = doc()
+    d["apps"]["trustdesk"].pop("llm")
+    with pytest.raises(ManifestError, match="needs `llm: true`"):
+        parse(d)
+    d["apps"]["trustdesk"]["aidb"] = {"retrieval": True, "agent": False}
+    parse(d)                                                   # retrieval alone needs no gateway
+
+
+def test_aidb_switches_reach_the_environment_only_where_the_platform_can_run_it(tmp_path):
+    from ecoctl.plan import Context, app_env, build
+    from ecoctl.state import State
+    m = load(MANIFEST_PATH)
+    on = Context(m, State(tmp_path / "a"), None, aidb=True)                                       # type: ignore[arg-type]
+    off = Context(m, State(tmp_path / "b"), None)                                                  # type: ignore[arg-type]
+    pb = m.apps["paybroker"]
+    env, _ = app_env(on, pb)
+    assert env["PAYBROKER_RETRIEVAL_BACKEND"] == "aidb" and env["PAYBROKER_TRIAGE_METHOD"] == "aidb_agent" and env["PAYBROKER_ANALYST_QA"] == "aidb"
+    assert "PAYBROKER_RETRIEVAL_BACKEND" not in app_env(off, pb)[0], "AgentPG: nothing is switched on"
+    assert "TRUSTDESK_RETRIEVAL_BACKEND" in app_env(on, m.apps["trustdesk"])[0] and not any(k.endswith("_BACKEND") for k in app_env(on, m.apps["shopfront"])[0])
+    steps = [s for s in build(off) if "AIDB mode" in s.title]
+    assert len(steps) == 4 and all("not available on AgentPG" in s.detail[1] for s in steps)
+    assert all("not available on AgentPG" in s.run(off) and "nothing failed" in s.run(off) for s in steps), "the plan goes on"

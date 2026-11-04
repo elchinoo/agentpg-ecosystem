@@ -36,6 +36,7 @@ apps:
     name: TrustDesk
     llm: true                    # wired to the LLM gateway: LLM_BASE_URL, LLM_API_KEY, LLM_CHAT_MODEL, EMBEDDING_MODEL, EMBEDDING_DIM
     description: Compliance workspace
+    aidb: true                   # AIDB mode: retrieval and agent features (see docs/GUIDE.md; the Docker stack runs it, on AgentPG the step reports 'not available')
     extensions: [vector, pg_trgm, query_advisor, edb_stat_monitor, edb_pg_tuner, unaccent, tcn]
     generate: [TRUSTDESK_ENCRYPTION_KEY]
     env: {AUTO_SEED: "true"}
@@ -49,6 +50,7 @@ apps:
     name: PagerLens
     llm: true                    # wired to the LLM gateway: LLM_BASE_URL, LLM_API_KEY, LLM_CHAT_MODEL, EMBEDDING_MODEL, EMBEDDING_DIM
     description: Observability and incident investigation
+    aidb: true                   # AIDB mode: retrieval and agent features (see docs/GUIDE.md; the Docker stack runs it, on AgentPG the step reports 'not available')
     extensions: [vector, pg_trgm, query_advisor, edb_stat_monitor, edb_pg_tuner, tcn]
     generate: [PAGERLENS_ENCRYPTION_KEY]
     roles:
@@ -61,6 +63,7 @@ apps:
     name: CityPulse
     llm: true                    # a gateway client: AIDB mode registers the gateway's chat model for its agent (citypulse aidb-setup)
     description: Smart-city IoT sample
+    aidb: true                   # AIDB mode: retrieval and agent features (see docs/GUIDE.md; the Docker stack runs it, on AgentPG the step reports 'not available')
     extensions: [query_advisor, edb_stat_monitor, edb_pg_tuner, postgis]
     generate: []
     env:
@@ -98,6 +101,7 @@ apps:
     name: PayBroker
     llm: true                    # wired to the LLM gateway: LLM_BASE_URL, LLM_API_KEY, LLM_CHAT_MODEL, EMBEDDING_MODEL, EMBEDDING_DIM
     description: Payment broker with a three-tier fraud engine
+    aidb: true                   # AIDB mode: retrieval and agent features (see docs/GUIDE.md; the Docker stack runs it, on AgentPG the step reports 'not available')
     extensions: [vector, query_advisor, edb_stat_monitor, edb_pg_tuner, fuzzystrmatch]
     generate: [PAYBROKER_ENCRYPTION_KEY]
     roles:

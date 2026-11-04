@@ -649,6 +649,29 @@ ships its masked views, this read-only user sees only them for those tables, and
 taken from the `postgres://` URL in `connection_string`; `agentpg connect --json` was tried live and only returns the hosted MCP URL), the config key names for a database entry (`databases:` map with `url`, `read_only_url`, `access_mode`,
 `max_connections`, as the CLI's help shows them; `read_only_url` comes from the platform probe), and the argument name of `execute_sql` (read from `tools/list`).
 
+### 7.11 `aidb` and the manifest's `aidb:` key
+
+```yaml
+apps:
+  trustdesk:
+    llm: true
+    aidb: true                       # retrieval and agent
+  pagerlens:
+    llm: true
+    aidb: {retrieval: true, agent: false}
+```
+
+`aidb:` is off by default and per app, for the apps that have an AIDB mode (`trustdesk`, `pagerlens`, `paybroker`, `citypulse`). Unknown keys, an app without an AIDB mode, `deploy: false`, an `agent` without `llm: true` (the
+agent's chat model is the gateway's), and a hand-set `<PREFIX>_RETRIEVAL_BACKEND` (or PayBroker's `PAYBROKER_TRIAGE_METHOD`, `PAYBROKER_ANALYST_QA`) in `env` are refused; the secrets-in-manifest rules are unchanged (the privileged connection string is never a manifest value).
+Where the platform can run it, ecoctl sets the app's own switches in its environment (`<PREFIX>_RETRIEVAL_BACKEND=aidb`; with `agent`, PayBroker's triage and analyst switches) and `aidb-setup` is an explicit step
+(`ecoctl dev up` runs it for each app, skipping one whose `/readyz` already says `ready`, then waits for `ready`; `ecoctl dev aidb-setup` runs it on its own).
+
+**On AgentPG nothing is switched on.** An instance's login role has no AIDB grants and `agentpg db-users` offers none that does, so the fleet path does not set the switches and the plan's step "AIDB mode" prints "not available on
+AgentPG" and goes on: the plan does not fail, and the apps stay on their own search. The Ansible recipe is unchanged and does not provision AIDB.
+
+`ecoctl aidb status` (for the Docker stack: `ecoctl --state .ecosystem-dev aidb status`) reads `/readyz` of each opted-in app and prints its AIDB state (`ready`, `not-set-up`, `unavailable`, `vault_locked`, `error`, `tampered`) with the reason, tampered definitions
+and features. Exit 1 on `error`, `tampered` or an unreachable app. It does not read pipeline lag or denials: those are in each app's own AIDB status and governance view. See [docs/10](10-docker-dev-stack.md).
+
 ## 8. The state file
 
 `.ecosystem/state.json` (directory mode 0700, file mode 0600, **git-ignored**). It is the only copy of everything `ecoctl` generated or was shown once,

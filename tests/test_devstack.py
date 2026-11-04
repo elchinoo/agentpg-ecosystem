@@ -132,24 +132,28 @@ def test_the_identity_dev_http_pair_is_set_for_identity_only():
     assert not [k for k, v in env.items() if k != "identity" and "IDENTITY_DEV_HTTP" in v.get("environment", {})]
 
 
+def _apps():
+    return load(MANIFEST).apps
+
+
 def test_an_aidb_check_passes_only_when_the_state_is_ready_for_apps_with_the_switch():
-    assert devstack.aidb_switch("paybroker") == "aidb" and devstack.aidb_switch("shopfront") == ""
-    ok, why = devstack.aidb_check("paybroker", {"status": "ready", "aidb": {"enabled": True, "state": "ready"}})
+    A = _apps()
+    ok, why = devstack.aidb_check(A["paybroker"], {"status": "ready", "aidb": {"enabled": True, "state": "ready"}})
     assert ok and "ready" in why
     for state in ("error", "tampered", "unavailable", "vault_locked", "not-set-up", "off"):
-        ok, why = devstack.aidb_check("paybroker", {"aidb": {"enabled": True, "state": state, "reason": "permission denied"}})
+        ok, why = devstack.aidb_check(A["paybroker"], {"aidb": {"enabled": True, "state": state, "reason": "permission denied"}})
         assert not ok and "paybroker" in why and f"state={state}" in why, (state, why)
     assert "permission denied" in why
-    assert not devstack.aidb_check("citypulse", {"aidb": {"enabled": False}})[0]            # switch on, but readyz says nothing is active
-    assert not devstack.aidb_check("pagerlens", {"status": "ready"})[0]                       # no AIDB part at all
-    assert devstack.aidb_check("pagerlens", {"aidb": {"requested_backend": "aidb", "state": "ready"}})[0]
+    assert not devstack.aidb_check(A["citypulse"], {"aidb": {"enabled": False}})[0]            # switch on, but readyz says nothing is active
+    assert not devstack.aidb_check(A["pagerlens"], {"status": "ready"})[0]                       # no AIDB part at all
+    assert devstack.aidb_check(A["pagerlens"], {"aidb": {"requested_backend": "aidb", "state": "ready"}})[0]
 
 
 def test_trustdesk_is_ready_when_retrieval_is_in_use_and_no_problem_is_reported():
-    assert devstack.aidb_check("trustdesk", {"aidb": {"requested": "aidb", "retrieval": True, "agent": True}})[0]
-    ok, why = devstack.aidb_check("trustdesk", {"aidb": {"requested": "aidb", "retrieval": False, "agent": False, "problem": "not_set_up"}})
+    assert devstack.aidb_check(_apps()["trustdesk"], {"aidb": {"requested": "aidb", "retrieval": True, "agent": True}})[0]
+    ok, why = devstack.aidb_check(_apps()["trustdesk"], {"aidb": {"requested": "aidb", "retrieval": False, "agent": False, "problem": "not_set_up"}})
     assert not ok and "trustdesk" in why and "not_set_up" in why
-    assert not devstack.aidb_check("trustdesk", {"aidb": {"requested": "aidb", "retrieval": True, "problem": "tampered"}})[0]
+    assert not devstack.aidb_check(_apps()["trustdesk"], {"aidb": {"requested": "aidb", "retrieval": True, "problem": "tampered"}})[0]
 
 
 def test_the_smoke_test_fails_an_app_whose_aidb_state_is_not_ready(monkeypatch):
@@ -162,8 +166,9 @@ def test_the_smoke_test_fails_an_app_whose_aidb_state_is_not_ready(monkeypatch):
             key = url.split("//")[1].split(".")[0]
             return NS(status_code=200, json=lambda: bodies.get(key, {}))
     monkeypatch.setattr(devstack.seal, "state_of", lambda url, http: "unsealed")
+    mm = load(MANIFEST)
     apps = [NS(key=k, web=False, llm=False) for k in ("paybroker", "citypulse")]
-    stack = NS(ctx=NS(http=Http(), gateway=lambda: None, state=None), m=NS(llm=None), active=lambda: apps)
+    stack = NS(ctx=NS(http=Http(), gateway=lambda: None, state=None), m=mm, active=lambda: apps)
     lines = {name: (ok, detail) for name, ok, detail in devstack.smoke(stack)}
     ok, detail = lines["paybroker reports its AIDB state and it is ready"]
     assert not ok and "paybroker" in detail and "state=error" in detail
@@ -174,6 +179,9 @@ def test_paybroker_dev_http_and_the_egress_option_are_dev_stack_only():
     svc = yaml.safe_load(COMPOSE.read_text())["services"]
     assert svc["paybroker"]["environment"]["PAYBROKER_DEV_HTTP"] == "1"
     assert not [k for k, v in svc.items() if k != "paybroker" and "PAYBROKER_DEV_HTTP" in v.get("environment", {})]
+    assert svc["paybroker"]["environment"]["PAYBROKER_DEV_WEBHOOK_HOSTS"] == "shopfront,shopfront.localhost"
+    assert not [k for k, v in svc.items() if k != "paybroker" and any(n.startswith("PAYBROKER_DEV_") for n in v.get("environment", {}))]
+    assert not [k for k, v in svc.items() if "PAYBROKER_ALLOW_PRIVATE_URLS" in v.get("environment", {})], "the SSRF guard is not switched off"
     assert svc["postgres"]["command"] == ["postgres", "-c", "shared_preload_libraries=aidb", "-c", "aidb.allow_insecure_egress=on"]
     assert "egress" not in (ROOT / "docker" / "aidb-postgres" / "Dockerfile").read_text(), "the option is not in the published image"
 
@@ -208,3 +216,25 @@ def test_a_real_provider_key_goes_to_the_gateway_only_after_the_limits_and_is_in
     st = State(tmp_path / "s")
     st.save()
     assert not (tmp_path / "s").exists() or secret not in (tmp_path / "s" / "state.json").read_text()
+
+
+def test_aidb_status_reads_each_opted_in_apps_readyz(tmp_path):
+    from types import SimpleNamespace as NS
+
+    from ecoctl import aidb
+    m = load(MANIFEST)
+    st = State(tmp_path / "s")
+    for k in ("trustdesk", "pagerlens", "paybroker"):
+        st.app(k)["url"] = f"http://{k}.localhost:1"
+    bodies = {"trustdesk": {"aidb": {"requested": "aidb", "retrieval": True, "agent": True}},
+              "pagerlens": {"aidb": {"state": "tampered", "tampered": ["pl_fence"]}}}
+
+    class Http:
+        def get(self, url, **k):
+            key = url.split("//")[1].split(".")[0]
+            if key == "paybroker":
+                raise httpx.ConnectError("down")
+            return NS(json=lambda: bodies[key])
+    rows = {a: (s, d) for a, s, d in aidb.status(NS(manifest=m, state=st), Http())}
+    assert rows["trustdesk"][0] == "ready" and rows["pagerlens"][0] == "tampered" and "pl_fence" in rows["pagerlens"][1]
+    assert rows["paybroker"][0] == "unreachable" and rows["citypulse"][0] == "no url"

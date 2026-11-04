@@ -31,6 +31,7 @@ import httpx
 import yaml
 from apgkit import sealed as kit
 
+from . import aidb as aidb_mod
 from . import seal
 from .connect import connect_step
 from .connect_client import ConnectError
@@ -47,8 +48,13 @@ REPOS = {"identity": "identity", "llmgw": "llm-gateway", "trustdesk": "trustdesk
          "citypulse": "CityPulse", "cpsim": "CityPulseSimulator", "shopfront": "shopfront"}
 # apps whose role gets `aidb_users` (and whose database gets the aidb extension): the ones that use AIDB. The others get neither (least privilege).
 AIDB_APPS = frozenset({"trustdesk", "pagerlens", "paybroker", "citypulse", "cpsim"})
-# the apps with an AIDB mode and an operator `aidb-setup` command; the stack runs them with <PREFIX>_RETRIEVAL_BACKEND=aidb (each falls back to its own search, loudly, until set up)
-AIDB_SETUP_APPS = ("trustdesk", "pagerlens", "paybroker", "citypulse")
+
+
+def aidb_apps(m: Manifest) -> list[str]:
+    """The apps that opted in with `aidb:` in the manifest and run in deployment order: the stack sets their switches (aidb.py) and runs their `aidb-setup`."""
+    return [a.key for a in deployed(m) if a.aidb]
+
+
 # extensions the manifest lists for a managed instance that the local image does not have (EDB platform extensions, PostGIS): skipped, the apps degrade without them
 NOT_IN_IMAGE = frozenset({"query_advisor", "edb_stat_monitor", "edb_pg_tuner", "postgis", "postgis_raster", "postgis_sfcgal", "postgis_tiger_geocoder", "postgis_topology"})
 # apps whose repository cannot boot sealed yet: skipped unless asked for with `--include`. The reason is printed on every `up`. (None at the moment: CityPulse
@@ -57,11 +63,15 @@ NOT_SEALABLE: dict[str, str] = {}
 # development-only settings, by app, on top of what the manifest says (never in a published image's .env.example). The stack is plain http on *.localhost, the
 # real fleet is https behind a proxy: identity refuses OAuth over http unless IDENTITY_DEV_HTTP=1 AND its issuer is an http loopback/*.localhost URL (its /readyz then
 # reports `insecure_transport_relaxed`).
+# (the AIDB switches come from the manifest's `aidb:` key, not from here)
 DEV_ENV = {"identity": {"IDENTITY_DEV_HTTP": "1"},
-           **{k: {f"{k.upper()}_RETRIEVAL_BACKEND": "aidb"} for k in ("trustdesk", "pagerlens", "paybroker", "citypulse")}}
-DEV_ENV["paybroker"].update({"PAYBROKER_TRIAGE_METHOD": "aidb_agent", "PAYBROKER_ANALYST_QA": "aidb"})       # the AIDB agent writes triage advice and answers /api/ask
-DEV_ENV["pagerlens"]["AUTO_SEED"] = "true"                # the demo fleet, so there is something to investigate
-DEV_ENV["paybroker"]["PAYBROKER_DEV_HTTP"] = "1"        # PayBroker accepts http `*.localhost` browser origins (ShopFront here) only with this
+           "pagerlens": {"AUTO_SEED": "true"},               # the demo fleet, so there is something to investigate
+           # CityPulse feeds itself: its built-in simulator (role `all`, one city) writes straight to its own database. CityPulse Simulator cannot feed it here: its targets may not be on a
+           # private address (every container address is) unless `CPSIM_ALLOW_PRIVATE_URLS=true`, a switch that turns that guard off and is not set.
+           "citypulse": {"CITYPULSE_ROLE": "all", "CITYPULSE_CITY": "paris", "SIM_SENSORS": "400"},
+           # PayBroker: http `*.localhost` browser origins (ShopFront here) only with DEV_HTTP, and webhooks to exactly these hosts (its SSRF guard stays on for every other private address;
+           # PAYBROKER_ALLOW_PRIVATE_URLS is not set). The host is the one ShopFront's webhook URL uses.
+           "paybroker": {"PAYBROKER_DEV_HTTP": "1", "PAYBROKER_DEV_WEBHOOK_HOSTS": "shopfront,shopfront.localhost"}}
 DB_NAME = re.compile(r"^[a-z][a-z0-9_]{1,30}$")
 # AIDB's http egress (dev option) is allowed to an IP literal only, never to a name, so the gateway gets a fixed address on a fixed network for `aidb-setup --agent`
 NETWORK_SUBNET = "10.213.77.0/24"
@@ -111,7 +121,7 @@ def dummy_context(m: Manifest, scratch: Path) -> Context:
         e = st.app(a.key)
         e["url"] = url_of(a.key)
         e["client_secret"] = e["service_secret"] = e["llm_key"] = "x"
-    return Context(m, st, None)                                                    # type: ignore[arg-type]  (no AgentPG: nothing here calls it)
+    return Context(m, st, None, aidb=True)                                                    # type: ignore[arg-type]  (no AgentPG: nothing here calls it)
 
 
 def public_env(ctx: Context, app: App) -> tuple[dict[str, str], set[str]]:
@@ -337,8 +347,9 @@ class Stack:
             if app.key == m.llm.gateway:
                 self.say(f"  {self.provider_step()}")
         self.groups()
-        problems = self.connections()
         self.dev_user()
+        self.aidb_phase()
+        problems = self.connections()
         if problems:
             raise DevError("the stack is up but not every connection could be made: " + "; ".join(problems))
         self.say(f"stack is up ({time.monotonic() - t0:.0f} s). Addresses: " + ", ".join(f"{a.key} {url_of(a.key)}" for a in deployed(m)))
@@ -409,6 +420,17 @@ class Stack:
             raise DevError(f"{key} aidb-setup failed (exit {code}): {' | '.join(out.splitlines()[-3:])[:400]}")
         return out
 
+    def storm(self, seconds: int = 120) -> str:
+        """CityPulse's burst button (every fault at once, ending by itself) so that bursts and degraded sensors exist for CityPulse's `/api/ask` to answer about."""
+        c, why = sign_in(self.ctx, "citypulse")
+        if c is None:
+            raise DevError(f"cannot sign in to citypulse: {why}")
+        with contextlib.closing(c):
+            r = c.post(url_of("citypulse") + "/api/chaos/storm", json={"seconds": seconds}, headers={"X-CityPulse-CSRF": "1"})
+        if r.status_code != 200:
+            raise DevError(f"citypulse refused the burst ({r.status_code}): {r.text[:200]}")
+        return f"burst started for {seconds} s: {len(r.json().get('ids', []))} faults"
+
     def reopen_if_locked(self, key: str) -> str:
         """An app whose AIDB state says `vault_locked` right after its setup (CityPulse: the setup creates the vault the seals need, the running process only opens its vault at unseal time and
         does not look again) is restarted and unsealed, which is what an operator would do. Returns a one-line outcome, or '' when nothing was needed."""
@@ -423,13 +445,30 @@ class Stack:
         self.sleep(3)
         return f"{key}: AIDB vault was locked after setup: restarted, {self.unseal(self.m.everything()[key])}"
 
+    def aidb_phase(self) -> None:
+        """The manifest's `aidb:` apps: run each one's `aidb-setup` unless its /readyz already says `ready` (a repeat changes nothing), then wait for `ready`."""
+        for key in aidb_apps(self.m):
+            if key in self.skipped:
+                continue
+            try:
+                body = (self.ctx.http or httpx).get(url_of(key) + "/readyz", timeout=15).json()
+            except (httpx.HTTPError, ValueError):
+                body = {}
+            if aidb_mod.state_of(body) == "ready":
+                self.say(f"{key}: AIDB already ready")
+                continue
+            self.aidb_setup(key, agent=self.m.apps[key].aidb.agent)
+            for note in (self.reopen_if_locked(key), self.wait_aidb_ready(key)):
+                if note:
+                    self.say(f"  {note}")
+
     def wait_aidb_ready(self, key: str, timeout: float = 150) -> str:
         """The apps look at their AIDB state again about once a minute (a fallback is re-examined every 60 s), so right after `aidb-setup` a running app still reports the old
         state. Wait for `ready` (up to `timeout`) and say how long it took, or what it still says."""
         t0, detail = time.monotonic(), ""
         while True:
             try:
-                ok, detail = aidb_check(key, (self.ctx.http or httpx).get(url_of(key) + "/readyz", timeout=15).json())
+                ok, detail = aidb_check(self.m.apps[key], (self.ctx.http or httpx).get(url_of(key) + "/readyz", timeout=15).json())
             except (httpx.HTTPError, ValueError) as exc:
                 ok, detail = False, type(exc).__name__
             if ok:
@@ -566,31 +605,12 @@ def service_call(ctx: Context, caller: str, callee: str, scope: str, path: str) 
     return got.status_code == 200, f"{callee}{path} answered {got.status_code}"
 
 
-def aidb_switch(key: str) -> str:
-    """The retrieval switch the stack sets for an app (`aidb` for the apps in DEV_ENV with <APP>_RETRIEVAL_BACKEND=aidb), else empty."""
-    return DEV_ENV.get(key, {}).get(f"{key.upper()}_RETRIEVAL_BACKEND", "")
-
-
-def aidb_state_of(body: dict) -> str:
-    """The AIDB state word of an app's /readyz body: `state` (PayBroker, PagerLens, CityPulse), or for TrustDesk (booleans and a one-word `problem`)
-    `ready` when retrieval is in use and nothing is wrong. `missing` when /readyz has no AIDB part at all."""
-    a = body.get("aidb")
-    if isinstance(a, str):
-        return a
-    if not isinstance(a, dict):
-        return "missing"
-    if a.get("state"):
-        return str(a["state"])
-    if "retrieval" in a:
-        return a.get("problem") or ("ready" if a["retrieval"] else "not-ready")
-    return "enabled" if a.get("enabled") else "off"
-
-
-def aidb_check(key: str, body: dict) -> tuple[bool, str]:
+def aidb_check(app: App, body: dict) -> tuple[bool, str]:
     """An app whose retrieval switch is `aidb` passes only when its AIDB state is `ready`: a state merely being reported (error, tampered, not-set-up,
     unavailable, vault_locked) is a failure, and the detail says which app and which state. An app without the switch only has to report."""
-    state, a = aidb_state_of(body), body.get("aidb")
-    if aidb_switch(key) != "aidb":
+    state, a = aidb_mod.state_of(body), body.get("aidb")
+    key = app.key
+    if not app.aidb or not app.aidb.retrieval:
         return state != "missing", f"{key} readyz aidb={json.dumps(a)}"
     reason = f" ({a['reason']})" if isinstance(a, dict) and a.get("reason") else ""
     return state == "ready", f"{key} AIDB state={state}, expected ready{reason}"
@@ -629,11 +649,11 @@ def smoke(stack: Stack) -> list[tuple[str, bool, str]]:
         check(f"dev-admin signs in to {a.key} through identity", lambda a=a: browser_login(ctx, a.key))
     if "cpsim" in live and "trustdesk" in live:
         check("a service token (cpsim-service) is accepted by trustdesk", lambda: service_call(ctx, "cpsim", "trustdesk", "trustdesk.requests.write", "/api/v1/request-types"))
-    for key in AIDB_SETUP_APPS:
+    for key in aidb_apps(m):
         if key in live:
             def aidb_state(key=key):
-                return aidb_check(key, http.get(url_of(key) + "/readyz").json())
-            check(f"{key} reports its AIDB state" + (" and it is ready" if aidb_switch(key) == "aidb" else ""), aidb_state)
+                return aidb_check(m.apps[key], http.get(url_of(key) + "/readyz").json())
+            check(f"{key} reports its AIDB state" + (" and it is ready" if m.apps[key].aidb.retrieval else ""), aidb_state)
     if "trustdesk" in live:
         def td_search():
             c, why = sign_in(ctx, "trustdesk")

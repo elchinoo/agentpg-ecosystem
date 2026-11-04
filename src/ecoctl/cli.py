@@ -216,7 +216,7 @@ def cmd_dev(args) -> int:
             print(f"wrote {compose}")
             return 0
         state = State(Path(args.dev_state))
-        ctx = Context(m, state, None)                                                  # type: ignore[arg-type]  (no AgentPG in the Docker stack)
+        ctx = Context(m, state, None, aidb=True)                                                  # type: ignore[arg-type]  (no AgentPG in the Docker stack)
         stack = devstack.Stack(ctx, compose, include={a.strip() for a in args.include.split(",") if a.strip()} if args.include else None)
         if args.action == "up":
             stack.up(build=not args.no_build, recreate={a.strip() for a in args.recreate.split(",") if a.strip()} if args.recreate else None)
@@ -233,6 +233,9 @@ def cmd_dev(args) -> int:
                     print(f"{app.key}: FAILED: {exc}", file=sys.stderr)
                     bad += 1
             return 2 if bad else 0
+        if args.action == "burst":
+            print(stack.storm(args.seconds))
+            return 0
         if args.action == "llm-provider":
             which = args.apps[0] if args.apps else ""
             if which not in devstack.REAL_PROVIDERS:
@@ -245,7 +248,7 @@ def cmd_dev(args) -> int:
             return 0
         if args.action == "aidb-setup":
             state.require_passphrase()
-            for key in args.apps or devstack.AIDB_SETUP_APPS:
+            for key in args.apps or devstack.aidb_apps(m):
                 print(f"== {key} aidb-setup")
                 print(stack.aidb_setup(key, agent=args.agent, reseal=args.reseal))
                 note = stack.reopen_if_locked(key)
@@ -274,6 +277,22 @@ def cmd_dev(args) -> int:
         print(f"dev: {exc}", file=sys.stderr)
         return 1
     return 1
+
+
+def cmd_aidb(args) -> int:
+    """`ecoctl aidb status`: each app that opted in with `aidb:` (state file: `--state`), with its /readyz AIDB state. Exit 1 on an error, a tampered definition or an unreachable app;
+    `unavailable` and `not-set-up` are reported, not failures (on AgentPG that is the honest answer)."""
+    from . import aidb as aidb_mod
+    ctx = Context(load(args.file), State(Path(args.state)), None, aidb=True)             # type: ignore[arg-type]  (reads only: no AgentPG needed)
+    rows = aidb_mod.status(ctx)
+    if not rows:
+        print("no app has `aidb:` in the manifest")
+        return 0
+    bad = 0
+    for app, state, detail in rows:
+        bad += state in {"error", "tampered", "unreachable"} or "TAMPERED" in detail
+        print(f"{app:<10} {state:<14} {detail}")
+    return 1 if bad else 0
 
 
 def cmd_seal_passphrase(args) -> int:
@@ -695,8 +714,10 @@ def main(argv: list[str] | None = None) -> int:
         if name == "claude":
             sp.add_argument("--project", action="store_true", help="project scope: print the .mcp.json content")
             sp.add_argument("--write", action="store_true", help="with --project: merge the entries into ./.mcp.json")
+    ad = sub.add_parser("aidb", help="AIDB mode of the apps that opted in with `aidb:` in the manifest").add_subparsers(dest="action", required=True)
+    ad.add_parser("status", help="each app's /readyz AIDB state (use --state .ecosystem-dev for the Docker stack)")
     dv = sub.add_parser("dev", help="the Docker development stack: the whole fleet on this machine, sealed like the real one (docker/README.md)")
-    dv.add_argument("action", choices=["render", "up", "unseal", "status", "test", "down", "password", "aidb-setup", "llm-provider"],
+    dv.add_argument("action", choices=["render", "up", "unseal", "status", "test", "down", "password", "aidb-setup", "llm-provider", "burst"],
                     help="render: write docker/compose.yml from the manifest (--check: only compare); up: build, start, seal, unseal, register, connect (safe to repeat); "
                          "unseal: after a restart; aidb-setup [APP...]: the apps' AIDB operator step; status; test: smoke checks; down: stop (-v: also data and state); password: the dev-admin login")
     dv.add_argument("apps", nargs="*", metavar="APP", help="unseal: only these apps")
@@ -708,6 +729,7 @@ def main(argv: list[str] | None = None) -> int:
     dv.add_argument("--chat-model", help="llm-provider: the upstream chat model (default: a small current one per provider)")
     dv.add_argument("--rpm", type=int, default=10, help="llm-provider: requests per minute of every gateway client (default 10)")
     dv.add_argument("--budget", type=int, default=300000, help="llm-provider: tokens per month of every gateway client, hard (default 300000)")
+    dv.add_argument("--seconds", type=int, default=120, help="burst: how long the burst lasts")
     dv.add_argument("--agent", action="store_true", help="aidb-setup: also register the gateway chat model and the agent (needs the gateway reachable from the database over http: see docs/10)")
     dv.add_argument("--reseal", action="store_true", help="aidb-setup: accept AIDB objects that no longer match their seal")
     dv.add_argument("--recreate", help="up: comma-separated apps whose container is created afresh (a new image, a new blob)")
@@ -716,7 +738,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         commands = {"validate": cmd_validate, "plan": cmd_plan, "apply": cmd_apply, "status": cmd_status, "env": cmd_env, "db": cmd_db, "recreate": cmd_recreate, "unlock": cmd_unlock,
                     "unseal": cmd_unseal, "seal-passphrase": cmd_seal_passphrase,
-                    "llm": cmd_llm, "dev": cmd_dev, "connect": cmd_connect, "insights": cmd_insights, "mcp": cmd_mcp}
+                    "llm": cmd_llm, "dev": cmd_dev, "aidb": cmd_aidb, "connect": cmd_connect, "insights": cmd_insights, "mcp": cmd_mcp}
         return commands[args.cmd](args)
     except ManifestError as exc:
         print(f"manifest error: {exc}", file=sys.stderr)
