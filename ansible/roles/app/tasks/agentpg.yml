@@ -1,5 +1,6 @@
 ---
-# Instance, extensions, sandbox, URL of one app (eco_item): what ecoctl's `_deploy` does, with the same `agentpg` commands. Existing instances and
+# Instance, extensions, sandbox, unseal, URL of one app (eco_item): what ecoctl's `_deploy` and unseal step do, with the same `agentpg` commands. The sandbox gets only
+# APGKIT_SEALED (its secrets, encrypted under the operator's passphrase) and non-secret settings. Existing instances and
 # sandboxes are kept; a changed environment is reported (eco_env_change: recreate applies it, eco_recreate forces it).
 # Check mode reads only: it says what would be created and changes nothing (the services' HTTP APIs are not touched).
 - name: "{{ eco_item.key }}: database instance {{ eco_item.instance_name }}"
@@ -11,6 +12,25 @@
     poll_interval: "{{ eco_poll_interval }}"
     timeout: "{{ eco_provision_timeout }}"
   register: eco_inst
+  ignore_errors: true
+  no_log: true                  # the answer carries the database key, which AgentPG shows only once
+
+- name: "{{ eco_item.key }}: keep the database key (shown only once) in the encrypted state, even if the run failed right after creating it"
+  eco_state:
+    op: put_db_key
+    path: "{{ eco_state_file }}"
+    passphrase: "{{ eco_seal_passphrase | default(omit) }}"
+    app: "{{ eco_item.key }}"
+    value: "{{ eco_inst.new_db_key }}"
+  register: eco_dbkey
+  ignore_errors: true
+  no_log: true
+  when: eco_inst.new_db_key | default('') | length > 0
+
+- name: "{{ eco_item.key }}: the database instance or its key could not be handled"
+  ansible.builtin.fail:
+    msg: "{{ eco_inst.msg | default('agentpg_instance failed') if eco_inst is failed else eco_dbkey.msg | default('the database key could not be kept: delete the instance and run again') }}"
+  when: eco_inst is failed or eco_dbkey is failed
 
 - name: "{{ eco_item.key }}: extensions"
   agentpg_extension:
@@ -22,28 +42,17 @@
     timeout: "{{ eco_provision_timeout }}"
   when: eco_item.extensions | length > 0
 
-- name: "{{ eco_item.key }}: its environment, split into plain values and secrets (the names ecoctl treats as secrets)"
-  ansible.builtin.set_fact:
-    eco_env_all: "{{ dict(lookup('ansible.builtin.template', 'app.env.j2').splitlines() | select | map('split', '=', 1)) }}"
-    eco_secret_names_of_app: >-
-      {{ eco_item.generate + ['IDENTITY_API_KEY', 'LLM_API_KEY', eco_item.env_prefix ~ '_API_KEY', eco_item.env_prefix ~ '_OIDC_CLIENT_SECRET',
-                              eco_item.env_prefix ~ '_SERVICE_CLIENT_SECRET'] }}
-  no_log: true
+- name: "{{ eco_item.key }}: its environment (plain values and secrets) and the sealed blob"
+  ansible.builtin.include_tasks: split_env.yml
 
-- name: "{{ eco_item.key }}: ... as two dictionaries"
-  ansible.builtin.set_fact:
-    eco_env: "{{ eco_env_all | dict2items | rejectattr('key', 'in', eco_secret_names_of_app) | items2dict }}"
-    eco_secret_env: "{{ eco_env_all | dict2items | selectattr('key', 'in', eco_secret_names_of_app) | items2dict }}"
-  no_log: true
-
-- name: "{{ eco_item.key }}: sandbox {{ eco_item.sandbox_name }} ({{ eco_item.image_ref }})"
+- name: "{{ eco_item.key }}: sandbox {{ eco_item.sandbox_name }} ({{ eco_item.image_ref }}): only APGKIT_SEALED and non-secret settings"
   agentpg_sandbox:
     name: "{{ eco_item.sandbox_name }}"
     image: "{{ eco_item.image_ref }}"
     instance_id: "{{ eco_inst.instance_id }}"
     port: "{{ eco_item.port }}"
-    env: "{{ eco_env }}"
-    secret_env: "{{ eco_secret_env }}"
+    env: "{{ eco_env | combine({'APGKIT_SEALED': eco_sealed.blob | default('not-sealed-in-check-mode')}) }}"
+    settings_hash: "{{ eco_settings_hash }}"
     auto_pause: "{{ eco_item.pause }}"
     plan: "{{ eco_item.plan_eff | default(omit, true) }}"
     recreate: "{{ eco_item.key in eco_recreate_set }}"
@@ -53,7 +62,7 @@
     poll_interval: "{{ eco_poll_interval }}"
     timeout: "{{ eco_provision_timeout }}"
   register: eco_sbx
-  no_log: true
+  no_log: true                  # the blob is ciphertext, but nothing about a secret needs to be in a log
 
 - name: "{{ eco_item.key }}: what AgentPG has, and what would change"
   ansible.builtin.debug:
@@ -71,12 +80,34 @@
       -e '{"eco_recreate": ["{{ eco_item.key }}"]}' or eco_env_change=recreate: the sandbox is deleted and created again, its database keeps its data.
   when: eco_sbx.env_differs | default(false)
 
+- name: "{{ eco_item.key }}: unseal it with the operator's passphrase (sent encrypted to a key that exists only in the app's process)"
+  eco_state:
+    op: unseal
+    url: "{{ eco_urls[eco_item.key] }}"
+    passphrase: "{{ eco_seal_passphrase | default(omit) }}"
+    validate_certs: "{{ eco_validate_certs }}"
+    timeout: "{{ eco_unseal_timeout }}"
+  register: eco_unsealed
+  ignore_errors: true
+  no_log: true
+  when: eco_http | bool and eco_urls[eco_item.key] | length > 0
+
+- name: "{{ eco_item.key }}: it could not be unsealed"
+  ansible.builtin.fail:
+    msg: "{{ eco_item.key }}: {{ eco_unsealed.msg | default('eco_state failed') }}"
+  when: eco_unsealed is failed
+
+- name: "{{ eco_item.key }}: unsealed"
+  ansible.builtin.debug:
+    msg: "{{ eco_unsealed.msg }}"
+  when: eco_unsealed is not skipped
+
 - name: "{{ eco_item.key }}: wait until it answers {{ eco_wait_path }}"
   ansible.builtin.uri:
     url: "{{ eco_urls[eco_item.key] }}{{ eco_wait_path }}"
     validate_certs: "{{ eco_validate_certs }}"
   vars:
-    eco_wait_path: "{{ '/readyz' if eco_item.key in ['identity', eco_fleet.llm.gateway] and eco_item.vault != 'password' else eco_item.health }}"        # a password vault is locked until the unlock task has run (right after this one): /readyz comes after it
+    eco_wait_path: "{{ '/readyz' if eco_item.key in ['identity', eco_fleet.llm.gateway] else eco_item.health }}"        # after the unseal above: /readyz says `locked` until then
   register: eco_up
   until: eco_up.status | default(0) == 200
   retries: 60

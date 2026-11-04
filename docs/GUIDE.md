@@ -560,10 +560,12 @@ The `vault` column comes from each app's public `GET /api/session`: `unlocked` (
 
 The first column holds manifest keys, identity first. The sample row is illustrative of the layout in `cmd_status`, not captured output.
 
-### 7.6 `env APP [--reveal]`
+### 7.6 `env APP`
 
-Prints the environment `APP` is created with, as `export NAME='value'` lines sorted by name. Secrets are `***` unless `--reveal` (which prints a warning to stderr). Works for
-any app key including `identity` and apps with `deploy: false`. It is offline: it reads the manifest and the state file only.
+Prints the names and non-secret values of the environment `APP` is created with, as `NAME=value` lines sorted by name; every secret is `NAME=***` and **there is no way to show one** (`--reveal` was removed). In a
+sealed fleet (the default) the sandbox holds only `APGKIT_SEALED` plus those non-secret settings, and a sealed secret is encrypted under your passphrase and opened only inside the app: nobody reads it back, you
+**rotate** it (`apply --execute --rotate`, or at its source: identity console for a client secret, gateway console for a key). A note on stderr says so. Works for any app key including `identity` and apps with
+`deploy: false`. It is offline: it reads the manifest and the state file only.
 
 ```bash
 .venv/bin/ecoctl env trustdesk
@@ -628,10 +630,10 @@ means every app that has an instance (`users`) or a stored user (the others), an
 | Command | What it does |
 |---|---|
 | `mcp users [APP...]` | Creates, once per instance, the database user `ecoctl_ai` with `agentpg db-users create <instance> --username ecoctl_ai --permission read --json` (a member of the group role `a1p_readonly`), reads the host, port and database from `connection_string` in `agentpg describe <instance> --json`, and keeps both in `.ecosystem/state.json` under `apps.<key>.mcp_user`. Run again, it reuses what is there. If the user exists on the platform but its password is not in the state file (AgentPG shows it once), it stops and tells you to delete it with `agentpg db-users delete <instance> ecoctl_ai`. The password is never printed |
-| `mcp config [APP...] [--file NAME]` | Writes an AgentPG MCP config into the state directory (mode 0600; default `databases.yaml`; `--file` is a file name, not a path): one `databases:` entry per instance with `access_mode: restricted`, `max_connections: 3`, and **both `url` and `read_only_url` set to the read-only user's connection string**, so `execute_sql` runs as that user whatever the mode. The file holds credentials: regenerate it, never share it |
-| `mcp serve [APP...] [--transport stdio\|http] [--port P] [--host H] [--file NAME]` | Writes the config and runs `agentpg mcp serve --config <file>`. **http always sets a generated `A1P_JWT_SECRET`** (kept in the state file as `mcp.jwt_secret`, never printed) because without it AgentPG's HTTP server answers anyone; it binds to `127.0.0.1` unless `--host` says otherwise (AgentPG's own default is `0.0.0.0`) and warns on a non-loopback address. Clients must send `Authorization: Bearer <JWT signed with that secret>`; the claims AgentPG expects **were not verified**, so check `agentpg mcp serve --help` and AgentPG's docs before relying on it. Select a database with the `X-A1P-Instance` header. stdio sends its notes to stderr (stdout is the protocol) |
-| `mcp claude [APP...] [--project] [--write]` | Prints the Claude Code entries for the **stdio** server. One server per app (`agentpg-<fleet>-<app>`), each with its own single-database config file (`databases-<app>.yaml` in the state directory), so which database a tool talks to never depends on a header. Default: one `claude mcp add <name> -- agentpg mcp serve --config <abs path> --transport stdio` line per app. `--project` prints the `.mcp.json` content (and the `--scope project` commands); `--project --write` merges the entries into `./.mcp.json`, keeping other servers. The entries name the config file only; the credentials stay in the state directory. Do not commit `.mcp.json` (it holds a local path) |
-| `mcp check [APP...]` | Starts `agentpg mcp serve` over stdio for each database (a temporary single-database config, removed afterwards), does the MCP handshake, calls `tools/list`, runs `select current_user` through `execute_sql` (must be `ecoctl_ai`) and then tries `create table ecoctl_write_probe (id int)`, which must be refused. If the write is accepted it says so loudly, tries to drop the table and exits 1 |
+| `mcp config [APP...] [--file NAME]` | Writes the AgentPG MCP config into the state directory as an **encrypted blob** (`apgkit-seal1$...`, your passphrase; mode 0600; default `databases.sealed`; `--file` is a file name, not a path): one `databases:` entry per instance with `access_mode: restricted`, `max_connections: 3`, and **both `url` and `read_only_url` set to the read-only user's connection string**, so `execute_sql` runs as that user whatever the mode. Never written as YAML; `agentpg` cannot read the blob itself, `mcp serve --from-file NAME` decrypts it |
+| `mcp serve [APP...] [--transport stdio\|http] [--port P] [--host H] [--from-file NAME]` | Builds the config from the encrypted state in memory (or opens the blob `NAME`) and runs `agentpg mcp serve --config /dev/fd/N`: the config goes through an inherited pipe, never a file (where `/dev/fd` is missing, a 0600 file in a fresh 0700 directory, removed on exit and on signals). `MCP_CONFIG` is removed from the child's environment. **http always sets a generated `A1P_JWT_SECRET`** (kept in the state file as `mcp.jwt_secret`, never printed) because without it AgentPG's HTTP server answers anyone; it binds to `127.0.0.1` unless `--host` says otherwise (AgentPG's own default is `0.0.0.0`) and warns on a non-loopback address. Clients must send `Authorization: Bearer <JWT signed with that secret>`; the claims AgentPG expects **were not verified**, so check `agentpg mcp serve --help` and AgentPG's docs before relying on it. Select a database with the `X-A1P-Instance` header. stdio sends its notes to stderr (stdout is the protocol) |
+| `mcp claude [APP...] [--project] [--write]` | Prints the Claude Code entries for the **stdio** server. One server per app (`agentpg-<fleet>-<app>`), each serving only its own database, so which database a tool talks to never depends on a header. Default: one `claude mcp add <name> -- ecoctl --state <dir> -f <manifest> mcp serve --transport stdio <app>` line per app (the server is `ecoctl mcp serve`, which decrypts the credentials at start and pipes them to `agentpg`). If `ECOCTL_SEAL_PASSPHRASE_CMD` is set when you run this, the stanza carries it as `env`. `--project` prints the `.mcp.json` content (and the `--scope project` commands); `--project --write` merges the entries into `./.mcp.json`, keeping other servers. The entries hold no credential and no passphrase. **The passphrase:** stdio has no prompt, so set `ECOCTL_SEAL_PASSPHRASE_CMD` to your password manager's command (for example `pass show ecoctl`) and the server fetches it at start; a `ECOCTL_SEAL_PASSPHRASE` exported in the shell that starts Claude Code is inherited by every tool Claude runs, so avoid it. Do not commit `.mcp.json` (it holds local paths) |
+| `mcp check [APP...]` | Starts `agentpg mcp serve` over stdio for each database (its single-database config goes through a pipe, never a file), does the MCP handshake, calls `tools/list`, runs `select current_user` through `execute_sql` (must be `ecoctl_ai`) and then tries `create table ecoctl_write_probe (id int)`, which must be refused. If the write is accepted it says so loudly, tries to drop the table and exits 1 |
 
 **What the read-only user can read.** Everything the apps have not masked: it is a plain read-only role, so every table in `public` that `a1p_readonly` can read by default privileges
 (default privileges grant it SELECT on new tables), including personal data, encrypted-at-rest columns as stored, audit logs and anything an app keeps in its tables. It cannot create,
@@ -654,15 +656,15 @@ and it is **encrypted at rest**: the file is an `apgkit-seal1$...` blob (AES-256
 only the blob, atomically, through a temporary file that never holds plaintext, so no plaintext secret touches the disk. The rows below describe what is **inside** the encrypted blob; there is no
 command that prints it.
 
-- **The passphrase** is `ECOCTL_SEAL_PASSPHRASE` or a prompt (asked twice when the file is created; `ecoctl seal-passphrase` prints a strong random one), once per run, and is the same one that seals the apps (section
+- **The passphrase** is `ECOCTL_SEAL_PASSPHRASE`, the output of `ECOCTL_SEAL_PASSPHRASE_CMD` (a command, e.g. your password manager's) or a prompt (asked twice when the file is created; `ecoctl seal-passphrase` prints a strong random one), once per run, and is the same one that seals the apps (section
   "Sealed boot"). It is never written anywhere. It is the single secret you hold: with it and the file, everything is recoverable; without it the file is unreadable (recover with `apply --execute --rotate`).
 - **Wrong passphrase:** `state error: ... wrong passphrase, or the file is damaged`, exit code 1, nothing printed from the file.
 - **An older, plaintext state file** is detected, read, and rewritten encrypted on the next save. The old bytes are overwritten in place before the replace (best effort: copy-on-write filesystems, SSDs, snapshots and backups can keep them,
   so rotate the secrets of a plaintext state that existed). ecoctl prints what it did. A `vault.admin_password` an older version kept is deleted in the same step.
 - **Which commands need the passphrase:** `validate`, and `plan` / `apply` (without `--execute`) when no state file exists yet, do not. Every command that reads an existing state file does, and `apply --execute`, `recreate`,
   `connect`, `mcp` and `db` ask for it before they create anything.
-- **Limits:** a compromised operator machine sees the passphrase and the decrypted state in memory while `ecoctl` runs (and in the environment of a shell that exports the passphrase). The files `ecoctl mcp` writes for
-  `agentpg mcp serve` (`databases*.yaml` in the state directory) hold a read-only database user's credentials in plain text (mode 0600) because that tool reads a plain file: delete them after use.
+- **Limits:** a compromised operator machine sees the passphrase and the decrypted state in memory while `ecoctl` runs (and in the environment of a shell that exports the passphrase). `ecoctl mcp` writes no
+  plaintext file: the config is an encrypted blob at rest and a pipe while served (see `SECURITY.md`; the running `agentpg` holds the credentials in its memory).
 
 | Path | Holds |
 |---|---|
@@ -719,7 +721,7 @@ role) and the LLM gateway (the real provider keys: money). For them there is no 
 
 - **Threat addressed.** A disclosure of the platform environment (sandbox environment, injected files, database credentials, a database copy) does not open the signing key or the provider keys: the unwrap secret is not on the platform.
 - **Not addressed.** Write access to an app's database is still control of that app. The data key sits in process memory while the app runs unlocked, so code execution inside the process reaches it (and the static `IDENTITY_API_KEY` / `LLMGW_API_KEY` stay wildcard operator credentials in the environment). The admin password is a high-value secret: keep it in a password manager and `.ecosystem/` private; a stolen database copy can be guessed against offline at the scrypt cost, so it must be long and random (`ecoctl seal-passphrase` makes one). Restarts need a human.
-- **Operational consequence.** After a platform restart, a recreate outside `ecoctl`, or a crash, identity and the gateway stay **locked** until `ecoctl unlock` (or the Ansible `unlock.yml`) runs. Locked identity cannot sign: new sign-ins and service tokens fail, `/readyz` says `locked`. Tokens already issued keep working until they expire, because the apps verify them offline against the published keys. A locked gateway answers `423`/`vault_locked` only for a stored real provider key; the built-in echo model needs none. `ecoctl status` shows `LOCKED`; `connect` refuses to start while identity is locked.
+- **Operational consequence.** After a platform restart, a recreate outside `ecoctl`, or a crash, identity and the gateway stay **locked** until `ecoctl unlock` (or the Ansible `unseal.yml`) runs. Locked identity cannot sign: new sign-ins and service tokens fail, `/readyz` says `locked`. Tokens already issued keep working until they expire, because the apps verify them offline against the published keys. A locked gateway answers `423`/`vault_locked` only for a stored real provider key; the built-in echo model needs none. `ecoctl status` shows `LOCKED`; `connect` refuses to start while identity is locked.
 - **Ordering.** In `apply`/`recreate` identity's vault is created or opened right after its sandbox exists and before its `/readyz` wait, before any client is registered and before any dependent starts; the gateway's right after its sandbox, before its clients' keys are used. A recreate therefore never leaves a health wait on a locked identity.
 - **Password sources.** `ECOCTL_ADMIN_PASSWORD`, `--admin-password-prompt`, the seal passphrase (sealed fleets). Never stored, never made up. Never in a sandbox environment, a plan, `ecoctl env`, an error or a log line.
 - **Choosing a mode.** `vault: platform` stays the default and the right choice for apps that must restart unattended (everything else in the shipped manifest). `vault: password` is accepted only for identity and the gateway; the manifest refuses it for any other app and says why.
@@ -752,13 +754,13 @@ avoids the question and is the plan in doc 04 (WP2). The apps do not publish ver
 
 `apply` does not create your first user. After the first deployment:
 
-1. Print the identity admin key (do not paste it anywhere): `ecoctl env identity --reveal | grep IDENTITY_API_KEY`. Open `https://<identity>/admin`, expand "Use the server's API key instead", sign in.
-2. Settings, Admin password: set one (12 or more characters).
+1. Open `https://<identity>/admin` and sign in with the **admin password**, which is your seal passphrase (the identity API key is sealed in the app and nobody reads it back; `ecoctl` uses it for automation).
+2. Optional, Settings, Admin password: change it only together with what `ecoctl` uses (a changed password needs `ECOCTL_ADMIN_PASSWORD` or the prompt from then on).
 3. Users, New user: create yourself. Groups, `ecosystem-admins`: add yourself. That group has `admin` in every app. `risk-team` (PayBroker `risk_manager`, PagerLens `viewer`) and `support` (TrustDesk `approver`) are narrower.
 4. Open `https://<identity>/apps`, the launcher, and sign in to each app.
 
 Not done by `ecoctl`: Google or GitHub login (identity console, Federation), a real model provider (gateway console), the simulators' targets, and the PagerLens agent's scrape targets
-(`ecoctl env pagerlens-agent --reveal`, then the agent's own `agent.yaml`).
+(`ecoctl env pagerlens-agent` shows its non-secret settings; its client secret is issued in the identity console, then the agent's own `agent.yaml`).
 
 ## 12. Recovery and troubleshooting
 
@@ -886,7 +888,7 @@ Assume an app built on `agentpg-kit` that reads `<PREFIX>_OIDC_*` variables, ser
 9. **Tests.** Add the app to the manifest tests if it introduces a new shape. Add `e2e/harness/apps/<app>.ts`, register it in `harness/fleet.ts` (`AppName`) and `harness/apps/index.ts`, and write `e2e/tests/<app>.spec.ts` (section 14).
 10. **Update this guide**: the table in 6.6 and the diagram in section 3.
 
-Not-an-app: a job or CLI that runs elsewhere is `deploy: false` and `web: false` with `calls`, like `pagerlens-agent`; `ecoctl env <key> --reveal` prints its settings.
+Not-an-app: a job or CLI that runs elsewhere is `deploy: false` and `web: false` with `calls`, like `pagerlens-agent`; `ecoctl env <key>` prints its non-secret settings (its secrets are issued at their source: the identity console, the gateway console).
 
 ## 17. Known gaps and documentation differences
 

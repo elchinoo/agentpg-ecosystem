@@ -26,7 +26,7 @@ tag, check (`--check`), vault, and put in your own pipeline.
 | Order | identity, then apps callees-first | identical |
 | Use it when | you want the fleet and its operations (status, llm sync, insights, MCP, db keys) from one tool | your team already runs everything through Ansible: inventories, tags, `--check`, Vault, CI, AWX |
 | Dry run | `ecoctl plan` prints every command | `--check` reads from AgentPG and reports what it would create or change; `agentpg` commands are not printed |
-| State and secrets | `.ecosystem/state.json` | `ansible/.secrets/<fleet>/` (generated once, mode 0600) plus `ansible-vault` for values you supply |
+| State and secrets | `.ecosystem/state.json`, encrypted under your passphrase | `ansible/.secrets/<fleet>/state.sealed`, **the same encryption and passphrase** (`ECOCTL_SEAL_PASSPHRASE`), plus `ansible-vault` for values you supply |
 | Changed environment | reported by `apply`; `ecoctl recreate` applies it | reported; `eco_env_change: recreate` or `-e '{"eco_recreate": [...]}'` applies it, with dependents |
 | Operations after deploy | `status`, `llm test|sync`, `insights`, `mcp ...`, `db`, `env`, `connect` | `verify.yml` (health, one LLM call per client, registry). The rest: use `ecoctl`, or the AgentPG CLI |
 | Speed | the same: minutes, mostly AgentPG creating instances and sandboxes | the same, plus Ansible's own overhead |
@@ -43,8 +43,9 @@ Pick a different `fleet:` name (it prefixes every instance and sandbox) when you
 - **Control node, AgentPG target: `ansible-core` only** (written and checked with 2.21; older versions are untested) and Python 3.9+. No collections, no extra Python packages, no
   SSH hosts. It runs everything and must reach the sandboxes' https URLs. (A test fails if a collection module, filter or lookup creeps into this path.) `requirements.yml` (the
   `community.postgresql` collection) is for the hosts target only.
-- A machine you trust: secrets reach sandboxes as `--env` values on the `agentpg` command line, so they pass through that machine's process list for a moment
-  (the same as `ecoctl`), and `ansible/.secrets/` holds every secret (section 7).
+- A machine you trust, with `agentpg-kit` in the Python environment that runs Ansible (`pip install agentpg-kit`: the recipe reuses its `apgkit.sealed` for the blob format and the unseal; it
+  needs `cryptography` and `fastapi`, which it pulls in). Sandboxes are created **sealed**: only `APGKIT_SEALED` (ciphertext) and non-secret settings reach the `agentpg` command line, so nothing secret passes
+  through the process list; `ansible/.secrets/<fleet>/state.sealed` holds every secret, encrypted (section 7).
 
 ## 4. A first dry run (reads only)
 
@@ -61,8 +62,7 @@ sed 's/^fleet: eco /fleet: ecoans /' ../ecosystem.yaml > /tmp/ecosystem-ansible-
 
 `--check` runs only `agentpg instances list` and `agentpg sandbox list` and prints, per app, lines such as
 `instance ecoans-trustdesk-db would be created; sandbox: would create sandbox ecoans-trustdesk from ghcr.io/elchinoo/trustdesk:latest`. It creates nothing on AgentPG and
-does not call any app. It does write `ansible/.secrets/` (the generated keys) because the secret lookups run on the control node regardless; the files are reused by
-the real run.
+does not call any app. It reads `ansible/.secrets/<fleet>/state.sealed` (it needs the passphrase) but writes nothing to it, and creates no secret: generated values are made in memory for the dry run only.
 
 ## 5. Run it
 
@@ -86,7 +86,7 @@ Stages, their tags, and what each does on AgentPG:
 | `access` | groups and role grants of `access.groups` (`*` means every web app that has the role) | `_group` |
 | `connect` | ShopFront to PayBroker: service tokens, merchant, one allowed origin, two keys, the webhook (the signing secret rotates only when needed), the shop's settings by fingerprint, the shop's own test | `ecoctl connect` |
 | `verify` | `/healthz`, `/readyz`, the vault state of every app, one chat call per gateway client, the registry | `ecoctl status` |
-| `unlock` (playbook `unlock.yml`) | opens the vault of every app with `vault: password`, identity first; never creates one | `ecoctl unlock` |
+| `unseal` (playbook `unseal.yml`; `unlock.yml` is an alias) | sends the passphrase, encrypted to each app's own key, identity first; the same step runs right after a sandbox or container is created. It also opens the vaults of `vault: password` apps (the passphrase is their admin password) | `ecoctl unseal` |
 
 The commands are those of `ecoctl` (`agentpg create --name N --size S --json`, `extensions create <ext> <instance>`, `sandbox create N --image I --instance ID --port P
 [--auto-pause=false] [--plan X] --env K=V ...`, `sandbox delete ID --force`); `tests/test_ansible_recipe.py` compares their arguments with `ecoctl.agentpg.AgentPG`, and the
@@ -127,7 +127,7 @@ Safety rails (each is tested):
 - **Idempotent.** An object already gone is reported (`already gone`) and is not a change; a second run changes nothing.
 - `-e '{"eco_destroy_only": ["trustdesk"]}'` deletes just those apps (identity only if you list `identity`).
 
-What it does **not** delete: anything outside the fleet name; the local `ansible/.secrets/<fleet>/` (generated keys, client secrets, the database keys), unless you add `-e eco_destroy_secrets=true`
+What it does **not** delete: anything outside the fleet name; the local `ansible/.secrets/<fleet>/` (the encrypted `state.sealed`: generated keys, client secrets, the database keys), unless you add `-e eco_destroy_secrets=true`
 (it then removes that directory, and only when it is named after the fleet; the default prints a reminder); the apps' `ghcr.io` images; anything created by hand in the sandboxes. The state
 of an app (`agentpg/<app>.json`) is removed together with its instance, since it describes an instance that no longer exists. `eco_target: hosts` has no teardown (remove the containers and databases yourself).
 
@@ -184,61 +184,58 @@ still registers every app in it, with its admin key in `eco_secret_overrides["id
 
 ## 7. State and secrets
 
-Everything generated lives in `ansible/.secrets/<fleet>/` (git-ignored; directories `0700`, files `0600`):
+**Seal-first, like `ecoctl`.** The recipe never renders a secret into a sandbox or an env file. For each app it builds, in memory on the control node, one blob (`APGKIT_SEALED`: the app's secrets and
+`DATABASE_URL`, AES-256-GCM under a key derived with scrypt from your passphrase; agentpg-kit `apgkit.sealed`, the format `ecoctl` uses) and creates the sandbox (or writes the env file on your own host) with only
+that blob and the non-secret settings. Then it **unseals** the app: it sends the passphrase, encrypted to a key that exists only in that app's process, and waits for `/healthz`. `site.yml` refuses a manifest with
+`agentpg.seal: false`. A blob differs on every run, so the recipe compares the hash of the plain settings (`settings_hash`, as `ecoctl` does), not the ciphertext: a run with nothing changed changes nothing.
 
-- `generated/<app>/<NAME>`: the `generate:` encryption keys, the identity admin key, the gateway operator key. Created on first use by Ansible's `password` lookup, never changed afterwards.
-- `issued/<app>/<kind>`: values a service shows **once**: client secrets, gateway keys, merchant keys, the webhook signing secret. Kept the moment they are issued; a lost one is replaced on
-  the next run (a client secret or gateway key is rotated) and the sandbox that holds it needs recreating (`eco_recreate`).
-- `agentpg/<app>.json`: what `ecoctl` keeps in `state.json` for an app: `instance_id`, `sandbox_id`, `url`, the extensions created, the environment hash and the **database key**
-  (AgentPG shows it once, at creation; it is also the database password). The modules never print it.
+**The passphrase** is `ECOCTL_SEAL_PASSPHRASE` in the environment of `ansible-playbook` (use your password manager's CLI, not a typed value in shell history), or `-e eco_seal_passphrase_prompt=true` (hidden, asked
+twice the first time, kept in a fact for the run). It is stored nowhere, and it is the same passphrase `ecoctl` uses (`ecoctl seal-passphrase` makes a strong one): a fleet can be operated with either tool.
 
-Treat the directory like a password file and back it up privately: it is the only copy. To keep it encrypted between runs:
+Everything secret the recipe holds is in **one encrypted file**, `ansible/.secrets/<fleet>/state.sealed` (git-ignored; directory `0700`, file `0600`; an `apgkit-seal1$...` blob, written atomically through a temporary
+file that only ever holds ciphertext). Inside: the instances' **database keys** (AgentPG shows one once, at creation; the module returns it once and the playbook keeps it before anything can fail), the `generate:`
+secrets (the identity admin key, the gateway operator key, the encryption keys), and the values a service shows **once** (client secrets, gateway keys, merchant keys, the webhook signing secret; a lost one is replaced on the next
+run and the sandbox that holds it recreated, `eco_recreate`). `.secrets/<fleet>/agentpg/<app>.json` remains, with no secret in it: `instance_id`, `sandbox_id`, `url`, the extensions, the settings hash.
 
-```bash
-tar czf eco-secrets.tgz .secrets && ansible-vault encrypt eco-secrets.tgz && rm -r .secrets     # later: ansible-vault decrypt eco-secrets.tgz && tar xzf eco-secrets.tgz
-```
+The crypto runs in an **action plugin** (`plugins/action/eco_state.py`, the module `eco_state`) in the `ansible-playbook` process, so the passphrase and the secrets are never serialised into a module payload;
+`pipelining` is on, so a module's arguments (a bearer token in `uri`) never reach a temporary file either; every task that carries a secret is `no_log: true`, and the failures that matter (a wrong passphrase) are re-raised in
+the clear. **Upgrading from an older recipe:** the first run moves `generated/`, `issued/`, `vault/admin_password` and the `db_key` of `agentpg/*.json` into `state.sealed`, overwrites the old files and removes them
+(best effort: copy-on-write filesystems, SSD wear levelling, snapshots and backups can keep old bytes, so treat secrets that were ever plaintext as exposed and rotate them). Sandboxes created by the old recipe hold
+their secrets in their environment: recreate them (`-e eco_env_change=recreate`) so they are sealed. Vaults an old recipe created with its generated admin password need the passphrase as their password: the old one is kept
+encrypted in `state.sealed` (`legacy`), but moving a vault to a new password is not automated (see [DEPLOY.md](DEPLOY.md), moving an existing fleet); the supported move is a new database for identity and the gateway.
 
-Values **you** supply go into a file you encrypt:
+Back up `state.sealed` like `ecoctl` state: it is the only copy of the client secrets and database keys, and it is useless without the passphrase. Values **you** supply go into an Ansible Vault file:
 
 ```bash
 cp inventories/agentpg/group_vars/all/vault.yml.example inventories/agentpg/group_vars/all/vault.yml
 $EDITOR inventories/agentpg/group_vars/all/vault.yml
 ansible-vault encrypt inventories/agentpg/group_vars/all/vault.yml
-ansible-playbook site.yml --ask-vault-pass                           # or --vault-password-file ~/.eco-vault-pass
+ECOCTL_SEAL_PASSPHRASE=... ansible-playbook site.yml --ask-vault-pass                           # or --vault-password-file ~/.eco-vault-pass
 ansible-vault edit inventories/agentpg/group_vars/all/vault.yml
 ansible-vault encrypt_string --stdin-name eco_llm_api_key            # one value, to paste into a plain vars file
 ```
 
-`eco_secret_overrides` (`"<app>/<NAME>": value`) replaces any generated secret. The repository ships only `vault.yml.example`, and a test fails if a plain `vault.yml` or a
-secret-looking literal appears in `ansible/`. Tasks that handle secrets use `no_log`; the modules take secrets in `no_log` parameters and never return them; do not run with `-vvv`
-on a shared terminal. Check mode still creates missing generated secrets (section 4).
+`eco_secret_overrides` (`"<app>/<NAME>": value`) replaces any generated secret (used, never stored). The repository ships only `vault.yml.example`, and a test fails if a plain `vault.yml` or a
+secret-looking literal appears in `ansible/`. **Honest limits:** the passphrase and the decrypted secrets are in the memory of `ansible-playbook` while it runs; the `uri` tasks put bearer tokens in HTTP
+requests (in memory, over TLS); on `eco_target: hosts` the throwaway demo database container still takes its password as a `docker run --env` argument and the `community.postgresql` modules take database logins as
+module arguments; an Ansible Vault file you supply is yours to protect. `-vvv` on a shared terminal is still unwise.
 
-## 7a. The vault password (identity and the gateway)
+## 7a. Unsealing, the vaults, and restarts
 
-The manifest sets `vault: password` for identity and the gateway: their sandboxes get **no** `IDENTITY_ENCRYPTION_KEY` / `LLMGW_ENCRYPTION_KEY`, and their vaults are created and opened with an admin password that
-the platform never stores (policy, threat model and limits: [GUIDE section 9a](GUIDE.md#9a-the-vault-policy-identity-and-the-gateway-are-opened-by-the-operator), [SECURITY.md](../SECURITY.md)). The recipe does what
-`ecoctl` does, over the apps' own API (`GET /api/session`, `POST /api/admin-password` the first time, `POST /api/vault/unlock` after a restart). Where the password comes from:
+The manifest sets `vault: password` for identity and the gateway: their sandboxes get **no** `IDENTITY_ENCRYPTION_KEY` / `LLMGW_ENCRYPTION_KEY` (and, sealed, no encryption key at all: it is dropped from the blob, the
+passphrase is the only unlock secret) and their vaults use the **passphrase as the admin password**, created and opened by the unseal itself (policy, threat model and limits:
+[GUIDE section 9a](GUIDE.md#9a-the-vault-policy-identity-and-the-gateway-are-opened-by-the-operator), [SECURITY.md](../SECURITY.md)). There is no admin password file, variable or `ECO_ADMIN_PASSWORD` any more.
 
-| Source | How |
-|---|---|
-| Your own, in Ansible Vault | `eco_admin_password: "..."` in `inventories/agentpg/group_vars/all/vault.yml` (encrypted, see above) |
-| Your own, from the environment | `ECO_ADMIN_PASSWORD` on the control node (the default of `eco_admin_password`); use your password manager's CLI, not a typed value in shell history |
-| Prompt | `-e eco_admin_password_prompt=true` (hidden, never written down) |
-| Generated once | none of the above: a strong one is written to `.secrets/<fleet>/vault/admin_password` (mode 0600, git-ignored) on the first run; the run says so, and you copy it to your password manager. The password is not printed |
-
-A vault that already exists is never given a made-up password: if no password was given and the generated file did not exist before the run, the play stops. Every task that touches the password or the operator keys has
-`no_log: true` (a test checks all of them, and a real run at `-vvv` against local services checks nothing leaks).
-
-`site.yml` creates the vaults in order (identity: container, `/healthz`, **vault**, `/readyz`, issuer; the gateway: container, vault; only then clients and dependents), and re-runs change nothing (`changed=0`: an open vault is
-left alone). **After a platform restart** run `ansible-playbook unlock.yml`: it opens what is locked (`changed` counts the vaults it opened) and never creates one (`-e eco_vault_create=true` lifts that). Until it has run,
-identity cannot sign (new sign-ins and service tokens fail; issued tokens keep working until they expire) and the gateway cannot use a stored provider key. `verify.yml` reports each app's vault (`unlocked`, `LOCKED`, `auto`) and
-fails while a `vault: password` app is locked. With `eco_identity_mode` or `eco_llm_mode` other than `managed` the recipe does not run that app and leaves its vault to its owner.
+`site.yml` creates each app sealed and unseals it before waiting for `/healthz`/`/readyz` (identity first, then the gateway, then the rest), and re-runs change nothing (`changed=0`: an open app is left alone). **After a platform
+restart** every sealed app is sealed again: run `ECOCTL_SEAL_PASSPHRASE=... ansible-playbook unseal.yml` (`unlock.yml` is an alias). Until it has run, identity cannot sign (new sign-ins and service tokens fail; issued
+tokens keep working until they expire) and the gateway cannot use a stored provider key. `verify.yml` reports each app's vault (`unlocked`, `LOCKED`, `auto`) and fails while a `vault: password` app is locked. With
+`eco_identity_mode` or `eco_llm_mode` other than `managed` the recipe does not run that app and leaves it to its owner.
 
 ## 8. What Ansible does not do that `ecoctl` does
 
 - `status` beyond `verify.yml`: no live CPU/memory/network, no drift table of gateway limits (`ecoctl llm sync`), no connection table.
-- `ecoctl llm test|sync`, `insights`, `mcp users|config|serve|claude|check`, `db <app>` (print or reset a database key), `env <app> --reveal`, `plan` (the printed command list).
-- Rotation on request: delete a file under `.secrets/` and re-run (the lost secret is re-issued); there is no `--rotate`.
+- `ecoctl llm test|sync`, `insights`, `mcp users|config|serve|claude|check`, `db <app>` (print or reset a database key), `env <app>` (names and masked values; there is no way to show a secret), `plan` (the printed command list).
+- Rotation on request: there is no `--rotate`. Rotate the secret at its source (identity console, gateway console), or remove the entry from the state by recreating the app; a service-issued secret that is no longer held is re-issued on the next run.
 - Confirmation prompt and parallel metric reads. Ansible runs what you tell it to.
 - Recovering a database key that was not saved: if the instance exists but `agentpg/<app>.json` has no key, the recipe cannot reset it (`ecoctl db --reset` can).
 - Teardown: the recipe has one (`destroy.yml`, section 6a); `ecoctl` deliberately has none ([DEPLOY section 14](DEPLOY.md#14-tear-it-all-down)).
@@ -250,20 +247,21 @@ AgentPG's whichever tool created the fleet.
 
 ## 9. Tags, files
 
-`ansible/`: `site.yml` (the stages), `unlock.yml` (open the password vaults after a restart), `destroy.yml` (teardown), `infra_hosts.yml` (hosts target only), `verify.yml`, `library/agentpg_{instance,extension,sandbox}.py` with `module_utils/eco_agentpg.py`
-(the CLI wrapper; `ansible-doc -M library agentpg_sandbox` shows each module), `plugins/filter/eco.py` (reads the manifest), `roles/` (`common`, `identity`, `llm_gateway`, `app`,
-`connect`, `verify`, `vault`; for hosts also `container_host`, `postgres_db`, `proxy`), `inventories/agentpg` (default), `inventories/own-infra`, `inventories/own-infra-local`.
+`ansible/`: `site.yml` (the stages), `unseal.yml` (open the sealed apps after a restart; `unlock.yml` is an alias), `destroy.yml` (teardown), `infra_hosts.yml` (hosts target only), `verify.yml`, `library/agentpg_{instance,extension,sandbox}.py` with `module_utils/eco_agentpg.py`
+(the CLI wrapper; `ansible-doc -M library agentpg_sandbox` shows each module), `plugins/filter/eco.py` (reads the manifest), `plugins/action/eco_state.py` with `module_utils/eco_state.py` (the encrypted state, the sealed blob and the unseal), `roles/` (`common`, `identity`, `llm_gateway`, `app`,
+`connect`, `verify`; for hosts also `container_host`, `postgres_db`, `proxy`), `inventories/agentpg` (default), `inventories/own-infra`, `inventories/own-infra-local`.
 All variables and their defaults: `roles/common/defaults/main.yml`.
 
 ## 10. What was verified (and what was not)
 
 | Check | Result |
 |---|---|
-| `ansible-playbook --syntax-check`, `ansible-inventory --graph`, `ansible-lint`, `yamllint`, `ansible-doc` of the modules | pass |
+| `ansible-playbook --syntax-check` (re-run after the sealed-first change); `ansible-inventory --graph`, `ansible-lint`, `yamllint`, `ansible-doc` (before it; not re-run: not installed where the change was made) | pass |
 | `tests/test_ansible_recipe.py` (manifest sync, env of every app equal to `ecoctl.plan.app_env` for both targets, order, specs, command arguments equal to `ecoctl.agentpg.AgentPG`, the modules' behaviour against ecoctl's in-memory fake CLI (plus an `instances delete`): teardown leaves the fake account empty, a second one changes nothing, wrong confirmation refused, a similarly named foreign instance untouched, check mode deletes nothing; create, converge, changed environment, recreate, deleted sandbox, existing sandbox, check mode, wait loops, state mode 0600) | pass |
-| The **whole AgentPG-target playbook** against a **stand-in `agentpg` executable** (ecoctl's fake CLI, with state kept between calls) and ecoctl's in-memory identity, gateway, PayBroker and ShopFront fakes served over HTTP: create, no-op re-run (0 mutating calls), `--check` (only `instances list` and `sandbox list`), `eco_recreate` of the gateway (sandbox deleted and created again for it and its dependents, instances and extensions untouched), changed environment reported then applied, interrupted run resumed | ran |
+| The **whole AgentPG-target playbook** against a **stand-in `agentpg` executable** (ecoctl's fake CLI, with state kept between calls) and ecoctl's in-memory identity, gateway, PayBroker and ShopFront fakes served over HTTP: create, no-op re-run (0 mutating calls), `--check` (only `instances list` and `sandbox list`), `eco_recreate` of the gateway (sandbox deleted and created again for it and its dependents, instances and extensions untouched), changed environment reported then applied, interrupted run resumed | ran **before the sealed-first change; not re-run since** |
 | The AgentPG path in a **clean venv with only `ansible-core`** and no collections visible (`ANSIBLE_COLLECTIONS_PATH=/nonexistent`): syntax check, inventory, `--check` and apply | ran |
-| The vault tasks (`unlock.yml`, the role `vault`) with real Ansible against **local stand-ins** of the two APIs (`tests/test_ansible_recipe.py`), and against the **real identity and llm-gateway** started locally on a throwaway Postgres: create, `changed=0` re-run, restart, unlock (`changed=2`), wrong password refused, password never in the output at `-vvv` | ran |
+| `unseal.yml` and `unlock.yml` with real Ansible against **local stand-ins** that serve the kit's real `/_seal` endpoints (`tests/test_ansible_recipe.py`, needs `ansible-playbook` with agentpg-kit on the PATH): both apps unseal, identity first; `changed=0` re-run; restart then unseal; wrong passphrase refused and nothing opens; an older recipe's plaintext secret files moved into `state.sealed` and removed; passphrase and keys never in the output at `-vvv`. The earlier vault-password flow against the **real identity and llm-gateway** was run before this change and is **not** re-run for the sealed flow | ran (stand-ins) |
+| A whole `site.yml` run with the sealed flow (instance, blob, sandbox, unseal) against a stand-in `agentpg` and the real apps | **not run**: the unit tests cover each step (the blob equals `ecoctl`'s, the settings hash equals `ecoctl`'s, the key survives a failure, the state migrates) and the task order is asserted |
 | The real `agentpg` CLI, a real AgentPG account, the real identity, gateway, PayBroker and ShopFront servers | **not run** |
 | The `hosts` target: its `db` stage against a real scratch Postgres 17, the rest against a stand-in `docker` | ran; real Docker, Caddy and TLS **not run** |
 

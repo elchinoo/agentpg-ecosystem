@@ -1,0 +1,50 @@
+---
+# The environment of one app (eco_item), in memory: the contract of ecoctl's app_env, split into plain settings and secrets (the names ecoctl treats as secrets).
+# Nothing here is written anywhere: the secrets go into the sealed blob (APGKIT_SEALED), the plain settings into the sandbox or the env file.
+- name: "{{ eco_item.key }}: its environment, split into plain values and secrets"
+  ansible.builtin.set_fact:
+    eco_env_all: "{{ dict(lookup('ansible.builtin.template', 'app.env.j2').splitlines() | select | map('split', '=', 1)) }}"
+    eco_secret_names_of_app: >-
+      {{ eco_item.generate + ['IDENTITY_API_KEY', 'LLM_API_KEY', eco_item.env_prefix ~ '_API_KEY', eco_item.env_prefix ~ '_OIDC_CLIENT_SECRET',
+                              eco_item.env_prefix ~ '_SERVICE_CLIENT_SECRET'] + (['DATABASE_URL'] if eco_target == 'hosts' else []) }}
+  no_log: true
+
+- name: "{{ eco_item.key }}: ... as two dictionaries, and the hash of the plain environment that the sandbox records"
+  ansible.builtin.set_fact:
+    eco_env: "{{ eco_env_all | dict2items | rejectattr('key', 'in', eco_secret_names_of_app) | items2dict }}"
+    eco_secret_env: "{{ eco_env_all | dict2items | selectattr('key', 'in', eco_secret_names_of_app) | items2dict }}"
+    eco_settings_hash: "{{ eco_env_all | eco_env_hash }}"
+  no_log: true
+
+- name: "{{ eco_item.key }}: a sealed fleet is the only kind this recipe makes"
+  ansible.builtin.assert:
+    that: eco_fleet.agentpg.seal | bool
+    fail_msg: >-
+      agentpg.seal is false in the manifest. This recipe never renders a secret into a sandbox or an env file: set `seal: true` (the default) or use ecoctl with its
+      explicit unsealed warning.
+    quiet: true
+
+- name: "{{ eco_item.key }}: the sealed blob (its secrets and DATABASE_URL, encrypted under the passphrase; made here, in memory)"
+  eco_state:
+    op: seal
+    path: "{{ eco_state_file }}"
+    passphrase: "{{ eco_seal_passphrase | default(omit) }}"
+    app: "{{ eco_item.key }}"
+    instance_id: "{{ eco_inst.instance_id | default('') }}"
+    secret_env: "{{ eco_secret_env }}"
+    drop: "{{ eco_item.encryption_key_name }}"
+    agentpg_bin: "{{ eco_agentpg_bin }}"
+  register: eco_sealed
+  ignore_errors: true
+  no_log: true
+  when: eco_http | bool
+
+- name: "{{ eco_item.key }}: sealing failed"
+  ansible.builtin.fail:
+    msg: "{{ eco_sealed.msg | default('eco_state failed') }}"
+  when: eco_sealed is failed
+
+- name: "{{ eco_item.key }}: notes on the blob"
+  ansible.builtin.debug:
+    msg: "{{ eco_sealed.notes }}"
+  when: eco_sealed is not skipped and eco_sealed.notes | default([]) | length > 0

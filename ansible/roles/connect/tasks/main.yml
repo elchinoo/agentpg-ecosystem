@@ -1,7 +1,7 @@
 ---
 # Connect an app to a peer after both are up (ShopFront -> PayBroker in the shipped manifest): merchant, its one allowed origin, two API
 # keys, the webhook and the shop's settings, over the same HTTP APIs `ecoctl connect` uses. Idempotent: it reads what exists and writes only what
-# differs. Keys that a service shows once are kept in the secrets dir.
+# differs. Keys that a service shows once are kept in the encrypted state (state.sealed).
 - name: Connections the manifest asks for
   ansible.builtin.debug:
     msg: "{{ eco_fleet.connections | map(attribute='app') | list }}"

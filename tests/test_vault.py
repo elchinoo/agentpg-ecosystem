@@ -158,7 +158,7 @@ def test_plan_and_env_never_contain_the_password(world, capsys):  # noqa: F811
     capsys.readouterr()
     cli_mod.main(["--state", str(ctx.state.dir), "-f", str(MANIFEST), "plan"])
     for app in ("identity", "llmgw", "trustdesk"):
-        cli_mod.main(["--state", str(ctx.state.dir), "-f", str(MANIFEST), "env", app, "--reveal"])
+        cli_mod.main(["--state", str(ctx.state.dir), "-f", str(MANIFEST), "env", app])
     shown = capsys.readouterr()
     assert pw not in shown.out and pw not in shown.err
     assert "admin password" in shown.out and "IDENTITY_ENCRYPTION_KEY is not set" in shown.out

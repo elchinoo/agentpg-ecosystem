@@ -1,0 +1,23 @@
+---
+# Open one sealed app (eco_item) with the operator's passphrase; the same step deploy runs right after it creates the sandbox or container.
+- name: "{{ eco_item.key }}: unseal it with the operator's passphrase"
+  eco_state:
+    op: unseal
+    url: "{{ eco_urls[eco_item.key] }}"
+    passphrase: "{{ eco_seal_passphrase | default(omit) }}"
+    validate_certs: "{{ eco_validate_certs }}"
+    timeout: "{{ eco_unseal_timeout }}"
+  register: eco_unsealed
+  ignore_errors: true
+  no_log: true
+  when: eco_urls[eco_item.key] | length > 0
+
+- name: "{{ eco_item.key }}: it could not be unsealed"
+  ansible.builtin.fail:
+    msg: "{{ eco_item.key }}: {{ eco_unsealed.msg | default('eco_state failed') }}"
+  when: eco_unsealed is failed
+
+- name: "{{ eco_item.key }}: unsealed"
+  ansible.builtin.debug:
+    msg: "{{ eco_unsealed.msg }}"
+  when: eco_unsealed is not skipped

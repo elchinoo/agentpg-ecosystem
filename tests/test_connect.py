@@ -466,7 +466,7 @@ def test_no_secret_reaches_the_output_the_logs_a_url_or_an_error(world, monkeypa
     monkeypatch.setattr(cli_mod, "Identity", lambda url, key: type("I", (), {"apps": lambda self: {k: {**a, "client_id": k} for k, a in idp.apps.items()}})())
     cli_mod.cmd_status(argparse.Namespace(file=str(MANIFEST), state=str(ctx.state.dir)))
     take()
-    cli_mod.cmd_env(argparse.Namespace(app="shopfront", reveal=False))
+    cli_mod.cmd_env(argparse.Namespace(app="shopfront"))
     take()
     everything = "\n".join(seen) + caplog.text + "\n".join(idp.connect.urls)
     secrets = secret_values(ctx, idp)

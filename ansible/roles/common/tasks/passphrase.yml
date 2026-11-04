@@ -1,0 +1,44 @@
+---
+# The operator's seal passphrase for this run, as the fact eco_seal_passphrase, ONLY when it is asked for with a prompt. Otherwise the action plugin eco_state reads
+# ECOCTL_SEAL_PASSPHRASE from the environment itself and no fact holds it. Never written anywhere; every task that touches it has no_log.
+- name: Is the passphrase in the environment?
+  ansible.builtin.set_fact:
+    eco_seal_env_given: "{{ lookup('ansible.builtin.env', 'ECOCTL_SEAL_PASSPHRASE') | length > 0 }}"
+  no_log: true
+
+- name: Is there an encrypted state yet? (a new one asks twice)
+  ansible.builtin.stat:
+    path: "{{ eco_state_file }}"
+  register: eco_state_stat
+  check_mode: false
+  when: eco_seal_passphrase_prompt | bool and not eco_seal_env_given | bool
+
+- name: Ask for the passphrase (hidden; at least 20 characters)
+  ansible.builtin.pause:
+    prompt: "Passphrase for the encrypted state and the sealed apps (not stored anywhere)"
+    echo: false
+  register: eco_pw_first
+  no_log: true
+  when: eco_seal_passphrase_prompt | bool and not eco_seal_env_given | bool
+
+- name: Ask again (a new state file is being made)
+  ansible.builtin.pause:
+    prompt: "Again"
+    echo: false
+  register: eco_pw_second
+  no_log: true
+  when: eco_pw_first is not skipped and not eco_state_stat.stat.exists
+
+- name: The two entries agree
+  ansible.builtin.assert:
+    that: eco_pw_second is skipped or eco_pw_second.user_input == eco_pw_first.user_input
+    fail_msg: "the two entries differ"
+    quiet: true
+  no_log: true
+  when: eco_pw_first is not skipped
+
+- name: The prompted passphrase is the one to use
+  ansible.builtin.set_fact:
+    eco_seal_passphrase: "{{ eco_pw_first.user_input }}"
+  no_log: true
+  when: eco_pw_first is not skipped

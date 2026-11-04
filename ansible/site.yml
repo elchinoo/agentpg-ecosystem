@@ -29,10 +29,11 @@
           - eco_target in ['agentpg', 'hosts']
           - eco_target == 'agentpg' or ('app' in groups and groups['app'] | length > 0 and 'db' in groups and groups['db'] | length > 0)
           - eco_env_change in ['report', 'recreate']
-        fail_msg: "see the variables in roles/common/defaults/main.yml; the gateway must not call other apps (the apps need its keys first)"
+          - eco_fleet.agentpg.seal | bool
+        fail_msg: "see the variables in roles/common/defaults/main.yml; the gateway must not call other apps (the apps need its keys first); agentpg.seal must be true (this recipe never renders a secret into a sandbox or env file)"
         quiet: true
 
-    - name: The secrets directory (private, git-ignored)
+    - name: The secrets directory (private, git-ignored; holds only the encrypted state.sealed and non-secret per-app files)
       ansible.builtin.file:
         path: "{{ eco_secrets_dir }}"
         state: directory

@@ -218,3 +218,22 @@ def test_the_real_scrypt_cost_round_trips(tmp_path, monkeypatch):
     monkeypatch.setattr(kit, "_KDF", (17, 8, 1))
     st = filled(tmp_path / "eco")
     assert State(st.dir).app("trustdesk")["db_key"] == SECRETS["db"]
+
+
+def test_the_passphrase_can_come_from_a_command_and_a_failing_command_is_a_clear_error(tmp_path, monkeypatch):
+    import sys
+    monkeypatch.delenv("ECOCTL_SEAL_PASSPHRASE")
+    monkeypatch.setenv("ECOCTL_SEAL_PASSPHRASE_CMD", f"{sys.executable} -c \"print('{PASSPHRASE}')\"")
+    st = State(tmp_path / "eco")
+    st.data["identity_admin_key"] = "k"
+    st.save()
+    monkeypatch.setenv("ECOCTL_SEAL_PASSPHRASE", PASSPHRASE)
+    assert State(tmp_path / "eco").data["identity_admin_key"] == "k"                      # the command's output was the passphrase
+    monkeypatch.delenv("ECOCTL_SEAL_PASSPHRASE")
+    monkeypatch.setenv("ECOCTL_SEAL_PASSPHRASE_CMD", f"{sys.executable} -c \"import sys; sys.exit(3)\"")
+    with pytest.raises(StateError, match="failed or printed nothing") as e:
+        State(tmp_path / "eco")
+    assert PASSPHRASE not in str(e.value)
+    monkeypatch.setenv("ECOCTL_SEAL_PASSPHRASE_CMD", "/nonexistent/command-x")
+    with pytest.raises(StateError, match="could not be run"):
+        State(tmp_path / "eco")

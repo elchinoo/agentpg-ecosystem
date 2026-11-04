@@ -2,7 +2,9 @@
 infrastructure: it loads the recipe's filter plugin and the shared code of its agentpg_* modules, renders its env template with Jinja2 and compares
 everything with ecoctl.manifest, ecoctl.plan and ecoctl.agentpg (the modules also run against ecoctl's in-memory fake CLI)."""
 import importlib.util
+import json
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -232,7 +234,7 @@ def _deploy(cli, st, env, **kw):
     return inst, ap.ensure_sandbox(cli, st, "eco-x", "ghcr.io/o/x:latest", inst["instance_id"], 8000, env, **kw)
 
 
-def test_modules_create_then_converge_and_keep_the_database_key_private(tmp_path):
+def test_modules_create_then_converge_and_return_the_database_key_once(tmp_path):
     fake = FakeAgentPG()
     fake.url_with_id = True
     fake.creating_polls = 3                                   # the wait loops really loop
@@ -241,14 +243,15 @@ def test_modules_create_then_converge_and_keep_the_database_key_private(tmp_path
     st = ap.State(str(tmp_path / "s" / "x.json"))
     inst, sbx = _deploy(cli, st, {"A": "1"})
     assert inst["created"] and sbx["created"] and sbx["changed"] and sbx["url"] == "https://eco-x-sbx-1.sandbox.example" and sleeps
-    assert "a1p_sk" not in str(inst) + str(sbx) and inst["db_key_saved"]                 # the database key goes to the state file only
+    assert "a1p_sk" not in str(sbx) and inst["new_db_key"].startswith("a1p_sk_")          # returned once, for the playbook to keep encrypted
     assert (tmp_path / "s" / "x.json").stat().st_mode & 0o777 == 0o600 and (tmp_path / "s").stat().st_mode & 0o777 == 0o700
-    assert ap.State(st.path).data["db_key"].startswith("a1p_sk_") and ap.State(st.path).data["extensions"] == ["vector", "pg_trgm"]
+    assert "db_key" not in ap.State(st.path).data and "a1p_sk" not in (tmp_path / "s" / "x.json").read_text()      # never in the per-app file
+    assert ap.State(st.path).data["extensions"] == ["vector", "pg_trgm"]
     n = len(fake.calls)
     fake.calls.clear()
     st2 = ap.State(st.path)                                   # a new run reads the state again
     inst2, sbx2 = _deploy(cli, st2, {"A": "1"})
-    assert not inst2["changed"] and not sbx2["changed"] and not sbx2["env_differs"]
+    assert not inst2["changed"] and not sbx2["changed"] and not sbx2["env_differs"] and inst2["new_db_key"] == ""
     assert not [c for c in fake.calls if c[1] in {"create", "extensions"} or c[1:3] in (["sandbox", "create"], ["sandbox", "delete"])], (n, fake.calls)
 
 
@@ -602,120 +605,263 @@ def test_locked_password_apps_are_found_from_the_probes(fleet):
     assert eco.eco_vault_failures(fleet, [ok, {**shut, "json": {"vault": {"initialized": True, "unlocked": True}}}]) == []
 
 
-SECRET_WORDS = re.compile(r"\beco_admin_pw\b|\beco_admin_password\b|eco_admin_prompted|eco_vault_operator_key")
+def test_a_key_shown_once_survives_a_failure_after_creation():
+    fake = FakeAgentPG()
+    lists = []
+
+    def run(args):
+        if args[1:3] == ["instances", "list"]:
+            lists.append(1)
+            if len(lists) > 1:                                              # right after `create`
+                raise ap.AgentPGError("the platform did not answer")
+        return fake(args)
+
+    with pytest.raises(ap.AgentPGError) as exc:
+        ap.ensure_instance(ap.Cli(run=run, interval=0, sleep=lambda s: None), _MemState(), "eco-x-db", "small")
+    assert exc.value.new_db_key.startswith("a1p_sk_")                      # the module hands it to the playbook even though it failed
 
 
-def test_every_task_that_handles_the_admin_password_or_the_operator_key_has_no_log():
-    seen = 0
-    for path in [*ANSIBLE.glob("*.yml"), *ANSIBLE.glob("roles/*/tasks/*.yml")]:
-        for task in _tasks(yaml.safe_load(path.read_text())):
-            body = {k: v for k, v in task.items() if k not in {"name", "when", "register", "changed_when", "failed_when", "until", "loop_control", "tags", "retries", "delay"}}
-            if SECRET_WORDS.search(yaml.safe_dump(body)):
-                seen += 1
-                assert task.get("no_log") is True, f"{path.relative_to(ANSIBLE)}: {task.get('name')} handles the admin password or operator key without no_log: true"
-    assert seen >= 5
-
-
-def test_the_vault_tasks_are_ordered_and_idempotent_by_construction():
-    one = yaml.safe_load((ANSIBLE / "roles/vault/tasks/one.yml").read_text())
-    by = {t["name"].split(": ", 1)[-1]: t for t in one}
-    state = by["is its vault created, is it open"]
-    assert state["check_mode"] is False and state["changed_when"] is False                                    # a read: never a change
-    create, unlock = by["create its vault with the admin password"], by["open its vault with the admin password"]
-    assert "not eco_vault_now.json.vault.initialized" in create["when"] and "== 200" in create["changed_when"]
-    assert "initialized and not eco_vault_now.json.vault.unlocked" in unlock["when"] and "== 200" in unlock["changed_when"]       # an open vault changes nothing
-    names = [t["name"].split(": ", 1)[-1] for t in one]
-    guard = "a vault that does not exist yet is created only where that is asked for (site.yml), not by unlock.yml"
-    assert names.index(guard) < names.index("create its vault with the admin password")
-    assert names.index("open its vault with the admin password") < names.index("the vault is open now") < names.index("wait until it answers /readyz")
-    assert one[0]["when"] == "eco_admin_pw is not defined"
-    pw = (ANSIBLE / "roles/vault/tasks/password.yml").read_text()
-    assert "mode: \"0600\"" in pw and "eco_admin_password_file" in pw and "echo: false" in pw
-
-
-def test_the_vault_is_opened_before_identity_or_the_gateway_is_waited_for_and_before_dependents():
-    ident = [t.get("name", "") for t in _tasks(yaml.safe_load((ANSIBLE / "roles/identity/tasks/main.yml").read_text()))]
-    vault_at = next(i for i, n in enumerate(ident) if "create or open its vault" in n)
-    assert ident.index("Identity provider container and readiness") < vault_at < ident.index("Read the issuer (the first request fixes it when IDENTITY_PUBLIC_URL is unset)")
-    app = [t.get("name", "") for t in _tasks(yaml.safe_load((ANSIBLE / "roles/app/tasks/one_app.yml").read_text()))]
-    probes = (("container", ": container"), ("vault", "create or open its vault"), ("signin", "where its sign-in points now"))
-    at = {k: next(i for i, n in enumerate(app) if probe in n) for k, probe in probes}
-    assert at["container"] < at["vault"] < at["signin"]
-    for f in ("agentpg.yml", "container.yml"):  # a locked app answers 503 on /readyz: deploy waits on /healthz, the unlock task on /readyz
-        assert "eco_item.vault != 'password'" in (ANSIBLE / "roles/app/tasks" / f).read_text()
-
-
-def test_unlock_and_verify_playbooks_exist_and_say_what_they_do():
-    unlock = yaml.safe_load((ANSIBLE / "unlock.yml").read_text())
-    assert unlock[0]["vars"]["eco_vault_create"] is False and "unlock" in unlock[0]["tags"]
-    assert any(t.get("ansible.builtin.include_role", {}).get("name") == "vault" for t in _tasks(unlock))
-    verify = (ANSIBLE / "roles/verify/tasks/main.yml").read_text()
-    assert "/api/session" in verify and "eco_vault_failures" in verify and "eco_vault_locked | length == 0" in verify
-    assert "Vaults" in (ANSIBLE / "roles/verify/templates/report.j2").read_text()
-    defaults = (ANSIBLE / "roles/common/defaults/main.yml").read_text()
-    assert "ECO_ADMIN_PASSWORD" in defaults and "{{ eco_secrets_dir }}/vault/admin_password" in defaults and "eco_admin_password_prompt: false" in defaults
-    assert ".secrets/" in (ANSIBLE / ".gitignore").read_text()                                                  # where a generated password lives
-
-
-# A real Ansible run of the vault tasks against a local stand-in for the two services (no network beyond 127.0.0.1, nothing on AgentPG).
-class _Services:
+class _MemState(ap.State):
     def __init__(self):
-        import http.server
-        import json as _json
+        self.path, self.data = "/dev/null", {}
+
+    def save(self):
+        pass
+
+
+# ---- the encrypted state (module_utils/eco_state.py, plugins/action/eco_state.py) ---------------------------------------------------------------------
+es = _load("eco_state", "module_utils/eco_state.py")
+PW = "recipe-test-passphrase-long-enough-0"
+
+
+def test_the_state_is_one_encrypted_blob_and_nothing_else_is_written(tmp_path):
+    from apgkit import sealed
+    path = tmp_path / "s" / ".secrets" / "state.sealed"
+    st = es.EncState(str(path), PW)
+    st.generate(["identity/IDENTITY_API_KEY", "trustdesk/TRUSTDESK_SESSION_SECRET"])
+    st.put_issued("trustdesk/client_secret", "cs-very-secret-value")
+    st.put_db_key("trustdesk", "a1p_sk_database_key")
+    assert st.save() and not st.save()                                       # an unchanged state is not written again
+    raw = path.read_text()
+    assert raw.startswith("apgkit-seal1$") and "cs-very-secret" not in raw and "a1p_sk" not in raw
+    assert path.stat().st_mode & 0o777 == 0o600 and path.parent.stat().st_mode & 0o777 == 0o700 and [p.name for p in path.parent.iterdir()] == ["state.sealed"]
+    again = es.EncState(str(path), PW)
+    assert again.issued(["trustdesk/client_secret"])["trustdesk/client_secret"] == "cs-very-secret-value" and again.db_key("trustdesk") == "a1p_sk_database_key"
+    first = again.generate(["identity/IDENTITY_API_KEY"])["identity/IDENTITY_API_KEY"]
+    assert len(first) == 43 and es.EncState(str(path), PW).generate(["identity/IDENTITY_API_KEY"])["identity/IDENTITY_API_KEY"] == first        # stable
+    assert json.loads(sealed.open_blob(raw, PW)["state"])["issued"]                                                                            # the same blob format as ecoctl's state file
+    with pytest.raises(es.EcoStateError, match="could not be decrypted"):
+        es.EncState(str(path), "another-long-enough-passphrase-1")
+    with pytest.raises(es.EcoStateError, match="at least"):
+        es.passphrase("short")
+    with pytest.raises(es.EcoStateError, match="ECOCTL_SEAL_PASSPHRASE"):
+        es.passphrase(None, environ={})
+
+
+def test_overrides_win_and_are_never_stored(tmp_path):
+    st = es.EncState(str(tmp_path / "state.sealed"), PW)
+    got = st.generate(["identity/IDENTITY_API_KEY"], {"identity/IDENTITY_API_KEY": "from-the-vault-file"})
+    assert got["identity/IDENTITY_API_KEY"] == "from-the-vault-file" and "identity/IDENTITY_API_KEY" not in st.data["generated"]
+
+
+def test_plaintext_files_of_an_older_recipe_are_moved_in_and_overwritten(tmp_path):
+    d = tmp_path / ".secrets"
+    (d / "generated/trustdesk").mkdir(parents=True)
+    (d / "generated/trustdesk/TRUSTDESK_SESSION_SECRET").write_text("old-generated-secret-aaaaaaaaaaaaaaaa")
+    (d / "issued/trustdesk").mkdir(parents=True)
+    (d / "issued/trustdesk/client_secret").write_text("old-issued-secret\n")
+    (d / "vault").mkdir()
+    (d / "vault/admin_password").write_text("old-admin-password-xxxxxxxxxxxxxxxx")
+    (d / "agentpg").mkdir()
+    (d / "agentpg/trustdesk.json").write_text(json.dumps({"instance_id": "inst-1", "db_key": "a1p_sk_old", "url": "https://x"}))
+    st = es.EncState(str(d / "state.sealed"), PW)
+    moved = es.import_legacy(st, str(d))
+    es.remove_empty_dirs(str(d))
+    st.save()
+    assert set(moved) == {"generated/trustdesk/TRUSTDESK_SESSION_SECRET", "issued/trustdesk/client_secret", "vault/admin_password", "agentpg/trustdesk/db_key"}
+    again = es.EncState(str(d / "state.sealed"), PW)
+    assert again.data["generated"]["trustdesk/TRUSTDESK_SESSION_SECRET"].startswith("old-generated") and again.data["issued"]["trustdesk/client_secret"] == "old-issued-secret"
+    assert again.db_key("trustdesk") == "a1p_sk_old" and again.data["legacy"]["admin_password"].startswith("old-admin")
+    assert sorted(p.name for p in d.iterdir()) == ["agentpg", "state.sealed"]                             # the plaintext files and their folders are gone
+    assert json.loads((d / "agentpg/trustdesk.json").read_text()) == {"instance_id": "inst-1", "url": "https://x"}
+    everything = "".join(p.read_text(errors="ignore") for p in d.rglob("*") if p.is_file())
+    assert "old-" not in everything and "a1p_sk" not in everything
+
+
+def test_the_sealed_blob_of_an_app_equals_ecoctls(manifest, tmp_path):
+    from apgkit import sealed
+
+    from ecoctl import seal as seal_mod
+    describe = "connection_string: postgresql://admin:x@db.example.test:5432/appdb?sslmode=require"
+    dsn = es.database_url(describe, "dbpass/with:odd chars")
+    assert dsn == "postgresql://admin:dbpass%2Fwith%3Aodd%20chars@db.example.test:5432/appdb?sslmode=require"
+    st = State(tmp_path / "eco")
+    st.app("trustdesk").update(instance_id="inst-1", db_key="dbpass/with:odd chars")
+    ctx = Context(manifest, st, AgentPG(run=lambda args: describe))
+    assert seal_mod.database_url(ctx, manifest.apps["trustdesk"]) == dsn
+    blob, notes = es.seal_env(PW, {"A_TOKEN": "t" * 12, "TRUSTDESK_ENCRYPTION_KEY": "k" * 12}, dsn, drop="TRUSTDESK_ENCRYPTION_KEY")
+    assert sealed.open_blob(blob, PW) == {"A_TOKEN": "t" * 12, "DATABASE_URL": dsn} and notes == []
+    assert es.database_url(describe, None) is None and es.database_url("no url here", "k") is None
+    _, notes = es.seal_env(PW, {"A_TOKEN": "t" * 12}, None)
+    assert "DATABASE_URL not sealed" in notes[0]
+    assert es.seal_env(PW, {"A_TOKEN": "t"}, None, drop=None)[1] and es.seal_env(PW, {"DATABASE_URL": "postgresql://x/y"}, None)[1] == []         # a hosts-target URL is a secret in the blob
+
+
+def test_the_environment_hash_matches_ecoctls(manifest):
+    env = {"B": "2", "A": "1", "TOKEN": "s3cret"}
+    assert eco.eco_env_hash(env) == _env_hash(env) == ap.env_hash(env)
+
+
+def test_the_fleet_knows_seal_like_ecoctl(manifest, fleet):
+    assert fleet["agentpg"]["seal"] is manifest.seal is True
+    doc = yaml.safe_load(MANIFEST.read_text())
+    doc.setdefault("agentpg", {})["seal"] = False
+    assert eco.eco_fleet(doc)["agentpg"]["seal"] is False
+
+
+def test_the_sealed_env_file_template_holds_the_blob_and_plain_settings_only():
+    jinja2 = pytest.importorskip("jinja2")
+    env = jinja2.Environment(loader=jinja2.FileSystemLoader(str(ANSIBLE / "roles/app/templates")), trim_blocks=True, keep_trailing_newline=True)
+    out = env.get_template("app.sealed.env.j2").render(eco_settings_hash="abc123", eco_env_public={"B": "2", "APGKIT_SEALED": "apgkit-seal1$xyz", "A": "1"})
+    assert out.splitlines() == ["# settings-hash: abc123", "A=1", "APGKIT_SEALED=apgkit-seal1$xyz", "B=2"]
+
+
+def test_unseal_talks_the_kits_protocol_and_reports_a_wrong_passphrase():
+    from apgkit import sealed as kit
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    blob = kit.seal({"DATABASE_URL": "postgresql://x/y"}, PW)
+    ready = []
+    s = kit.Sealed(blob)
+    s.on_unsealed(lambda sealed, pw: ready.append(sealed.get("DATABASE_URL")))
+    app = FastAPI()
+    kit.install(app, s, trusted_hops=0, harden=False)
+    client = TestClient(app)
+
+    def http(method, url, body):
+        r = client.request(method, url.replace("http://testserver", ""), json=body)
+        return r.status_code, (r.json() if r.content else None)
+
+    try:
+        assert es.seal_state(http, "http://testserver") == "sealed"
+        with pytest.raises(es.EcoStateError, match="did not open the blob") as exc:
+            es.unseal(http, "http://testserver", "another-long-enough-passphrase-1")
+        assert PW not in str(exc.value) and not ready
+        assert es.unseal(http, "http://testserver", PW).startswith("unsealed (key fingerprint ")
+        assert ready == ["postgresql://x/y"] and es.unseal(http, "http://testserver", PW) == "already open"
+        assert es.unseal(lambda m, u, b: (404, None), "http://x", PW) == "sealing is not enabled in this app"
+        clock = iter(range(0, 10_000, 100))
+        with pytest.raises(es.EcoStateError, match="did not answer"):
+            es.unseal(lambda m, u, b: (503, None), "http://x", PW, timeout=300, sleep=lambda s: None, clock=lambda: next(clock))
+    finally:
+        kit.set_active(None)
+
+
+# ---- the playbooks: seal-first, nothing secret rendered or written -----------------------------------------------------------------------------------
+def _all_task_files():
+    return [*ANSIBLE.glob("*.yml"), *ANSIBLE.glob("roles/*/tasks/*.yml")]
+
+
+SECRET_WORDS = re.compile(r"eco_secrets\b|eco_issued\b|eco_secret_env|eco_env_all|eco_sealed\.blob|eco_seal_passphrase|eco_issue_value|eco_inst\.new_db_key|eco_pw_|eco_dbkey")
+
+
+def test_every_task_that_handles_a_secret_has_no_log():
+    seen = 0
+    for path in _all_task_files():
+        for task in _tasks(yaml.safe_load(path.read_text())):
+            body = {k: v for k, v in task.items() if k not in {"name", "when", "register", "changed_when", "failed_when", "until", "loop_control", "tags", "retries", "delay", "loop", "vars"}}
+            if SECRET_WORDS.search(yaml.safe_dump(body)) and "ansible.builtin.fail" not in body and "ansible.builtin.debug" not in body and "ansible.builtin.assert" not in body:
+                seen += 1
+                assert task.get("no_log") is True, f"{path.relative_to(ANSIBLE)}: {task.get('name')} handles a secret without no_log: true"
+    assert seen >= 25
+
+
+def test_no_task_writes_a_secret_to_a_file_and_nothing_reads_the_old_plaintext_files():
+    text = "\n".join(p.read_text() for p in [*_all_task_files(), *ANSIBLE.glob("roles/*/templates/*"), *ANSIBLE.glob("inventories/*/group_vars/**/*")] if p.is_file())
+    assert "ansible.builtin.password" not in text and "/generated/" not in text and "/issued/" not in text and "admin_password" not in text.replace("legacy", "")
+    assert "eco_secrets_dir ~ '/issued" not in text
+    copies = [t for p in _all_task_files() for t in _tasks(yaml.safe_load(p.read_text())) if "ansible.builtin.copy" in t and "content" in t["ansible.builtin.copy"]]
+    assert not copies, [t["name"] for t in copies]                                                          # no `copy: content:` of a value
+
+
+def test_sandboxes_get_only_the_blob_and_plain_settings():
+    agentpg = yaml.safe_load((ANSIBLE / "roles/app/tasks/agentpg.yml").read_text())
+    sbx = next(t for t in agentpg if "agentpg_sandbox" in t)["agentpg_sandbox"]
+    assert "secret_env" not in sbx and "APGKIT_SEALED" in sbx["env"] and "eco_env " in sbx["env"] and sbx["settings_hash"] == "{{ eco_settings_hash }}"
+    split = (ANSIBLE / "roles/app/tasks/split_env.yml").read_text()
+    assert "op: seal" in split and "eco_fleet.agentpg.seal" in split and "drop:" in split
+    container = (ANSIBLE / "roles/app/tasks/container.yml").read_text()
+    assert "app.sealed.env.j2" in container and "src: app.env.j2" not in container and "eco_envfile.checksum" not in container
+    site = (ANSIBLE / "site.yml").read_text()
+    assert "eco_fleet.agentpg.seal | bool" in site
+
+
+def test_deploy_unseals_each_app_before_waiting_for_it_and_unseal_replaces_unlock():
+    for f in ("agentpg.yml", "container.yml"):
+        names = [t.get("name", "") for t in _tasks(yaml.safe_load((ANSIBLE / "roles/app/tasks" / f).read_text()))]
+        assert next(i for i, n in enumerate(names) if "unseal it with" in n) < next(i for i, n in enumerate(names) if "wait until it answers" in n), f
+    ident = (ANSIBLE / "roles/identity/tasks/main.yml").read_text()
+    assert "vault" not in ident.split("Identity provider container and readiness")[1].split("The identity provider answers")[0]
+    assert not (ANSIBLE / "roles/vault").exists()
+    unseal = yaml.safe_load((ANSIBLE / "unseal.yml").read_text())
+    assert "unseal" in unseal[0]["tags"] and any(t.get("ansible.builtin.include_role", {}).get("tasks_from") == "unseal_one.yml" for t in _tasks(unseal))
+    assert yaml.safe_load((ANSIBLE / "unlock.yml").read_text())[0]["ansible.builtin.import_playbook"] == "unseal.yml"
+    verify = (ANSIBLE / "roles/verify/tasks/main.yml").read_text()
+    assert "/api/session" in verify and "eco_vault_failures" in verify and "run unseal.yml" in verify
+    defaults = yaml.safe_load((ANSIBLE / "roles/common/defaults/main.yml").read_text())
+    assert defaults["eco_state_file"].endswith("/state.sealed") and defaults["eco_seal_passphrase_prompt"] is False and "eco_admin_password" not in defaults
+    assert "ECOCTL_SEAL_PASSPHRASE" in (ANSIBLE / "roles/common/defaults/main.yml").read_text() and ".secrets/" in (ANSIBLE / ".gitignore").read_text()
+    cfg = (ANSIBLE / "ansible.cfg").read_text()
+    assert "action_plugins = plugins/action" in cfg and "[connection]" in cfg.replace("\r", "") and "pipelining = True" in cfg.split("[connection]")[1].split("[")[0]
+
+
+# ---- real Ansible, local stand-ins: the sealed apps are the kit's own unseal endpoints behind a real HTTP server ----------------------------------------
+class _Services:
+    """Two apps (identity, llmgw) that start SEALED, served by the kit's real /_seal endpoints on 127.0.0.1."""
+
+    def __init__(self, passphrase=PW):
+
+        from apgkit import sealed as kit
+        self.kit, self.apps, self.servers, self.opened = kit, {}, {}, []
+        self.passphrase = passphrase
+        for name in ("identity", "llmgw"):
+            self.start(name)
+
+    def start(self, name):
         import threading
 
-        from tests.fakes import FakeVault
-        self.vaults = {"identity": FakeVault(), "llmgw": FakeVault()}
-        self.keys = {"identity": "idk-test-operator-key", "llmgw": "gwk-test-operator-key"}
-        self.log: list[tuple[str, str, str]] = []
-        outer = self
-
-        def make(name):
-            class H(http.server.BaseHTTPRequestHandler):
-                def log_message(self, *a):
-                    pass
-
-                def _send(self, code, body):
-                    data = _json.dumps(body).encode()
-                    self.send_response(code)
-                    self.send_header("content-type", "application/json")
-                    self.send_header("content-length", str(len(data)))
-                    self.end_headers()
-                    self.wfile.write(data)
-
-                def do_GET(self):  # noqa: N802
-                    outer.log.append((name, "GET", self.path))
-                    v = outer.vaults[name]
-                    if self.path == "/api/session":
-                        return self._send(200, {"state": "logged_out", "vault": v.session()})
-                    if self.path == "/readyz":
-                        return self._send(503 if name == "identity" and not v.unlocked else 200, {"status": "x"})
-                    return self._send(200, {"status": "ok"})
-
-                def do_POST(self):  # noqa: N802
-                    outer.log.append((name, "POST", self.path))
-                    body = _json.loads(self.rfile.read(int(self.headers.get("content-length", 0))) or b"{}")
-                    if self.headers.get("authorization") != "Bearer " + outer.keys[name]:
-                        return self._send(401, {"detail": "authentication required"})
-                    r = outer.vaults[name].handle(self.path, body)
-                    return self._send(r.status_code, r.json()) if r else self._send(404, {})
-            return H
-
-        self.servers = {n: http.server.ThreadingHTTPServer(("127.0.0.1", 0), make(n)) for n in self.vaults}
-        for s in self.servers.values():
-            threading.Thread(target=s.serve_forever, daemon=True).start()
+        import uvicorn
+        from fastapi import FastAPI
+        kit = self.kit
+        sealed = kit.Sealed(kit.seal({"DATABASE_URL": f"postgresql://{name}/db"}, self.passphrase))
+        sealed.on_unsealed(lambda s, pw, n=name: self.opened.append(n))
+        app = FastAPI()
+        kit.install(app, sealed, trusted_hops=0, harden=False)
+        server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="error"))
+        t = threading.Thread(target=server.run, daemon=True)
+        t.start()
+        import time
+        for _ in range(100):
+            if server.started:
+                break
+            time.sleep(0.05)
+        self.apps[name], self.servers[name] = sealed, (server, t)
 
     def url(self, name):
-        return f"http://127.0.0.1:{self.servers[name].server_address[1]}"
-
-    def close(self):
-        for s in self.servers.values():
-            s.shutdown()
-            s.server_close()
+        return f"http://127.0.0.1:{self.servers[name][0].servers[0].sockets[0].getsockname()[1]}"
 
     def restart(self):
-        for v in self.vaults.values():
-            v.restart()
+        self.close()
+        self.kit.set_active(None)
+        self.opened.clear()
+        for name in ("identity", "llmgw"):
+            self.start(name)
+
+    def close(self):
+        for server, t in self.servers.values():
+            server.should_exit = True
+            t.join(5)
+        self.kit.set_active(None)
 
 
 @pytest.fixture
@@ -725,8 +871,7 @@ def services():
     s.close()
 
 
-def _ansible(services, tmp_path, playbook, *extra, verbose=False):
-    import json
+def _ansible(services, tmp_path, playbook, *extra, verbose=False, env=None):
     import os
     import shutil
     import subprocess
@@ -737,65 +882,105 @@ def _ansible(services, tmp_path, playbook, *extra, verbose=False):
     for name in ("identity", "llmgw"):
         (secrets_dir / "agentpg" / f"{name}.json").write_text(json.dumps({"url": services.url(name)}))
     evars = {"eco_secrets_dir": str(secrets_dir), "eco_manifest_path": str(MANIFEST), "eco_only": ["llmgw"],
-             "eco_secret_overrides": {"identity/IDENTITY_API_KEY": services.keys["identity"], "llmgw/LLMGW_API_KEY": services.keys["llmgw"]}}
-    env = {k: v for k, v in os.environ.items() if k != "ECO_ADMIN_PASSWORD"} | {"ANSIBLE_LOCALHOST_WARNING": "False", "ANSIBLE_INVENTORY_UNPARSED_WARNING": "False"}
+             "eco_secret_overrides": {"identity/IDENTITY_API_KEY": "idk-test-operator-key", "llmgw/LLMGW_API_KEY": "gwk-test-operator-key"}}
+    base = {k: v for k, v in os.environ.items() if k != "ECOCTL_SEAL_PASSPHRASE"} | {"ANSIBLE_LOCALHOST_WARNING": "False", "ANSIBLE_INVENTORY_UNPARSED_WARNING": "False"}
     p = subprocess.run(["ansible-playbook", "-i", "inventories/agentpg", playbook, "-e", json.dumps(evars), *extra, *(["-vvv"] if verbose else [])],
-                       cwd=ANSIBLE, env=env, capture_output=True, text=True, timeout=300)
+                       cwd=ANSIBLE, env={**base, **(env if env is not None else {"ECOCTL_SEAL_PASSPHRASE": PW})}, capture_output=True, text=True, timeout=300)
     return p.returncode, p.stdout + p.stderr, secrets_dir
+
+
+def _apgkit_available():
+    import shutil
+    import subprocess
+    exe = shutil.which("ansible-playbook")
+    if not exe:
+        return False
+    py = open(exe).readline().strip().removeprefix("#!")
+    return subprocess.run([py, "-c", "import apgkit.sealed"], capture_output=True).returncode == 0
+
+
+needs_ansible_kit = pytest.mark.skipif(not _apgkit_available(), reason="ansible-playbook with agentpg-kit installed in its environment is needed")
 
 
 def _changed(out: str) -> int:
     return int(re.search(r"localhost\s*:.*changed=(\d+)", out).group(1))
 
 
-def test_a_real_ansible_run_creates_then_opens_the_vaults_and_a_rerun_changes_nothing(services, tmp_path):
-    import stat as _stat
-    code, out, secrets_dir = _ansible(services, tmp_path, "unlock.yml", "-e", "eco_vault_create=true", verbose=True)
+@needs_ansible_kit
+def test_a_real_ansible_unseal_opens_every_app_and_a_rerun_changes_nothing(services, tmp_path):
+    code, out, secrets_dir = _ansible(services, tmp_path, "unseal.yml", verbose=True)
     assert code == 0, out[-3000:]
-    pw = (secrets_dir / "vault/admin_password").read_text().strip()
-    assert len(pw) == 32 and _stat.S_IMODE((secrets_dir / "vault/admin_password").stat().st_mode) == 0o600
-    assert all(v.initialized and v.unlocked and v.password == pw for v in services.vaults.values())
-    assert pw not in out and services.keys["identity"] not in out and services.keys["llmgw"] not in out                  # nothing secret in the log, even at -vvv
-    assert services.vaults["identity"].initializations == 1 == services.vaults["llmgw"].initializations
-    order = [(n, m, p) for n, m, p in services.log if m == "POST"]
-    assert order[0] == ("identity", "POST", "/api/admin-password")                                                       # identity first
-    code, out2, _ = _ansible(services, tmp_path, "unlock.yml")
-    assert code == 0 and _changed(out2) == 0, out2[-2000:]                                                               # idempotent
-    services.restart()                                                                                                   # a platform restart
-    assert not any(v.unlocked for v in services.vaults.values())
+    assert services.opened == ["identity", "llmgw"]                                                    # identity first
+    assert all(a.unsealed for a in services.apps.values())
+    assert PW not in out and "idk-test-operator-key" not in out and "gwk-test-operator-key" not in out    # nothing secret in the log, even at -vvv
+    assert sorted(p.name for p in secrets_dir.iterdir()) == ["agentpg", "state.sealed"]                  # one encrypted file; no generated/, issued/ or vault/ folder
+    raw = (secrets_dir / "state.sealed").read_text()
+    assert raw.startswith("apgkit-seal1$") and "idk-test" not in raw
+    code, out2, _ = _ansible(services, tmp_path, "unseal.yml")
+    assert code == 0 and _changed(out2) == 0, out2[-2000:]                                              # idempotent: open apps change nothing
+    services.restart()                                                                                    # a platform restart: sealed again
+    assert not any(a.unsealed for a in services.apps.values())
+    _ansible(services, tmp_path, "unseal.yml")
     code, out3, _ = _ansible(services, tmp_path, "unlock.yml")
-    assert code == 0 and _changed(out3) == 2 and all(v.unlocked for v in services.vaults.values()), out3[-2000:]
-    assert all(v.initializations == 1 and v.unlocks == 1 for v in services.vaults.values())
-    code, out4, _ = _ansible(services, tmp_path, "unlock.yml")
-    assert code == 0 and _changed(out4) == 0
+    assert code == 0 and all(a.unsealed for a in services.apps.values()) and _changed(out3) == 0
 
 
-def test_a_real_ansible_run_gets_the_password_from_the_environment_and_never_writes_it_down(services, tmp_path, monkeypatch):
-    import json
-    monkeypatch.setenv("ECO_ADMIN_PASSWORD", "operator-held-passphrase-one")
-    import os
-    import subprocess
-    secrets_dir = tmp_path / "secrets"
-    (secrets_dir / "agentpg").mkdir(parents=True)
-    for name in ("identity", "llmgw"):
-        (secrets_dir / "agentpg" / f"{name}.json").write_text(json.dumps({"url": services.url(name)}))
-    evars = {"eco_secrets_dir": str(secrets_dir), "eco_manifest_path": str(MANIFEST), "eco_only": ["llmgw"], "eco_vault_create": True,
-             "eco_secret_overrides": {"identity/IDENTITY_API_KEY": services.keys["identity"], "llmgw/LLMGW_API_KEY": services.keys["llmgw"]}}
-    import shutil
-    if not shutil.which("ansible-playbook"):
-        pytest.skip("ansible-playbook is not installed")
-    p = subprocess.run(["ansible-playbook", "-i", "inventories/agentpg", "unlock.yml", "-e", json.dumps(evars), "-vvv"], cwd=ANSIBLE, env=dict(os.environ), capture_output=True, text=True, timeout=300)
-    assert p.returncode == 0, (p.stdout + p.stderr)[-3000:]
-    assert all(v.password == "operator-held-passphrase-one" for v in services.vaults.values())
-    assert "operator-held-passphrase-one" not in p.stdout + p.stderr and not (secrets_dir / "vault").exists()
-
-
-def test_a_real_ansible_unlock_never_creates_a_vault_and_a_vault_that_exists_never_gets_a_made_up_password(services, tmp_path):
-    code, out, _ = _ansible(services, tmp_path, "unlock.yml")
-    assert code != 0 and "does not exist yet" in out and not any(v.initialized for v in services.vaults.values())
-    code, out, secrets_dir = _ansible(services, tmp_path, "unlock.yml", "-e", "eco_vault_create=true")
+@needs_ansible_kit
+def test_a_real_ansible_run_with_the_wrong_passphrase_fails_and_opens_nothing(services, tmp_path):
+    code, out, secrets_dir = _ansible(services, tmp_path, "unseal.yml")                                  # creates the state under PW
     assert code == 0
     services.restart()
-    (secrets_dir / "vault/admin_password").unlink()                                                                       # the generated file was lost
-    code, out, _ = _ansible(services, tmp_path, "unlock.yml")
-    assert code != 0 and "made up" in out and not any(v.unlocked for v in services.vaults.values())
+    code, out, _ = _ansible(services, tmp_path, "unseal.yml", env={"ECOCTL_SEAL_PASSPHRASE": "another-long-enough-passphrase-1"})
+    assert code != 0 and "could not be decrypted" in out and not any(a.unsealed for a in services.apps.values())
+    assert "another-long-enough-passphrase-1" not in out and PW not in out
+    code, out, _ = _ansible(services, tmp_path, "unseal.yml", env={})
+    assert code != 0 and "ECOCTL_SEAL_PASSPHRASE" in out and not any(a.unsealed for a in services.apps.values())
+
+
+@needs_ansible_kit
+def test_a_real_ansible_run_moves_old_plaintext_secrets_into_the_state(services, tmp_path):
+    d = tmp_path / "secrets"
+    (d / "generated/trustdesk").mkdir(parents=True)
+    (d / "generated/trustdesk/TRUSTDESK_SESSION_SECRET").write_text("old-generated-secret-aaaaaaaaaaaaaaaa")
+    (d / "vault").mkdir()
+    (d / "vault/admin_password").write_text("old-admin-password-xxxxxxxxxxxxxxxx")
+    code, out, _ = _ansible(services, tmp_path, "unseal.yml", verbose=True)
+    assert code == 0 and "moved into" in out and "old-generated" not in out and "old-admin" not in out, out[-2000:]
+    assert sorted(p.name for p in d.iterdir()) == ["agentpg", "state.sealed"]
+
+
+@needs_ansible_kit
+def test_a_real_ansible_seal_op_builds_the_blob_from_the_kept_key_and_agentpg_describe(tmp_path):
+    import os
+    import subprocess
+
+    stand_in = tmp_path / "agentpg"
+    stand_in.write_text('#!/bin/sh\necho "connection_string: postgresql://admin:x@db.example.test:5432/appdb?sslmode=require"\n')
+    stand_in.chmod(0o755)
+    play = tmp_path / "p.yml"
+    play.write_text(f"""
+- hosts: localhost
+  gather_facts: false
+  tasks:
+    - eco_state: {{op: put_db_key, path: "{tmp_path}/s.sealed", app: a, value: "dbkey/odd"}}
+      no_log: true
+    - eco_state:
+        op: seal
+        path: "{tmp_path}/s.sealed"
+        app: a
+        instance_id: inst-1
+        secret_env: {{A_TOKEN: "tokentokentoken", A_ENCRYPTION_KEY: "kkkkkkkkkkkk"}}
+        drop: A_ENCRYPTION_KEY
+        agentpg_bin: "{stand_in}"
+      register: r
+      no_log: true
+    - ansible.builtin.copy: {{content: "{{{{ r.blob }}}}", dest: "{tmp_path}/blob.txt"}}
+      no_log: true
+""")
+    env = {**os.environ, "ECOCTL_SEAL_PASSPHRASE": PW, "ANSIBLE_LOCALHOST_WARNING": "False", "ANSIBLE_INVENTORY_UNPARSED_WARNING": "False"}
+    p = subprocess.run(["ansible-playbook", str(play)], cwd=ANSIBLE, env=env, capture_output=True, text=True, timeout=120)
+    assert p.returncode == 0, p.stdout + p.stderr
+    # opened in a fresh interpreter: Ansible sealed it with the real scrypt cost, the tests lower it in this process
+    code = "import json, sys; from apgkit import sealed; print(json.dumps(sealed.open_blob(open(sys.argv[1]).read(), sys.argv[2])))"
+    out = subprocess.run([sys.executable, "-c", code, str(tmp_path / "blob.txt"), PW], capture_output=True, text=True, check=True).stdout
+    assert json.loads(out) == {"A_TOKEN": "tokentokentoken", "DATABASE_URL": "postgresql://admin:dbkey%2Fodd@db.example.test:5432/appdb?sslmode=require"}

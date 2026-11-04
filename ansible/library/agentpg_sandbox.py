@@ -21,8 +21,9 @@ options:
   image: {description: Image reference (state=present)., type: str}
   instance_id: {description: The instance id (state=present; empty in check mode when the instance does not exist yet)., type: str}
   port: {description: Port the app listens on., default: 8000, type: int}
-  env: {description: Non-secret environment (state=present)., type: dict}
-  secret_env: {description: Environment values that are secrets (generated keys, client secrets, API keys)., default: {}, type: dict, no_log: true}
+  env: {description: "Environment (state=present): the non-secret settings plus APGKIT_SEALED, the sealed blob. Secrets are never rendered into it.", type: dict}
+  secret_env: {description: Environment values that are secrets; the recipe passes none (the sandbox is sealed). Kept for a manifest with seal false., default: {}, type: dict, no_log: true}
+  settings_hash: {description: Hash of the plain environment to compare with the sandbox's recorded one (a sealed blob is different every time)., type: str}
   auto_pause: {description: Pause the sandbox when idle., default: true, type: bool}
   plan: {description: Compute plan (small, medium, large)., type: str}
   recreate: {description: Delete and create it again now., default: false, type: bool}
@@ -47,7 +48,7 @@ from ansible.module_utils.eco_agentpg import AgentPGError, Cli, State, ensure_sa
 def main():
     m = AnsibleModule(argument_spec=dict(state=dict(default="present", choices=["present", "absent"]), allowed_names=dict(type="list", elements="str"),
                                          name=dict(required=True), image=dict(), instance_id=dict(), port=dict(type="int", default=8000),
-                                         env=dict(type="dict"), secret_env=dict(type="dict", default={}, no_log=True), auto_pause=dict(type="bool", default=True), plan=dict(),
+                                         env=dict(type="dict"), secret_env=dict(type="dict", default={}, no_log=True), auto_pause=dict(type="bool", default=True), plan=dict(), settings_hash=dict(),
                                          recreate=dict(type="bool", default=False), on_change=dict(default="report", choices=["report", "recreate"]),
                                          state_file=dict(type="path", required=True), agentpg_bin=dict(default="agentpg"),
                                          poll_interval=dict(type="float", default=5), timeout=dict(type="int", default=420)),
@@ -63,7 +64,7 @@ def main():
     try:
         out = ensure_sandbox(Cli(binary=p["agentpg_bin"], interval=p["poll_interval"], timeout=p["timeout"]), State(p["state_file"]), p["name"], p["image"],
                              p["instance_id"], p["port"], env, auto_pause=p["auto_pause"], plan=p["plan"], recreate=p["recreate"], on_change=p["on_change"],
-                             check=m.check_mode)
+                             check=m.check_mode, settings_hash=p["settings_hash"])
     except AgentPGError as exc:
         m.fail_json(msg=str(exc))
     m.exit_json(**out)

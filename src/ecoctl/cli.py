@@ -431,6 +431,13 @@ def cmd_connect(args) -> int:
     return 0
 
 
+SEALED_ENV_NOTE = ("sealed fleet: the sandbox holds only APGKIT_SEALED and the non-secret settings above. A sealed secret cannot be read back (it is encrypted under your passphrase and "
+            "opened only inside the app); to change one, rotate it (`ecoctl apply --rotate`)")
+
+
+UNSEALED_ENV_NOTE = "seal is off for this fleet: secrets are in the sandbox environment, readable by whoever can read the platform. Remove `seal: false` and recreate to seal them"
+
+
 def cmd_env(args) -> int:
     ctx = _ctx(args)
     app = ctx.manifest.everything().get(args.app)
@@ -438,10 +445,13 @@ def cmd_env(args) -> int:
         print(f"no such app: {args.app}", file=sys.stderr)
         return 1
     env, secret_names = app_env(ctx, app)
-    if args.reveal:
-        print("# contains secrets: do not paste into a chat or commit it", file=sys.stderr)
+    sealed = ctx.manifest.seal
     for k, v in sorted(env.items()):
-        print(f"export {k}={(v if args.reveal or k not in secret_names else '***')!r}")
+        if k in secret_names:
+            print(f"{k}=*** (secret, {'inside the sealed blob' if sealed else 'in the sandbox environment'}; never shown)")
+        else:
+            print(f"{k}={v}")
+    print(f"# {SEALED_ENV_NOTE if sealed else UNSEALED_ENV_NOTE}", file=sys.stderr)
     return 0
 
 
@@ -515,16 +525,16 @@ def _mcp(ctx, args) -> int:
         return mcp_mod.users(ctx, apps)
     if act == "config":
         path = mcp_mod.write_config(ctx, apps, args.config_file)
-        print(f"wrote {path} (mode 0600, contains database credentials) for {', '.join(apps)}: restricted mode, read-only user {mcp_mod.DB_USER}, {mcp_mod.MAX_CONNECTIONS} connections each")
-        print(f"run it with `agentpg mcp serve --config {path}` or `ecoctl mcp serve`")
+        print(f"wrote {path} (encrypted under your passphrase, mode 0600) for {', '.join(apps)}: restricted mode, read-only user {mcp_mod.DB_USER}, {mcp_mod.MAX_CONNECTIONS} connections each")
+        print(f"`ecoctl mcp serve --from-file {args.config_file}` decrypts it in memory and gives it to the server through a pipe; `agentpg mcp serve --config` cannot read it directly")
         return 0
     if act == "serve":
-        return mcp_mod.serve(ctx, apps, args.transport, args.port, args.host, args.config_file)
+        return mcp_mod.serve(ctx, apps, args.transport, args.port, args.host, args.from_file)
     if act == "claude":
         if args.write and not args.project:
             print("--write updates the project's .mcp.json: add --project", file=sys.stderr)
             return 1
-        entries = mcp_mod.claude_entries(ctx, apps)
+        entries = mcp_mod.claude_entries(ctx, apps, args.file)
         scope = "project" if args.project else None
         if args.project:
             print(json.dumps({"mcpServers": entries}, indent=2))
@@ -533,9 +543,11 @@ def _mcp(ctx, args) -> int:
         if args.write:
             target = Path(".mcp.json")
             mcp_mod.merge_mcp_json(target, entries)
-            print(f"updated {target.resolve()}: do not commit it (it names a local config path); the credentials stay in {ctx.state.dir}", file=sys.stderr)
+            print(f"updated {target.resolve()}: do not commit it (it names local paths); it holds no credential and no passphrase", file=sys.stderr)
         else:
-            print("# the config files hold the credentials (0600, in the state directory); the stanza only names them", file=sys.stderr)
+            print("# the stanza holds no credential: `ecoctl mcp serve` reads them from the encrypted state. The passphrase comes from ECOCTL_SEAL_PASSPHRASE_CMD (set it to your "
+                  "password manager's command before running this, and the stanza carries that command) or from ECOCTL_SEAL_PASSPHRASE in Claude Code's own environment "
+                  "(which every tool Claude runs then inherits: prefer the command)", file=sys.stderr)
         return 0
     return mcp_mod.check(ctx, apps)
 
@@ -573,9 +585,8 @@ def main(argv: list[str] | None = None) -> int:
     cn.add_argument("--rotate", action="store_true", help="create the merchant keys and the webhook signing secret afresh and push them")
     cn.add_argument("--dry-run", action="store_true", help="show what would change without writing anything")
     sub.add_parser("status", help="health of every app, each LLM client and its test call, the connections, and drift from the identity registry")
-    en = sub.add_parser("env", help="print the environment an app is created with (secret values are shown as *** unless --reveal)")
+    en = sub.add_parser("env", help="print the names and non-secret values of the environment an app is created with (secrets are only ever shown as ***)")
     en.add_argument("app")
-    en.add_argument("--reveal", action="store_true", help="print secret values too (to configure something that runs elsewhere)")
     ll = sub.add_parser("llm", help="LLM gateway wiring").add_subparsers(dest="action", required=True)
     lt = ll.add_parser("test", help="one tiny chat call through the gateway with the app's own key")
     lt.add_argument("app")
@@ -590,16 +601,17 @@ def main(argv: list[str] | None = None) -> int:
     ins.add_argument("--json", action="store_true", help="machine-readable output")
     mc = sub.add_parser("mcp", help="read-only AI access to the app databases through AgentPG's database MCP server").add_subparsers(dest="action", required=True)
     for name, text in (("users", "create (once) a read-only database user per app instance; credentials go to the state file only"),
-                       ("config", "write an AgentPG MCP config (restricted mode, read-only user) into the state directory"),
-                       ("serve", "run `agentpg mcp serve` with that config (http always with a generated secret)"),
+                       ("config", "write the AgentPG MCP config (restricted mode, read-only user) into the state directory as an encrypted blob"),
+                       ("serve", "run `agentpg mcp serve`, giving it the decrypted config through a pipe, never a file (http always with a generated secret)"),
                        ("claude", "print (or with --project --write, merge) the Claude Code server entries: one stdio server per app"),
                        ("check", "start the server, list its tools, run `select current_user` and prove a write is refused")):
         sp = mc.add_parser(name, help=text)
         sp.add_argument("apps", nargs="*", metavar="APP", help="apps (default: all; for everything but `users`, those that have a read-only user)")
         sp.add_argument("--all", action="store_true", help="every app (identity is left out of --all: name it to include it)")
-        if name in {"config", "serve"}:
-            sp.add_argument("--file", dest="config_file", default=mcp_mod.DEFAULT_FILE, help="config file name inside the state directory (default databases.yaml)")
+        if name == "config":
+            sp.add_argument("--file", dest="config_file", default=mcp_mod.DEFAULT_FILE, help="blob file name inside the state directory (default databases.sealed)")
         if name == "serve":
+            sp.add_argument("--from-file", dest="from_file", default=None, metavar="NAME", help="use the blob NAME from `mcp config` instead of building the config from the state")
             sp.add_argument("--transport", choices=["stdio", "http"], default="stdio")
             sp.add_argument("--port", type=int, default=8080, help="http only")
             sp.add_argument("--host", default="127.0.0.1", help="http only: address to bind (default loopback; AgentPG's own default is 0.0.0.0)")

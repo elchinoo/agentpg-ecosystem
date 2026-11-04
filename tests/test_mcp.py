@@ -1,8 +1,10 @@
 """`ecoctl mcp`: the read-only user, the AgentPG MCP config, serve, Claude Code entries and check. Fakes only (a tiny fake server for the stdio session)."""
 import json
+import os
 import stat
 import sys
 import textwrap
+from pathlib import Path
 
 import pytest
 import yaml
@@ -86,16 +88,31 @@ def ready(world, capsys, *apps):  # noqa: F811
     return ctx, cli
 
 
-def test_config_is_restricted_with_both_urls_the_readonly_user_and_mode_0600(world, capsys):  # noqa: F811
+def test_config_is_an_encrypted_blob_never_yaml_on_disk(world, capsys):  # noqa: F811
+    from apgkit import sealed
+
+    from tests.conftest import PASSPHRASE
     ctx, cli = ready(world, capsys, "shopfront", "trustdesk")
     path = mcp_mod.write_config(ctx, ["shopfront", "trustdesk"])
-    assert path == ctx.state.dir / "databases.yaml" and stat.S_IMODE(path.stat().st_mode) == 0o600
-    doc = yaml.safe_load(path.read_text())
+    assert path == ctx.state.dir / "databases.sealed" and stat.S_IMODE(path.stat().st_mode) == 0o600
+    raw = path.read_text()
+    assert raw.startswith("apgkit-seal1$") and "postgresql" not in raw and "pw-" not in raw and DB_USER not in raw
+    doc = yaml.safe_load(sealed.open_blob(raw, PASSPHRASE)["config"])
     assert list(doc["databases"]) == ["eco-shopfront-db", "eco-trustdesk-db"] and doc["default_database"] == "eco-shopfront-db"
     d = doc["databases"]["eco-shopfront-db"]
     assert d["access_mode"] == "restricted" and d["max_connections"] == 3 and d["url"] == d["read_only_url"]
     assert d["url"].startswith(f"postgresql://{DB_USER}:pw-{DB_USER}-") and d["url"].endswith("@db.example.test:5432/appdb?sslmode=require")
-    assert "admin" not in d["url"].split("@")[0] and ctx.state.app("shopfront")["db_key"] not in path.read_text()      # never the instance's own key
+    assert "admin" not in d["url"].split("@")[0] and ctx.state.app("shopfront")["db_key"] not in d["url"]      # never the instance's own key
+    assert not list(ctx.state.dir.glob("*.yaml")) and "pw-" not in "".join(p.read_text(errors="ignore") for p in ctx.state.dir.iterdir())
+
+
+def test_the_wrong_passphrase_does_not_open_the_config_blob(world, capsys, monkeypatch):  # noqa: F811
+    ctx, cli = ready(world, capsys, "shopfront")
+    mcp_mod.write_config(ctx, ["shopfront"])
+    ctx.state._pw = None
+    monkeypatch.setenv("ECOCTL_SEAL_PASSPHRASE", "another-passphrase-of-20-chars-or-more")
+    with pytest.raises(McpError, match="could not be decrypted"):
+        mcp_mod.read_sealed_config(ctx, "databases.sealed")
 
 
 @pytest.mark.parametrize("name", ["../x.yaml", "/etc/x", "a/b.yaml", ".."])
@@ -126,40 +143,85 @@ def test_naming_identity_is_allowed_with_a_note_but_all_leaves_it_out(world, cap
 def test_http_serve_always_sets_a_generated_secret_and_binds_loopback(world, capsys, monkeypatch):  # noqa: F811
     ctx, cli = ready(world, capsys, "shopfront")
     monkeypatch.setenv("A1P_JWT_SECRET", "from-the-environment")
+    monkeypatch.setenv("MCP_CONFIG", "databases: {}")
     seen, notes = {}, []
-    rc = mcp_mod.serve(ctx, ["shopfront"], "http", 9090, "127.0.0.1", "databases.yaml", run=lambda args, env: seen.update(args=args, env=env) or 0, say=notes.append)
+
+    def run(args, env, pass_fds):
+        seen.update(args=args, env=env, fds=pass_fds)
+        seen["config"] = os.read(pass_fds[0], 65536).decode() if pass_fds else open(args[args.index("--config") + 1]).read()
+        return 0
+
+    rc = mcp_mod.serve(ctx, ["shopfront"], "http", 9090, "127.0.0.1", run=run, say=notes.append)
     secret = ctx.state.data["mcp"]["jwt_secret"]
-    assert rc == 0 and seen["env"]["A1P_JWT_SECRET"] == secret and len(secret) >= 48
-    assert seen["args"] == ["agentpg", "mcp", "serve", "--config", str(ctx.state.dir / "databases.yaml"), "--transport", "http", "--port", "9090", "--host", "127.0.0.1"]
+    assert rc == 0 and seen["env"]["A1P_JWT_SECRET"] == secret and len(secret) >= 48 and "MCP_CONFIG" not in seen["env"]
+    assert seen["args"][:4] == ["agentpg", "mcp", "serve", "--config"] and seen["args"][5:] == ["--transport", "http", "--port", "9090", "--host", "127.0.0.1"]
+    assert seen["args"][4].startswith("/dev/fd/") and not list(ctx.state.dir.glob("*.yaml"))        # a pipe: no file anywhere
+    assert f"postgresql://{DB_USER}:pw-" in seen["config"]                                          # the child gets the plaintext, in memory
     assert secret not in " ".join(notes + seen["args"]) and "Bearer" in notes[0] and not any("warning" in n for n in notes)
-    # the secret is stable between runs, and a non-loopback bind warns
     notes.clear()
-    mcp_mod.serve(ctx, ["shopfront"], "http", 9090, "0.0.0.0", "databases.yaml", run=lambda args, env: 0, say=notes.append)
+    mcp_mod.serve(ctx, ["shopfront"], "http", 9090, "0.0.0.0", run=lambda args, env, pass_fds: 0, say=notes.append)
     assert ctx.state.data["mcp"]["jwt_secret"] == secret and any("warning" in n for n in notes)
 
 
 def test_stdio_serve_has_no_secret_and_no_port(world, capsys):  # noqa: F811
     ctx, cli = ready(world, capsys, "shopfront")
     seen = {}
-    mcp_mod.serve(ctx, ["shopfront"], "stdio", 8080, "127.0.0.1", "databases.yaml", run=lambda args, env: seen.update(args=args, env=env) or 0, say=lambda s: None)
+    mcp_mod.serve(ctx, ["shopfront"], "stdio", 8080, "127.0.0.1", run=lambda args, env, pass_fds: seen.update(args=args, env=env) or 0, say=lambda s: None)
     assert "A1P_JWT_SECRET" not in seen["env"] and seen["args"][-2:] == ["--transport", "stdio"] and "--port" not in seen["args"]
     with pytest.raises(McpError):
-        mcp_mod.serve(ctx, ["shopfront"], "http", 70000, "127.0.0.1", "databases.yaml", run=lambda a, env: 0, say=lambda s: None)
+        mcp_mod.serve(ctx, ["shopfront"], "http", 70000, "127.0.0.1", run=lambda a, env, pass_fds: 0, say=lambda s: None)
     with pytest.raises(McpError):
-        mcp_mod.serve(ctx, ["shopfront"], "sse", 1, "127.0.0.1", "databases.yaml", run=lambda a, env: 0, say=lambda s: None)
+        mcp_mod.serve(ctx, ["shopfront"], "sse", 1, "127.0.0.1", run=lambda a, env, pass_fds: 0, say=lambda s: None)
 
 
-def test_claude_entries_are_one_stdio_server_per_app_and_hold_no_credentials(world, capsys, tmp_path):  # noqa: F811
+def test_serve_can_open_a_blob_from_mcp_config(world, capsys):  # noqa: F811
+    ctx, cli = ready(world, capsys, "shopfront")
+    mcp_mod.write_config(ctx, ["shopfront"])
+    got = {}
+    mcp_mod.serve(ctx, ["shopfront"], "stdio", 8080, "127.0.0.1", "databases.sealed", say=lambda s: None,
+                  run=lambda args, env, pass_fds: got.update(text=os.read(pass_fds[0], 65536).decode()) or 0)
+    assert "eco-shopfront-db" in got["text"]
+
+
+def test_private_config_pipe_leaves_nothing_behind_and_the_child_reads_it():
+    import subprocess
+    with mcp_mod.private_config("secret: value\n") as (path, fds):
+        assert path.startswith("/dev/fd/")
+        out = subprocess.run(["cat", path], pass_fds=fds, capture_output=True, text=True).stdout
+    assert out == "secret: value\n"
+
+
+def test_private_config_fallback_file_is_0600_in_a_0700_dir_and_removed(monkeypatch):
+    monkeypatch.setattr(mcp_mod.os.path, "isdir", lambda p: False)
+    with mcp_mod.private_config("secret: value\n") as (path, fds):
+        p = Path(path)
+        assert fds == () and stat.S_IMODE(p.stat().st_mode) == 0o600 and stat.S_IMODE(p.parent.stat().st_mode) == 0o700
+        assert p.read_text() == "secret: value\n"
+    assert not p.exists() and not p.parent.exists()
+    with pytest.raises(RuntimeError):                                               # and on an exception
+        with mcp_mod.private_config("x: y\n") as (path, fds):
+            p = Path(path)
+            raise RuntimeError
+    assert not p.parent.exists()
+
+
+def test_claude_entries_launch_ecoctl_and_hold_no_credentials_or_config_file(world, capsys, tmp_path):  # noqa: F811
     ctx, cli = ready(world, capsys, "shopfront", "trustdesk")
-    entries = mcp_mod.claude_entries(ctx, ["shopfront", "trustdesk"])
+    entries = mcp_mod.claude_entries(ctx, ["shopfront", "trustdesk"], MANIFEST)
     assert list(entries) == ["agentpg-eco-shopfront", "agentpg-eco-trustdesk"]
     e = entries["agentpg-eco-shopfront"]
-    assert e["command"] == "agentpg" and e["args"][:3] == ["mcp", "serve", "--config"] and e["args"][-2:] == ["--transport", "stdio"]
-    cfg = yaml.safe_load(open(e["args"][3]).read())
-    assert list(cfg["databases"]) == ["eco-shopfront-db"]
-    assert "pw-" not in json.dumps(entries)
+    assert e["args"][-5:] == ["mcp", "serve", "--transport", "stdio", "shopfront"] and "--state" in e["args"] and "env" not in e
+    blob = json.dumps(entries)
+    assert "pw-" not in blob and "postgresql" not in blob and "PASSPHRASE" not in blob and not list(ctx.state.dir.glob("*.yaml")) and not list(ctx.state.dir.glob("databases*"))
     cmd = mcp_mod.claude_add_command("agentpg-eco-shopfront", e, "project")
-    assert cmd.startswith("claude mcp add --scope project agentpg-eco-shopfront -- agentpg mcp serve --config ")
+    assert cmd.startswith("claude mcp add --scope project agentpg-eco-shopfront -- ")
+    import os
+    os.environ["ECOCTL_SEAL_PASSPHRASE_CMD"] = "pass show ecoctl"                      # a command, not a secret: the stanza may carry it
+    try:
+        e2 = mcp_mod.claude_entries(ctx, ["shopfront"], MANIFEST)["agentpg-eco-shopfront"]
+    finally:
+        del os.environ["ECOCTL_SEAL_PASSPHRASE_CMD"]
+    assert e2["env"] == {"ECOCTL_SEAL_PASSPHRASE_CMD": "pass show ecoctl"} and "ECOCTL_SEAL_PASSPHRASE" not in json.dumps({k: v for k, v in e2.items() if k != "env"})
     target = tmp_path / ".mcp.json"
     target.write_text(json.dumps({"mcpServers": {"other": {"command": "x"}}}))
     mcp_mod.merge_mcp_json(target, entries)
@@ -202,7 +264,7 @@ def test_check_passes_when_the_user_is_read_only(world, capsys):  # noqa: F811
     sessions = []
     opened = []
 
-    def opener(args, env):
+    def opener(args, env, fds=()):
         opened.append((args, env))
         sessions.append(FakeSession())
         return sessions[-1]
@@ -211,13 +273,13 @@ def test_check_passes_when_the_user_is_read_only(world, capsys):  # noqa: F811
     out = capsys.readouterr().out
     assert out.count("refused") == 2 and "ok" in out and all(s.closed for s in sessions)
     assert all("A1P_JWT_SECRET" not in env and a[1:3] == ["mcp", "serve"] for a, env in opened)
-    assert not list(ctx.state.dir.glob(".check-*"))                                          # the temporary single-database configs are removed
+    assert all(a[4].startswith("/dev/fd/") for a, env in opened) and not list(ctx.state.dir.glob(".check-*"))   # a pipe, no file
 
 
 def test_check_fails_loudly_when_a_write_is_accepted(world, capsys):  # noqa: F811
     ctx, cli = ready(world, capsys, "shopfront")
     s = FakeSession(writes_ok=True)
-    assert mcp_mod.check(ctx, ["shopfront"], opener=lambda a, e: s) == 1
+    assert mcp_mod.check(ctx, ["shopfront"], opener=lambda a, e, f=(): s) == 1
     out = capsys.readouterr().out
     assert "ACCEPTED" in out and "WRITE WAS ACCEPTED" in out and "drop table if exists ecoctl_write_probe" in s.calls
 
@@ -228,7 +290,7 @@ def test_check_fails_loudly_when_a_write_is_accepted(world, capsys):  # noqa: F8
 ])
 def test_check_fails_on_the_wrong_user_or_a_missing_tool(world, capsys, session, message):  # noqa: F811
     ctx, cli = ready(world, capsys, "shopfront")
-    assert mcp_mod.check(ctx, ["shopfront"], opener=lambda a, e: session) == 1
+    assert mcp_mod.check(ctx, ["shopfront"], opener=lambda a, e, f=(): session) == 1
     assert message in capsys.readouterr().out
 
 
@@ -277,8 +339,8 @@ def test_cli_parses_mcp_and_does_not_confuse_the_manifest_file_with_the_config_f
     st.app("shopfront").update(instance_id="inst-1", mcp_user={"username": DB_USER, "password": "p", "permission": "read", "host": "h", "port": 5432, "dbname": "d", "query": ""})
     st.save()
     base = ["--state", str(tmp_path / "eco"), "-f", str(MANIFEST)]
-    assert cli_mod.main([*base, "mcp", "config", "--file", "mine.yaml"]) == 0
-    assert (tmp_path / "eco" / "mine.yaml").exists() and "p@h:5432/d" in (tmp_path / "eco" / "mine.yaml").read_text()
+    assert cli_mod.main([*base, "mcp", "config", "--file", "mine.sealed"]) == 0
+    assert (tmp_path / "eco" / "mine.sealed").exists() and "p@h" not in (tmp_path / "eco" / "mine.sealed").read_text()
     out = capsys.readouterr().out
     assert "wrote" in out and "p@h" not in out
     assert cli_mod.main([*base, "mcp", "claude", "--write"]) == 1                                   # --write needs --project

@@ -1,0 +1,25 @@
+---
+# After a platform restart (or a sandbox that was recreated outside this recipe) every sealed app is SEALED again: its sandbox holds only APGKIT_SEALED, a blob that
+# only the operator's passphrase opens, and the platform holds nothing that opens it. Until then the apps do not serve (identity cannot sign tokens; the gateway cannot
+# use a stored provider key). This sends the passphrase, encrypted to a key that exists only in each app's process, identity first, then the gateway, then the rest
+# (as `ecoctl unseal`). It also opens the vaults of the apps with `vault: password`: the passphrase is their admin password.
+#
+#   ECOCTL_SEAL_PASSPHRASE=... ansible-playbook -i inventories/agentpg unseal.yml
+#   ansible-playbook -i inventories/agentpg unseal.yml -e eco_seal_passphrase_prompt=true      ask for it (hidden, never written down)
+#
+# The passphrase is stored nowhere (`ecoctl seal-passphrase` makes a strong one). Idempotent: an open app changes nothing (changed=0).
+- name: "Unseal - open every deployed app with the operator's passphrase, identity first"
+  hosts: localhost
+  gather_facts: false
+  tags: [unseal, unlock]
+  roles: [common]
+  tasks:
+    - name: Unseal each app (check mode touches nothing)
+      ansible.builtin.include_role:
+        name: app
+        tasks_from: unseal_one.yml
+      vars:
+        eco_item: "{{ eco_fleet | eco_get(item) }}"
+      loop: "{{ eco_run_list }}"
+      loop_control: {label: "{{ item }}"}
+      when: eco_http | bool

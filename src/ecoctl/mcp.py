@@ -1,31 +1,44 @@
 """`ecoctl mcp`: read-only AI access to the apps' databases through AgentPG's own database MCP server (`agentpg mcp serve`).
 
 Per app instance there is one database user, `ecoctl_ai`, created with `--permission read` (a member of `a1p_readonly`). Its credentials live only in
-the state file. `config` writes an AgentPG MCP config in `restricted` mode whose `url` and `read_only_url` are BOTH that user's connection string, so
-execute_sql runs as it. Nothing here ever prints a password or the HTTP secret; the config files hold credentials and are written 0600.
+the (encrypted) state file. The AgentPG MCP config (`restricted` mode, `url` and `read_only_url` BOTH that user's connection string, so execute_sql
+runs as it) is never written to disk in the clear:
+
+* `config` writes it as an `apgkit-seal1$...` blob under the operator's passphrase (same format and passphrase as the state file);
+* `serve`, `claude` entries and `check` decrypt/build it in memory and hand it to `agentpg mcp serve --config /dev/fd/N`, an inherited pipe that
+  holds no file at all: the text exists only in this process, in the pipe and in the server's memory. Where /dev/fd does not exist the fallback is a
+  0600 file in a fresh 0700 directory that is removed on exit and on SIGTERM/SIGINT/SIGHUP (see docs/SECURITY.md for what that leaves).
+
+Nothing here ever prints a password or the HTTP secret.
 """
 import json
 import os
 import queue
 import re
 import shlex
+import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
 import yaml
+from apgkit import sealed as kit
 
 from .agentpg import AgentPG, AgentPGError, parse_json
+from .state import ENV_PASSPHRASE_CMD, StateError
 
 DB_USER = "ecoctl_ai"
 SENSITIVE = {"identity"}                 # `--all` leaves these out: the identity provider's database holds client registrations and grants
 MAX_CONNECTIONS = 3
-DEFAULT_FILE = "databases.yaml"
+DEFAULT_FILE = "databases.sealed"
+_FIELD = "config"
 POSTGRES_URL = re.compile(r"postgres(?:ql)?://[^\s\"'<>\\]+")
 WRITE_PROBE = "create table ecoctl_write_probe (id int)"
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
@@ -166,6 +179,10 @@ def config_dict(ctx, apps: list[str]) -> dict:
     return {"databases": dbs, "default_database": next(iter(dbs))}
 
 
+def config_text(ctx, apps: list[str]) -> str:
+    return yaml.safe_dump(config_dict(ctx, apps), sort_keys=False)
+
+
 def config_path(ctx, file: str) -> Path:
     if not file or Path(file).name != file or file in {".", ".."}:
         raise McpError("--file is a file name inside the state directory, not a path")
@@ -173,6 +190,7 @@ def config_path(ctx, file: str) -> Path:
 
 
 def write_private(path: Path, text: str) -> None:
+    """`text` must already be ciphertext (a blob): this is the only thing ecoctl writes for the MCP config."""
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".mcp-")
     with os.fdopen(fd, "w") as fh:
@@ -181,30 +199,121 @@ def write_private(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
+def seal_config(ctx, apps: list[str]) -> str:
+    try:
+        return kit.seal({_FIELD: config_text(ctx, apps)}, ctx.state.passphrase(creating=False, ask=getattr(ctx, "ask_password", None)))
+    except (kit.SealError, StateError) as exc:
+        raise McpError(str(exc)) from None
+
+
 def write_config(ctx, apps: list[str], file: str = DEFAULT_FILE) -> Path:
+    """The MCP config as an encrypted blob (never the YAML) in the state directory."""
     path = config_path(ctx, file)
-    write_private(path, "# written by `ecoctl mcp config`: contains database credentials (mode 0600, git-ignored); regenerate it, never edit or share it\n" +
-                  yaml.safe_dump(config_dict(ctx, apps), sort_keys=False))
+    write_private(path, seal_config(ctx, apps))
     return path
 
 
+def read_sealed_config(ctx, file: str) -> str:
+    path = config_path(ctx, file)
+    try:
+        raw = path.read_text()
+        return kit.open_blob(raw, ctx.state.passphrase(creating=False, ask=getattr(ctx, "ask_password", None)))[_FIELD]
+    except OSError as exc:
+        raise McpError(f"cannot read {path}: {exc.strerror}") from None
+    except (kit.SealError, KeyError, StateError):
+        raise McpError(f"{path} could not be decrypted: wrong passphrase, or it is not a blob written by `ecoctl mcp config`") from None
+
+
+@contextmanager
+def private_config(text: str) -> Iterator[tuple[str, tuple[int, ...]]]:
+    """Hand `text` to a child process without a file: yields (path to pass to --config, fds the child must inherit).
+
+    Preferred: an inheritable pipe, `/dev/fd/N`. Nothing is on any filesystem; the data is gone once the child has read it. Fallback (no /dev/fd): a 0600 file in a fresh
+    0700 directory (tmpfs/RAM-backed when the OS has one), removed on exit, on exceptions and on SIGTERM/SIGINT/SIGHUP."""
+    if os.path.isdir("/dev/fd"):
+        r, w = os.pipe()
+        data = text.encode()
+
+        def feed() -> None:
+            try:
+                with os.fdopen(w, "wb") as fh:
+                    fh.write(data)
+            except OSError:
+                pass                                                   # the child went away without reading it
+
+        threading.Thread(target=feed, daemon=True).start()
+        try:
+            yield f"/dev/fd/{r}", (r,)
+        finally:
+            os.close(r)
+        return
+    base = "/dev/shm" if os.path.isdir("/dev/shm") and os.access("/dev/shm", os.W_OK) else None
+    tmp = tempfile.mkdtemp(prefix="ecoctl-mcp-", dir=base)                # mode 0700
+    old = {}
+
+    def bail(signum, frame):
+        raise SystemExit(128 + signum)
+
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        try:
+            old[sig] = signal.signal(sig, bail)
+        except ValueError:                                              # not the main thread
+            pass
+    try:
+        path = Path(tmp) / "mcp.yaml"
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+        yield str(path), ()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+        for sig, handler in old.items():
+            signal.signal(sig, handler)
+
+
+def run_child(args: list[str], env: dict[str, str], pass_fds: tuple[int, ...] = ()) -> int:
+    """Run the server in the foreground, forwarding termination signals to it so it never outlives us (and so the fallback file is removed)."""
+    proc = subprocess.Popen(args, env=env, pass_fds=pass_fds)
+    old = {}
+
+    def forward(signum, frame):
+        try:
+            proc.send_signal(signum)
+        except OSError:
+            pass
+
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        try:
+            old[sig] = signal.signal(sig, forward)
+        except ValueError:
+            pass
+    try:
+        return proc.wait()
+    finally:
+        for sig, handler in old.items():
+            signal.signal(sig, handler)
+
+
 # ---- serve -------------------------------------------------------------------------------------------------------------
-def serve(ctx, apps: list[str], transport: str, port: int, host: str, file: str, *, run: Callable[..., int] = subprocess.call, say: Callable[[str], None] | None = None) -> int:
-    """Run `agentpg mcp serve --config <file>`. Notes go to stderr: on stdio, stdout belongs to the protocol. http always gets a generated
-    A1P_JWT_SECRET (the server accepts anyone without one), and binds to loopback unless --host says otherwise."""
+def serve(ctx, apps: list[str], transport: str, port: int, host: str, file: str | None = None, *, run: Callable[..., int] = run_child,
+          say: Callable[[str], None] | None = None) -> int:
+    """Run `agentpg mcp serve --config <private channel>`. Notes go to stderr: on stdio, stdout belongs to the protocol. http always gets a generated
+    A1P_JWT_SECRET (the server accepts anyone without one), and binds to loopback unless --host says otherwise. `file` names a blob written by
+    `ecoctl mcp config` (decrypted here); without it the config is built from the encrypted state."""
     say = say or (lambda s: print(s, file=sys.stderr))
     if transport not in {"stdio", "http"}:
         raise McpError("--transport is stdio or http")
-    path = write_config(ctx, apps, file)
-    args = [ctx.agentpg.bin, "mcp", "serve", "--config", str(path), "--transport", transport]
+    text = read_sealed_config(ctx, file) if file else config_text(ctx, apps)
     env = dict(os.environ)
     env.pop("A1P_JWT_SECRET", None)
+    env.pop("MCP_CONFIG", None)                                          # the server would read it instead of --config
+    extra: list[str] = []
     if transport == "http":
         if not 1 <= port <= 65535:
             raise McpError("--port must be 1-65535")
         env["A1P_JWT_SECRET"] = ctx.state.mcp_jwt_secret()           # never start http without it
         ctx.state.save()
-        args += ["--port", str(port), "--host", host]
+        extra = ["--port", str(port), "--host", host]
         say(f"HTTP MCP server on {host}:{port} for {', '.join(apps)} (read-only user {DB_USER}); clients must send `Authorization: Bearer <JWT>`, a JWT signed (HS256) with the secret kept "
             f"in {ctx.state.path} under mcp.jwt_secret (not printed). The claims AgentPG expects were not verified: see `agentpg mcp serve --help` and its docs. "
             "Select the database with the X-A1P-Instance header.")
@@ -212,16 +321,29 @@ def serve(ctx, apps: list[str], transport: str, port: int, host: str, file: str,
             say(f"warning: bound to {host}, not loopback: anyone who can reach it and holds a valid token can read these databases. Put TLS in front of it.")
     else:
         say(f"stdio MCP server for {', '.join(apps)} (read-only user {DB_USER}); the first database ({ctx.manifest.instance_name(apps[0])}) is the default one.")
-    return run(args, env=env)
+    with private_config(text) as (path, fds):
+        return run([ctx.agentpg.bin, "mcp", "serve", "--config", path, "--transport", transport, *extra], env=env, pass_fds=fds)
 
 
 # ---- Claude Code -------------------------------------------------------------------------------------------------------
-def claude_entries(ctx, apps: list[str]) -> dict[str, dict]:
-    """One stdio server per app, each with its own single-database config, so which database a tool talks to never depends on a header or an argument."""
+def ecoctl_command() -> list[str]:
+    exe = shutil.which("ecoctl")
+    return [str(Path(exe).resolve())] if exe else [sys.executable, "-c", "import sys; from ecoctl.cli import main; sys.exit(main())"]
+
+
+def claude_entries(ctx, apps: list[str], manifest_file: str | Path = "ecosystem.yaml") -> dict[str, dict]:
+    """One stdio server per app. The stanza launches `ecoctl mcp serve`, which decrypts the credentials in memory and feeds them to the server through a pipe: no config
+    file with credentials exists, and the stanza holds none. The passphrase is NOT in the stanza: ecoctl gets it from ECOCTL_SEAL_PASSPHRASE_CMD (a command, copied into the
+    stanza when set: it is not a secret) or from ECOCTL_SEAL_PASSPHRASE in the environment Claude Code was started with (a prompt is impossible: stdio belongs to the protocol)."""
+    base = ecoctl_command()
     entries = {}
     for k in apps:
-        path = write_config(ctx, [k], f"databases-{k}.yaml").resolve()
-        entries[f"agentpg-{ctx.manifest.fleet}-{k}"] = {"command": ctx.agentpg.bin, "args": ["mcp", "serve", "--config", str(path), "--transport", "stdio"]}
+        _user(ctx, k)                                                    # fail now, not when Claude starts it
+        args = [*base[1:], "--state", str(ctx.state.dir.resolve()), "-f", str(Path(manifest_file).resolve()), "mcp", "serve", "--transport", "stdio", k]
+        entry = {"command": base[0], "args": args}
+        if os.environ.get(ENV_PASSPHRASE_CMD):                                # a command (not a secret) that prints the passphrase, e.g. a password manager's CLI
+            entry["env"] = {ENV_PASSPHRASE_CMD: os.environ[ENV_PASSPHRASE_CMD]}
+        entries[f"agentpg-{ctx.manifest.fleet}-{k}"] = entry
     return entries
 
 
@@ -247,11 +369,11 @@ def merge_mcp_json(path: Path, entries: dict[str, dict]) -> None:
 class StdioSession:
     """A JSON-RPC session with an MCP server over stdio (one JSON message per line)."""
 
-    def __init__(self, args: list[str], env: dict[str, str], timeout: float = 60):
+    def __init__(self, args: list[str], env: dict[str, str], pass_fds: tuple[int, ...] = (), timeout: float = 60):
         self.timeout, self._id = timeout, 0
         self._err = tempfile.TemporaryFile()
         try:
-            self.proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self._err, text=True, env=env)
+            self.proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self._err, text=True, env=env, pass_fds=pass_fds)
         except OSError as exc:
             raise McpError(f"could not start {args[0]}: {exc}") from exc
         self._lines: queue.Queue = queue.Queue()
@@ -336,15 +458,17 @@ def _sql_arg(tool: dict) -> str:
     return next(iter(props), "sql")
 
 
-def check_one(ctx, key: str, opener: Callable[[list[str], dict], StdioSession] = StdioSession) -> Check:
+def check_one(ctx, key: str, opener: Callable[..., StdioSession] = StdioSession) -> Check:
     """Start the server for this one database, list its tools, run `select current_user`, and try a write (which must be refused)."""
-    path = write_config(ctx, [key], f".check-{key}.yaml")
     env = dict(os.environ)
     env.pop("A1P_JWT_SECRET", None)
+    env.pop("MCP_CONFIG", None)
     res = Check(key, [])
     session = None
+    channel = private_config(config_text(ctx, [key]))
+    path, fds = channel.__enter__()
     try:
-        session = opener([ctx.agentpg.bin, "mcp", "serve", "--config", str(path), "--transport", "stdio"], env)
+        session = opener([ctx.agentpg.bin, "mcp", "serve", "--config", path, "--transport", "stdio"], env, fds)
         session.request("initialize", {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "ecoctl", "version": "1"}})
         session.notify("notifications/initialized")
         tools = session.request("tools/list").get("tools", [])
@@ -373,14 +497,11 @@ def check_one(ctx, key: str, opener: Callable[[list[str], dict], StdioSession] =
     finally:
         if session:
             session.close()
-        try:
-            path.unlink()
-        except OSError:
-            pass
+        channel.__exit__(None, None, None)
     return res
 
 
-def check(ctx, apps: list[str], opener: Callable[[list[str], dict], StdioSession] = StdioSession, emit: Callable[[str], None] = print) -> int:
+def check(ctx, apps: list[str], opener: Callable[..., StdioSession] = StdioSession, emit: Callable[[str], None] = print) -> int:
     results = [check_one(ctx, k, opener) for k in apps]
     emit(f"{'app':<16}{'tools':<7}{'current_user':<16}{'write':<10}result")
     for r in results:

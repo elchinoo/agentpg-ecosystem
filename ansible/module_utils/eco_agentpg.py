@@ -2,8 +2,9 @@
 plain Python so the modules and the tests share one implementation: the command shapes are compared with ecoctl's in tests/test_ansible_recipe.py,
 and the behaviour is exercised against ecoctl's in-memory fake CLI.
 
-Nothing here prints or returns a secret: environment values reach the CLI as `--env K=V` (as in ecoctl, so they pass through this machine's process
-list for a moment), the database key goes only to the state file.
+The one secret that passes through here is the database key AgentPG shows once at creation: it is RETURNED once (`new_db_key`, the task is no_log) so the
+playbook can keep it in the encrypted state (eco_state, module_utils/eco_state.py); it is never written to this per-app file, which holds only ids, URLs and
+hashes. A sandbox's environment is sealed (APGKIT_SEALED plus non-secret settings), so what reaches the CLI as `--env K=V` is not secret.
 """
 from __future__ import annotations
 
@@ -136,7 +137,7 @@ class Cli:
 
 
 class State:
-    """One app's entry of ecoctl's state file (instance_id, db_key, extensions, sandbox_id, url, env_hash), one JSON file per app, mode 0600."""
+    """One app's non-secret entry (instance_id, extensions, sandbox_id, url, env_hash), one JSON file per app, mode 0600. It never holds the database key."""
 
     def __init__(self, path: str):
         self.path = path
@@ -146,6 +147,7 @@ class State:
                 self.data = json.load(fh)
 
     def save(self) -> None:
+        self.data.pop("db_key", None)                          # an older recipe kept it here: it lives in the encrypted state now
         directory = os.path.dirname(self.path) or "."
         os.makedirs(directory, mode=0o700, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=directory, prefix=".state-")
@@ -156,26 +158,41 @@ class State:
 
 
 # ---- the three idempotent operations (each returns the module's result; `check` reads only) ------------------------------------
+def _keep_key(exc: AgentPGError, key: str) -> AgentPGError:
+    """The key is shown once: a failure after creation must still hand it to the playbook (which keeps it encrypted before failing the run)."""
+    exc.new_db_key = key
+    return exc
+
+
+def _after_create(cli: Cli, name: str, key: str) -> str:
+    try:
+        iid = cli.instance_id(name)
+    except AgentPGError as exc:
+        raise _keep_key(exc, key) from None
+    if not iid:
+        raise _keep_key(AgentPGError(f"created instance {name} but could not find its id in `agentpg instances list`"), key)
+    return iid
+
+
 def ensure_instance(cli: Cli, st: State, name: str, size: str, wait: bool = True, check: bool = False) -> dict:
     d = st.data
     iid = d.get("instance_id") or cli.instance_id(name)
-    created = False
+    created, new_key = False, ""
     if not iid:
         if check:
-            return {"changed": True, "instance_id": "", "created": True, "msg": f"would create instance {name} ({size})", "db_key_saved": bool(d.get("db_key"))}
-        token = token_from(cli.run(create_instance_args(name, size)))
-        if token:
-            d["db_key"] = token                                  # also the database password; AgentPG shows it only now
-        iid = cli.instance_id(name)
-        if not iid:
-            raise AgentPGError(f"created instance {name} but could not find its id in `agentpg instances list`")
+            return {"changed": True, "instance_id": "", "created": True, "msg": f"would create instance {name} ({size})", "new_db_key": ""}
+        new_key = token_from(cli.run(create_instance_args(name, size))) or ""       # also the database password; AgentPG shows it only now: returned once, kept encrypted by the playbook
         created = True
+        iid = _after_create(cli, name, new_key)
     if d.get("instance_id") != iid and not check:
         d["instance_id"] = iid
         st.save()
     if wait and not check:
-        cli.wait_instance(iid)
-    return {"changed": created, "instance_id": iid, "created": created, "db_key_saved": bool(d.get("db_key")),
+        try:
+            cli.wait_instance(iid)
+        except AgentPGError as exc:
+            raise _keep_key(exc, new_key) from None
+    return {"changed": created, "instance_id": iid, "created": created, "new_db_key": new_key,
             "msg": f"created instance {name}" if created else f"instance {name} exists"}
 
 
@@ -206,16 +223,17 @@ def ensure_extensions(cli: Cli, st: State, instance_id: str, names: list[str], c
 
 
 def ensure_sandbox(cli: Cli, st: State, name: str, image: str, instance_id: str, port: int, env: dict[str, str], *, auto_pause: bool = True,
-                   plan: str | None = None, recreate: bool = False, on_change: str = "report", check: bool = False) -> dict:
+                   plan: str | None = None, recreate: bool = False, on_change: str = "report", check: bool = False, settings_hash: str | None = None) -> dict:
     """Instance and extensions are done. Existing sandboxes are kept; a changed environment is reported (on_change=report, as `ecoctl apply`) or
-    the sandbox is deleted and created again with the same database (on_change=recreate, or `recreate`: as `ecoctl recreate`)."""
+    the sandbox is deleted and created again with the same database (on_change=recreate, or `recreate`: as `ecoctl recreate`).
+    `settings_hash` is the hash of the plain environment (computed by the playbook): a sealed blob differs every time, so the ciphertext is not what is compared."""
     d = st.data
     if d.get("sandbox_id") and d["sandbox_id"] not in cli.sandbox_ids():           # deleted behind our back: start over
         for k in ("sandbox_id", "url", "env_hash"):
             d.pop(k, None)
         if not check:
             st.save()
-    want = env_hash(env)
+    want = settings_hash or env_hash(env)
     changed, outcome, differs, recreated = False, [], False, False
     if d.get("sandbox_id") and (recreate or (d.get("env_hash") and d["env_hash"] != want and on_change == "recreate")):
         recreated, changed = True, True

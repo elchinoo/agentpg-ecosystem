@@ -9,9 +9,10 @@ Report vulnerabilities privately through GitHub's "Report a vulnerability" (Secu
   database keys, and it is **encrypted at rest**: an `apgkit-seal1$...` blob (AES-256-GCM, key derived with scrypt from the operator's passphrase;
   agentpg-kit `apgkit.sealed`). The file is encrypted in memory and only the blob is written, atomically, through a temporary file that never holds
   plaintext. A state file from an older ecoctl (plain JSON) is read, then rewritten encrypted on the next save, its old bytes overwritten first; ecoctl says so.
-  Printed plans and errors mask secret values, and no command prints the state or a stored secret (`ecoctl env --reveal` prints an app's sandbox
-  environment on request; it is the one deliberate exception and is not available for the state itself).
-- **The passphrase is the single secret the operator holds.** `ECOCTL_SEAL_PASSPHRASE` or a prompt, once per run; it is never written to the state,
+  Printed plans and errors mask secret values, and **no command prints the state or a stored secret**: `ecoctl env APP` shows names, non-secret values and `***` for
+  every secret, and has no way to show them (`--reveal` was removed). A sealed secret is not readable by design; to change one, rotate it (`apply --execute --rotate`,
+  or rotate it at its source: the identity console for a client secret, the gateway console for a key).
+- **The passphrase is the single secret the operator holds.** `ECOCTL_SEAL_PASSPHRASE`, the output of the command in `ECOCTL_SEAL_PASSPHRASE_CMD` (a password manager's CLI), or a prompt, once per run; it is never written to the state,
   a sandbox, a log or an error message, and the same passphrase seals the apps (below). Lose it and the state is unreadable: recover with `apply --execute --rotate`.
 - **Limits, stated plainly.** While ecoctl runs, the passphrase and the decrypted state are in its memory: a compromised operator machine (malware,
   a debugger, root, a memory dump, a swapped-out page) sees them, and anything in the environment of the shell that exports `ECOCTL_SEAL_PASSPHRASE`.
@@ -19,9 +20,19 @@ Report vulnerabilities privately through GitHub's "Report a vulnerability" (Secu
   is best effort: copy-on-write filesystems, SSD wear levelling, snapshots and backups can keep the old bytes, so a plaintext state that existed should be treated
   as exposed and its secrets rotated. Commands that need no secrets (`validate`, and `plan` before any state exists) run without the passphrase; every command that reads an
   existing state file needs it.
-- **Not covered by this encryption.** `ecoctl mcp config|serve|claude` writes `databases*.yaml` files with a read-only database user's credentials into the state
-  directory (mode 0600) because `agentpg mcp serve` reads a plain config file; delete them when you are done. `ecoctl env --reveal` writes to your terminal, and
-  `.mcp.json` entries only point at those files. Do not run either on a machine you do not trust.
+- **The read-only AI database user is covered too (`ecoctl mcp`).** Its credentials live only in the encrypted state. `mcp config` writes the AgentPG MCP config as an
+  `apgkit-seal1$...` blob (`databases.sealed`), never as YAML. `mcp serve`, `mcp check` and the Claude Code entries (`mcp claude`) decrypt or build the config in memory and
+  hand it to `agentpg mcp serve --config /dev/fd/N`, an inherited **pipe**: no file with credentials exists at any moment (`agentpg mcp serve` reads `--config FILE`, which
+  accepts a pipe, or the `MCP_CONFIG` variable, which would put the YAML in the process environment, so the pipe is the strongest option it supports; ecoctl removes
+  `MCP_CONFIG` from the child's environment). The Claude Code stanza launches `ecoctl mcp serve --transport stdio APP`; it holds no credential and no passphrase.
+  Where the OS has no `/dev/fd`, the fallback is a 0600 file in a fresh 0700 directory (RAM-backed `/dev/shm` when present) removed on exit and on SIGTERM/SIGINT/SIGHUP.
+  *Limits:* the child process (`agentpg`) holds the credentials in memory and uses them to connect; before it has read the pipe, a process of the same user (or root) could read
+  it through `/proc/<pid>/fd` on Linux; a `kill -9` of ecoctl can only leave a fallback file behind, never a pipe; `--transport http` serves the databases to anyone with a valid
+  JWT, whose HS256 secret is in the encrypted state (`mcp.jwt_secret`).
+- **How a stdio MCP client gets the passphrase.** stdio belongs to the protocol, so no prompt is possible. Set `ECOCTL_SEAL_PASSPHRASE_CMD` to your password manager's command
+  (for example `pass show ecoctl`) before `ecoctl mcp claude`: the stanza carries the command, which is not a secret, and the passphrase is fetched when the server starts.
+  The alternative, `ECOCTL_SEAL_PASSPHRASE` in the environment of the shell that starts Claude Code, is inherited by every tool Claude runs there (including its shell tool): do not
+  use it where the model can run commands you would not run yourself.
 - The tool never destroys anything and changes nothing without `--execute` and a confirmation.
 - It talks to the identity provider with the static admin key it generated for it; client secrets are issued by the provider once.
 - It trusts the `agentpg` CLI on your PATH and the output formats described in the README.
@@ -40,7 +51,7 @@ value in the sandbox environment, so the app unlocks itself after a restart. For
 For these two `ecoctl` sets **no** `IDENTITY_ENCRYPTION_KEY` / `LLMGW_ENCRYPTION_KEY` (the manifest refuses to list one under `generate:`). The vault is
 created on the first `apply` and opened after every restart with an **admin password that the operator holds and the platform never stores**
 (`ECOCTL_ADMIN_PASSWORD` or `--admin-password-prompt`; with sealing, the default, the seal passphrase itself). It is **never stored**: not in the state file, not on the platform;
-ecoctl does not generate one for you (`ecoctl seal-passphrase` prints a strong random one for a password manager). `ecoctl unlock` opens them after a platform restart; the Ansible recipe has `unlock.yml`. Other apps keep their platform wrap and auto-unlock.
+ecoctl does not generate one for you (`ecoctl seal-passphrase` prints a strong random one for a password manager). `ecoctl unlock` opens them after a platform restart (with sealing, `ecoctl unseal`); the Ansible recipe has `unseal.yml`. Other apps keep their platform wrap and auto-unlock.
 
 **Threat addressed.** A disclosure of the platform environment (the sandbox environment, injected files, the database credentials, a database copy)
 no longer opens the identity signing key or the provider keys: the value needed to unwrap the data key (the password) is not on the platform, so the
@@ -50,7 +61,7 @@ wrapped key in the database cannot be opened with what the platform holds.
 - **Write access to the database** no longer plants a session, token, key or route while the vault is unlocked: the security tables carry row MACs under a subkey of the data key (see below). It is not covered by the MACs: replaying an older authentic row from a backup, deleting rows, and columns that are not authority (names, descriptions, timestamps).
 - **The data key lives in process memory** while the app runs unlocked: anyone who can execute code inside the running process, or read its memory, gets it. A running, unlocked identity provider still signs for whoever can call its admin API; the static `IDENTITY_API_KEY` and `LLMGW_API_KEY` in the sandbox environment remain wildcard operator credentials (a separate control).
 - **The admin password is a high-value secret**: it opens the vault and the admin console. Offline guessing against a copy of the database is slowed only by the key derivation (scrypt), so use a long random passphrase, keep it in a password manager, and keep `.ecosystem/` private. Losing it loses the vault (`reset-admin` recreates it and discards what it protected).
-- **Restarts need a human.** After any platform restart, recreate or crash, identity cannot sign and the gateway cannot use a stored provider key until `ecoctl unlock` (or `unlock.yml`) runs. Tokens already issued keep working until they expire, because the apps verify them offline against the published keys; new sign-ins and service tokens fail meanwhile.
+- **Restarts need a human.** After any platform restart, recreate or crash, identity cannot sign and the gateway cannot use a stored provider key until `ecoctl unseal` / `ecoctl unlock` (or `unseal.yml`) runs. Tokens already issued keep working until they expire, because the apps verify them offline against the published keys; new sign-ins and service tokens fail meanwhile.
 - A vault that was ever opened by a platform key keeps that wrap in its database until it is dropped and the data key rotated (docs/DEPLOY.md, moving an existing fleet).
 
 ## Sealed boot: no secret in the environment, the config or the image
@@ -70,6 +81,19 @@ With the vault unlocked, writing to the database cannot create a valid session, 
 - The platform knows the database credentials it provisioned; apps still use the instance admin credential (a runtime least-privilege role is not done yet).
 - Python can leave transient copies of a secret as a `str`; the long-lived copies are the masked ones.
 - After a platform rebuild each app needs `ecoctl unseal`; upgraded databases need one `adopt-rowmacs` per app.
+
+## The Ansible recipe is sealed like ecoctl (`ansible/`)
+The recipe never renders a secret. A sandbox is created with `APGKIT_SEALED` (its secrets and `DATABASE_URL`, encrypted under the operator's passphrase by agentpg-kit's `apgkit.sealed`) plus
+non-secret settings; on your own hosts the container's env file holds the same and nothing else. `site.yml` refuses a manifest with `agentpg.seal: false`. After creating an app the recipe
+unseals it (`unseal.yml` does it after a platform restart; `unlock.yml` is now an alias). Everything secret the recipe holds (the instances' database keys, the generate-once secrets, the
+client secrets, gateway keys, merchant keys and webhook secrets that services show once) is in **one encrypted file**, `ansible/.secrets/<fleet>/state.sealed` (same blob format and same
+passphrase as ecoctl's state file; `ECOCTL_SEAL_PASSPHRASE` in the environment of `ansible-playbook`, or `-e eco_seal_passphrase_prompt=true` for a hidden prompt; stored nowhere). The
+`.secrets/<fleet>/generated|issued|vault` files and the plaintext `db_key` of an older recipe are moved into it, overwritten and removed on the first run (best effort, see below).
+The crypto runs in an action plugin on the control node, in memory (`plugins/action/eco_state.py` reusing `apgkit.sealed`); the control node needs `agentpg-kit` in the Python environment
+that runs Ansible. Every task that carries a secret is `no_log: true` and `pipelining` is on, so a module's arguments never reach a temporary file. *Limits:* the passphrase and the decrypted
+secrets are in the memory of `ansible-playbook` (and, with the prompt, in a fact for the run); Ansible Vault files you supply are your own to protect; the throwaway
+demo database container of `eco_target: hosts` still receives its password as a `docker run --env` argument and the `community.postgresql` modules still receive the
+database logins as module arguments (hosts target only); `ansible-playbook -vvv` logs requests and responses of tasks that are not `no_log`, none of which carries a secret here.
 
 ## LLM gateway keys
 - `ecoctl` generates a static operator key for the gateway (`LLMGW_API_KEY`) and keeps it in the state file like every other generated

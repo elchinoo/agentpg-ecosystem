@@ -40,23 +40,44 @@
   when: eco_target == 'hosts'
   tags: always
 
-- name: Load (or, the first time, generate) every generate-once secret
-  ansible.builtin.set_fact:
-    eco_secrets: >-
-      {{ eco_secrets | default({}) | combine({item:
-           (eco_secret_overrides[item] if item in eco_secret_overrides
-            else lookup('ansible.builtin.password', eco_secrets_dir ~ '/generated/' ~ item ~ ' length=43 chars=ascii_letters,digits,-,_'))}) }}
-  loop: "{{ eco_fleet | eco_secret_names(eco_target) }}"
+- name: The seal passphrase (a prompt only when asked for; otherwise ECOCTL_SEAL_PASSPHRASE is read by the action plugin)
+  ansible.builtin.import_tasks: passphrase.yml
+  when: eco_seal_passphrase is not defined
+  tags: always
+
+- name: Load (or, the first time, create) the encrypted state; generate every generate-once secret
+  eco_state:
+    op: load
+    path: "{{ eco_state_file }}"
+    passphrase: "{{ eco_seal_passphrase | default(omit) }}"
+    secrets_dir: "{{ eco_secrets_dir }}"
+    names: >-
+      {{ eco_fleet | eco_secret_names(eco_target)
+         + (['db/POSTGRES_PASSWORD'] if eco_target == 'hosts' and eco_db_demo_container | bool else []) }}
+    overrides: "{{ eco_secret_overrides }}"
+    issued_names: >-
+      {{ eco_fleet.selected | product(['client_secret', 'service_secret', 'llm_key']) | map('join', '/') | list + ['eco-ansible/service_secret'] }}
+  register: eco_loaded
+  ignore_errors: true
   no_log: true
   tags: always
 
-- name: Load the secrets the identity provider and the gateway issued once (client secrets, gateway keys)
+- name: The state could not be opened
+  ansible.builtin.fail:
+    msg: "{{ eco_loaded.msg | default('eco_state failed') }}"
+  when: eco_loaded is failed
+  tags: always
+
+- name: Plaintext files of an older recipe were moved into the encrypted state
+  ansible.builtin.debug:
+    msg: "moved into {{ eco_state_file }} and overwritten: {{ eco_loaded.moved | join(', ') }}. Secrets that were ever plaintext on this disk (or in a sandbox environment) should be treated as exposed and rotated; recreate the sandboxes (-e eco_env_change=recreate) so they are sealed."
+  when: eco_loaded.moved | default([]) | length > 0
+  tags: always
+
+- name: The secrets, for this play (in memory only)
   ansible.builtin.set_fact:
-    eco_issued: >-
-      {{ eco_issued | default({}) | combine({item: (lookup('ansible.builtin.file', eco_secrets_dir ~ '/issued/' ~ item, errors='ignore') | default('', true)
-                                                    | string | trim)}) }}
-  loop: >-
-    {{ eco_fleet.selected | product(['client_secret', 'service_secret', 'llm_key']) | map('join', '/') | list + ['eco-ansible/service_secret'] }}
+    eco_secrets: "{{ eco_loaded.secrets }}"
+    eco_issued: "{{ eco_loaded.issued }}"
   no_log: true
   tags: always
 

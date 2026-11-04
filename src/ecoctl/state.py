@@ -1,7 +1,8 @@
 """What `apply` learned and generated: instance and sandbox ids, URLs, client secrets, generated secrets.
 
 Lives in .ecosystem/state.json (git-ignored, mode 0600) as an `apgkit-seal1$...` blob: AES-256-GCM under a key derived (scrypt) from the operator's
-passphrase (agentpg-kit `apgkit.sealed`). The passphrase is ECOCTL_SEAL_PASSPHRASE or a prompt, once per run, and is never written anywhere. The
+passphrase (agentpg-kit `apgkit.sealed`). The passphrase is ECOCTL_SEAL_PASSPHRASE, the output of the command in ECOCTL_SEAL_PASSPHRASE_CMD (a password manager's CLI: the command is not a secret,
+so it can sit in an MCP stanza where the passphrase itself must not), or a prompt, once per run, and is never written anywhere. The
 file is encrypted in memory and only the blob is written (atomically, through a temporary file that only ever holds ciphertext), so no plaintext
 copy of a secret reaches the disk. Client secrets are shown by the identity provider only once, so this file is the only copy: lose it, or the
 passphrase, and `apply --rotate` issues new ones.
@@ -12,6 +13,8 @@ import getpass
 import json
 import os
 import secrets
+import shlex
+import subprocess
 import sys
 import tempfile
 from collections.abc import Callable
@@ -22,6 +25,7 @@ from apgkit.passwords import ScryptBusy
 
 DEFAULT_DIR = Path(".ecosystem")
 ENV_PASSPHRASE = "ECOCTL_SEAL_PASSPHRASE"
+ENV_PASSPHRASE_CMD = "ECOCTL_SEAL_PASSPHRASE_CMD"
 _FIELD = "state"
 
 
@@ -52,6 +56,8 @@ class State:
             pw = env
         elif self._pw:
             return self._pw
+        elif os.environ.get(ENV_PASSPHRASE_CMD):
+            pw = self._from_command(os.environ[ENV_PASSPHRASE_CMD])
         else:
             prompt = ask or self.ask or getpass.getpass
             pw = prompt("Passphrase for the state file and the sealed apps (not stored anywhere; at least 20 characters, `ecoctl seal-passphrase` makes one): ")
@@ -63,6 +69,17 @@ class State:
             raise StateError(str(exc)) from None
         self._pw = pw
         return pw
+
+    @staticmethod
+    def _from_command(command: str) -> str:
+        """The passphrase printed by a command (no shell; split like a shell would): `security find-generic-password -s ecoctl -w`, `pass show ecoctl`, `op read ...`."""
+        try:
+            r = subprocess.run(shlex.split(command), capture_output=True, text=True, timeout=60, check=False)         # noqa: S603  (the operator's own command)
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            raise StateError(f"{ENV_PASSPHRASE_CMD} could not be run") from None
+        if r.returncode != 0 or not r.stdout.strip():
+            raise StateError(f"{ENV_PASSPHRASE_CMD} failed or printed nothing (exit {r.returncode})")
+        return r.stdout.rstrip("\r\n")
 
     # ---- reading and writing the file -----------------------------------------------------------------------------------
     def _load(self) -> None:

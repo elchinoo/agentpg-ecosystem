@@ -7,6 +7,7 @@ limits. tests/test_ansible_recipe.py compares every result with ecoctl.manifest 
 from __future__ import annotations
 
 import hashlib
+import json
 
 PENDING_REDIRECT = "https://pending.invalid/auth/callback"       # same placeholder as ecoctl: replaced once the real URL is known
 
@@ -88,7 +89,7 @@ def eco_fleet(doc: dict, only=None) -> dict:
            "embed_dimensions": g.get("embed_dimensions", 768), "rpm": g.get("rpm", 60), "budget": g.get("budget", 5_000_000),
            "budget_mode": g.get("budget_mode", "hard")}
     reg = doc.get("agentpg") or {}
-    fleet = {"agentpg": {"size": str(reg.get("size", "small")), "auto_pause": reg.get("auto_pause", True), "plan": reg.get("plan")}, "fleet": doc["fleet"], "registry": str(reg.get("registry", "ghcr.io/elchinoo")).rstrip("/"), "tag": reg.get("tag", "latest"), "llm": llm,
+    fleet = {"agentpg": {"size": str(reg.get("size", "small")), "auto_pause": reg.get("auto_pause", True), "plan": reg.get("plan"), "seal": reg.get("seal", True)}, "fleet": doc["fleet"], "registry": str(reg.get("registry", "ghcr.io/elchinoo")).rstrip("/"), "tag": reg.get("tag", "latest"), "llm": llm,
              "identity": _app("identity", doc.get("identity"), identity=True), "apps": {k: _app(k, v) for k, v in doc["apps"].items()}}
     fleet["order"] = _order(fleet)
     _check_vaults(fleet)
@@ -190,6 +191,11 @@ def eco_urls(fleet: dict, scheme: str, domain: str, port="", hosts=None) -> dict
     suffix = f":{port}" if port not in ("", None, 443, 80) else ""
     hosts = hosts or {}
     return {k: f"{scheme}://{hosts.get(k, f'{k}.{domain}')}{suffix}" for k in ("identity", *fleet["apps"])}
+
+
+def eco_env_hash(env: dict) -> str:
+    """The hash of an app's plain environment that the sandbox records (ecoctl.plan._env_hash): compared instead of the sealed blob, which differs every time."""
+    return hashlib.sha256(json.dumps({k: str(v) for k, v in env.items()}, sort_keys=True).encode()).hexdigest()[:12]
 
 
 def eco_fingerprint(value: str) -> str:

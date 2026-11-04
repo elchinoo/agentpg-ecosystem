@@ -34,6 +34,18 @@ jobs:
           path: ecosystem
           persist-credentials: false
 
+      # Fail early, with the reason, when a sibling repository cannot be read (a private one such as ShopFront needs E2E_REPOS_TOKEN).
+      - name: Check that the sibling repositories are readable
+        env:
+          GH_TOKEN: ${{ secrets.E2E_REPOS_TOKEN || github.token }}
+        run: |
+          for repo in agentpg-kit TrustDesk PayBroker PagerLens CityPulse CityPulseSimulator llm-gateway identity ShopFront; do
+            if ! gh api "repos/elchinoo/$repo" --silent 2>/dev/null; then
+              echo "::error::elchinoo/$repo is not readable with this token (private repository?). Store a read-only token (contents: read on the private repositories) as the secret E2E_REPOS_TOKEN."
+              exit 1
+            fi
+          done
+
       # The sibling repositories. If they are private, create a read-only token (contents: read on these repositories) and store
       # it as the secret E2E_REPOS_TOKEN; otherwise the workflow's own token is used.
       - name: Checkout agentpg-kit

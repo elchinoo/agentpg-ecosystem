@@ -1,9 +1,23 @@
 ---
-- name: "{{ eco_conn.app }} -> {{ eco_conn.peer }}: what was kept from an earlier run"
+- name: "{{ eco_conn.app }} -> {{ eco_conn.peer }}: what was kept from an earlier run (the encrypted state)"
+  eco_state:
+    op: load
+    path: "{{ eco_state_file }}"
+    passphrase: "{{ eco_seal_passphrase | default(omit) }}"
+    issued_names: "{{ ['secret_key', 'publishable_key', 'secret_key_id', 'publishable_key_id', 'webhook_secret'] | map('regex_replace', '^', 'connect-' ~ eco_conn.app ~ '/') | list }}"
+  register: eco_kept_now
+  ignore_errors: true
+  check_mode: false
+  no_log: true
+
+- name: "{{ eco_conn.app }} -> {{ eco_conn.peer }}: the state could not be read"
+  ansible.builtin.fail:
+    msg: "{{ eco_kept_now.msg | default('eco_state failed') }}"
+  when: eco_kept_now is failed
+
+- name: "{{ eco_conn.app }} -> {{ eco_conn.peer }}: ... as eco_issued"
   ansible.builtin.set_fact:
-    eco_issued: >-
-      {{ eco_issued | combine({item: (lookup('ansible.builtin.file', eco_secrets_dir ~ '/issued/' ~ item, errors='ignore') | default('', true) | string | trim)}) }}
-  loop: "{{ ['secret_key', 'publishable_key', 'secret_key_id', 'publishable_key_id', 'webhook_secret'] | map('regex_replace', '^', 'connect-' ~ eco_conn.app ~ '/') | list }}"
+    eco_issued: "{{ eco_issued | combine(eco_kept_now.issued) }}"
   no_log: true
 
 - name: "{{ eco_conn.app }} -> {{ eco_conn.peer }}: service tokens"

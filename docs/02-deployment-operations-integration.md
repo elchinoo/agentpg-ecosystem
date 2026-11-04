@@ -51,7 +51,7 @@ ecoctl status                     # fleet health, LLM clients, limits drift
 ecoctl llm test <app>             # one tiny chat call with that app's own gateway key
 ecoctl llm sync                   # compare gateway clients with the manifest (exit 1 on drift)
 ecoctl llm sync <app> --apply     # make the gateway follow the manifest
-ecoctl env <app>                  # the environment an app is created with (secrets masked; --reveal prints)
+ecoctl env <app>                  # names and non-secret values of an app's environment (secrets are only ever ***; a sealed secret is rotated, not read)
 ecoctl db <app>                   # database connection details for a manual psql session
 agentpg sandbox logs <sandbox-id> # container log (startup errors, setup codes)
 agentpg sandbox resume <id>       # if auto-pause is on

@@ -8,14 +8,14 @@ short_description: Ensure an AgentPG database instance exists (through the agent
 description:
   - "With I(state=absent) deletes the instance named I(name) (C(agentpg instances delete ID --force)); its data and keys are destroyed. The id is resolved by name from C(agentpg instances list) at run time. A name not in I(allowed_names) is refused. Already gone is not a change."
   - With I(state=present), finds the instance by name, creates it with C(agentpg create --name N --size S --json) when missing, and waits until it is running.
-  - The database key (also the database password) is shown by AgentPG only once, at creation. It is written to I(state_file) (mode 0600) and never returned.
+  - The database key (also the database password) is shown by AgentPG only once, at creation. It is returned once, as I(new_db_key) (use C(no_log true)), for the playbook to keep in the encrypted state; it is never written to I(state_file).
   - Check mode only reads (C(agentpg instances list)) and reports whether it would create the instance.
 options:
   state: {description: Whether the instance should exist., choices: [present, absent], default: present, type: str}
   allowed_names: {description: With state=absent, the only names that may be deleted; any other name is refused., type: list, elements: str}
   name: {description: Instance name., required: true, type: str}
   size: {description: Database size., default: small, type: str}
-  state_file: {description: JSON file that keeps the instance id and the database key (git-ignored, 0600)., required: true, type: path}
+  state_file: {description: JSON file that keeps the instance id and extensions (no secret; git-ignored, 0600)., required: true, type: path}
   wait: {description: Wait until the instance is running., default: true, type: bool}
   agentpg_bin: {description: The agentpg executable., default: agentpg, type: str}
   poll_interval: {description: Seconds between polls., default: 5, type: float}
@@ -24,7 +24,7 @@ options:
 RETURN = r"""
 instance_id: {description: The instance id., returned: always, type: str}
 created: {description: Whether this run created it., returned: always, type: bool}
-db_key_saved: {description: Whether the state file holds the database key (the value is never returned)., returned: always, type: bool}
+new_db_key: {description: The database key when this run created the instance (empty otherwise)., returned: always, type: str}
 """
 
 from ansible.module_utils.basic import AnsibleModule  # noqa: E402
@@ -43,7 +43,7 @@ def main():
         out = ensure_instance(Cli(binary=p["agentpg_bin"], interval=p["poll_interval"], timeout=p["timeout"]), State(p["state_file"]), p["name"], p["size"],
                               p["wait"], m.check_mode)
     except AgentPGError as exc:
-        m.fail_json(msg=str(exc))
+        m.fail_json(msg=str(exc), new_db_key=getattr(exc, "new_db_key", ""))          # shown once by AgentPG: the playbook keeps it before failing
     m.exit_json(**out)
 
 

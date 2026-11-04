@@ -12,6 +12,6 @@ eco_db_port: 55432                           # published on 127.0.0.1 for the pl
 eco_db_app_port: 5432                        # inside the engine network
 eco_db_address: eco-db                       # the database container's alias on the engine network
 eco_db_login_host: 127.0.0.1
-eco_db_login_password: "{{ lookup('ansible.builtin.password', eco_secrets_dir ~ '/generated/db/POSTGRES_PASSWORD length=43 chars=ascii_letters,digits') }}"
+eco_db_login_password: "{{ eco_secrets['db/POSTGRES_PASSWORD'] }}"
 eco_db_become: false
 eco_db_sslmode: disable

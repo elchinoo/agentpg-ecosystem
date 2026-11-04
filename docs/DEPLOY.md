@@ -158,18 +158,17 @@ are in `.ecosystem/state.json` and in `agentpg sandbox list` / `agentpg sandbox 
 
 ## 6. First sign-in: the identity provider
 
-The provider was created with a static admin key (generated, kept in `.ecosystem/`). Use it once to bootstrap yourself.
+The provider was created with a static admin key (generated, sealed, kept only in the encrypted `.ecosystem/state.json`). Nobody reads it back (`ecoctl env` shows `***`); you bootstrap yourself with the admin password instead.
 
 1. Find the URL: `.venv/bin/ecoctl status` (the `eco-identity` row) or `agentpg sandbox status <identity-sandbox-id>`.
-2. Print the key (do not paste it anywhere public): `.venv/bin/ecoctl env identity --reveal | grep IDENTITY_API_KEY`.
-3. Open `https://<identity>/admin`. Expand **Use the server's API key instead**, paste the key, sign in.
-4. The provider already has an **admin password**: `ecoctl` created its vault with one on the first `apply` (the one you supplied through `ECOCTL_ADMIN_PASSWORD` or `--admin-password-prompt`, or, for a sealed fleet, your seal passphrase; ecoctl does not store it). It opens the signing key's vault, and you can sign in to the console with it. The
-   platform does not store it (section 11a). Keep the API key for automation (`ecoctl` uses it); change the password under **Settings → Admin password** only together with
+2. Open `https://<identity>/admin` and sign in with the **admin password**, which is your seal passphrase (the passphrase you gave to `ecoctl`; it is the vault's admin password).
+3. The provider already has an **admin password**: `ecoctl` created its vault with one on the first `apply` (the one you supplied through `ECOCTL_ADMIN_PASSWORD` or `--admin-password-prompt`, or, for a sealed fleet, your seal passphrase; ecoctl does not store it). It opens the signing key's vault, and you can sign in to the console with it. The
+   platform does not store it (section 11a). The API key stays sealed for automation (`ecoctl` uses it); change the password under **Settings → Admin password** only together with
    the copy `ecoctl` uses (a changed password needs `ECOCTL_ADMIN_PASSWORD` or `--admin-password-prompt` from then on).
-5. **Users → New user**: create yourself (username, e-mail, a password). **Groups → `ecosystem-admins` → add yourself.** That group was
+4. **Users → New user**: create yourself (username, e-mail, a password). **Groups → `ecosystem-admins` → add yourself.** That group was
    created by `ecoctl` with the `admin` role in every app, so one membership gives you access everywhere. Other groups from the manifest
    (`risk-team`, `support`) grant narrower roles; add people to them as needed.
-6. Open `https://<identity>/apps` signed in as that user: the **launcher** lists every app you may open.
+5. Open `https://<identity>/apps` signed in as that user: the **launcher** lists every app you may open.
 
 ### Optional: sign in with Google or GitHub
 
@@ -381,12 +380,13 @@ new keys (deleting the old ones named `ecoctl:...`) and rotates the webhook secr
    and watch the incident and its likely cause.
 
 **PagerLens agent** runs **next to** what it watches, not on AgentPG (`deploy: false` in the manifest; it is registered with the provider
-and nothing else). Get its settings and run it anywhere that can reach the apps (a laptop, a VM, a container):
+and nothing else). Get its non-secret settings with `ecoctl env pagerlens-agent` and its client secret from the identity console (Apps, `pagerlens-agent`, rotate the client secret: it is shown once; `ecoctl` cannot print the sealed copy), then run it anywhere that can reach the apps (a laptop, a VM, a container):
 
 ```bash
-.venv/bin/ecoctl env pagerlens-agent --reveal > pagerlens-agent.env      # contains a secret: keep it private (without --reveal secrets print as ***)
-# then, per the PagerLens README: set the scrape targets in agent.yaml and
-set -a; . ./pagerlens-agent.env; set +a; pagerlens-agent run agent.yaml      # or: pagerlens-agent once agent.yaml --dry-run
+# the three names (secrets print as ***): PAGERLENS_AGENT_OIDC_ISSUER, ..._CLIENT_ID and ..._CLIENT_SECRET (the last from the identity console)
+.venv/bin/ecoctl env pagerlens-agent
+# then, per the PagerLens README: set the scrape targets in agent.yaml, export the three names from your password manager, and
+pagerlens-agent run agent.yaml      # or: pagerlens-agent once agent.yaml --dry-run
 ```
 
 The agent mints its own `pagerlens.ingest` token with `PAGERLENS_AGENT_OIDC_ISSUER`, `..._CLIENT_ID` and `..._CLIENT_SECRET`. Each scrape

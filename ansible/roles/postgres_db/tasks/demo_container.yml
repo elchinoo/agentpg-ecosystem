@@ -16,7 +16,7 @@
       - --publish
       - "127.0.0.1:{{ eco_db_port }}:5432"
       - --env
-      - "POSTGRES_PASSWORD={{ lookup('ansible.builtin.password', eco_secrets_dir ~ '/generated/db/POSTGRES_PASSWORD length=43 chars=ascii_letters,digits') }}"
+      - "POSTGRES_PASSWORD={{ eco_secrets['db/POSTGRES_PASSWORD'] }}"
       - --volume
       - "{{ eco_fleet.fleet }}-db-data:/var/lib/postgresql/data"
   no_log: true

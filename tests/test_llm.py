@@ -221,16 +221,17 @@ def test_the_plan_after_apply_masks_the_real_key(world):  # noqa: F811
     assert "LLM_API_KEY" in secret_names and env["LLM_API_KEY"] == key
 
 
-def test_env_command_masks_secrets_unless_asked(world, capsys, monkeypatch):  # noqa: F811
+def test_env_command_shows_names_and_masks_secrets_and_has_no_reveal(world, capsys, monkeypatch):  # noqa: F811
     ctx, cli, idp = world
     apply(ctx)
     monkeypatch.setattr(cli_mod, "_ctx", lambda a: ctx)
     key = ctx.state.app("trustdesk")["llm_key"]
-    assert cli_mod.cmd_env(argparse.Namespace(app="trustdesk", reveal=False)) == 0
+    assert cli_mod.cmd_env(argparse.Namespace(app="trustdesk")) == 0
     out = capsys.readouterr()
-    assert key not in out.out and "LLM_API_KEY='***'" in out.out and "LLM_BASE_URL='https://eco-llmgw.sandbox.example/v1'" in out.out
-    assert cli_mod.cmd_env(argparse.Namespace(app="trustdesk", reveal=True)) == 0
-    assert f"LLM_API_KEY='{key}'" in capsys.readouterr().out
+    assert key not in out.out + out.err and "LLM_API_KEY=***" in out.out and "LLM_BASE_URL=https://eco-llmgw.sandbox.example/v1" in out.out
+    assert "sandbox environment" in out.err and "rotate" in cli_mod.SEALED_ENV_NOTE      # a sealed secret is not readable: it is rotated
+    with pytest.raises(SystemExit):
+        cli_mod.main(["--state", str(ctx.state.dir), "-f", str(MANIFEST), "env", "trustdesk", "--reveal"])
 
 
 def test_recreating_the_gateway_recreates_every_app_that_uses_it_with_the_new_url(world, monkeypatch):  # noqa: F811
