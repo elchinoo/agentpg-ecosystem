@@ -5,10 +5,8 @@ The whole ecosystem on one machine, with the real AIDB image, **sealed like the 
 
 ```
 postgres (aidb-postgres:17, one database + one login role per app)
-identity  llmgw  trustdesk  pagerlens  paybroker  citypulse*  cpsim  shopfront      (each image built from ../../<repo>/Dockerfile)
+identity  llmgw  trustdesk  pagerlens  paybroker  citypulse  cpsim  shopfront      (each image built from ../../<repo>/Dockerfile)
 ```
-
-\* CityPulse is skipped by default: its repository cannot boot from a sealed blob yet (see "Known gaps").
 
 ## Run it
 
@@ -77,10 +75,29 @@ That path is covered by a unit test against a fake gateway, not by a live provid
 test `tests/test_devstack.py` and `ecoctl dev up` both fail if the committed file differs from the render. After editing `ecosystem.yaml` run `make dev-render`. Ports,
 repository names, the AIDB list and the dev-only settings live in `src/ecoctl/devstack.py`.
 
-## Known gaps
+## AIDB per app
 
-* Identity's token endpoint refuses plain http (authlib: "OAuth 2 MUST utilize https"), so on this http stack the client-credentials tokens and the browser sign-in do not work yet:
-  `ecoctl dev up` stops at the step that registers ecoctl's service client. Everything before it works (see docs/10). A decision is pending on how to fix this (an identity change, or a
-  dev-only setting), see the report in docs/10.
-* CityPulse: `citypulse start` migrates before unseal and `serve` never migrates, so it cannot start from a blob alone. `ecoctl dev up --include citypulse` tries anyway.
+The stack runs trustdesk, pagerlens, paybroker and citypulse with `<APP>_RETRIEVAL_BACKEND=aidb` (each falls back to its own search, loudly, until set up) and grants their roles
+`aidb_users`. The apps' operator step is `ecoctl dev aidb-setup [APP...]`: it runs `<app> aidb-setup` in a one-off container of the app's image on the stack's network. The privileged
+connection string (the stack's own superuser, built from the encrypted state) and the app's database URL are given in that container's environment only (`-e NAME`: in no argument,
+file or log; the container is removed when the command ends); the passphrase that opens the app's vault is typed at the command's hidden prompt by ecoctl. `--agent` also registers the gateway chat model and
+the agent (it needs the gateway reachable from the database, see below). Check with `make dev-test`, which reads each app's `/readyz` AIDB state, runs a policy search through TrustDesk
+and checks PagerLens' seals.
+
+## Sign-in
+
+`ecoctl dev password` prints the `dev-admin` password. `make dev-test` signs in to every web app through identity with it (the browser flow, scripted) and calls TrustDesk with the
+`cpsim-service` token from `client_credentials`. Identity is run with `IDENTITY_DEV_HTTP=1` and `IDENTITY_ISSUER=http://identity.localhost:8101`, which together let it serve OAuth over plain http
+(its `/readyz` says `insecure_transport_relaxed`). They are set by the stack only (`devstack.DEV_ENV`), never in a published image's example env.
+
+## Known gaps (2026-11-04)
+
+* **ShopFront sign-in fails** (HTTP 401 at the token exchange): the kit's `auth.from_env` reads the OIDC client secret at import, which in sealed boot is before unseal, so ShopFront acts as a
+  public client. CityPulse works around it (`core._federation`); ShopFront needs the same, or the kit's `from_env` should read it lazily.
+* **`connect` ShopFront to PayBroker fails**: PayBroker accepts a plain-http allowed origin only for `localhost` and `127.0.0.1` (`paybroker/origins.py`), not `*.localhost`. `ecoctl dev up` finishes everything else and exits 1 with that message.
+* **PayBroker `aidb-setup` cannot open its vault in sealed boot** ("the vault is locked and there is no platform secret to open it"): its CLI only knows the local admin password and the platform secret, not the
+  seal passphrase (CityPulse's asks for it). PayBroker's `/readyz` AIDB state is `error` (permission denied on the knowledge-base table) until it is set up.
+* **Agents are not set up**: AIDB refuses plain http for model calls unless the database server runs with `aidb.allow_insecure_egress=on`, and the gateway here is `http://llmgw.localhost:8102`. That option is not set
+  in this stack (it needs a decision), so `aidb-setup --agent`, TrustDesk's `td_prevalidator`, PagerLens' agent, and CityPulse (whose setup requires a chat model for its agent) are not exercised.
+  Retrieval (the local `bge-small-en-v1.5-f16` model, no key, no network) is.
 * PostGIS and EDB's platform extensions are not in the image; CityPulse's geography and the query advisor degrade as they do on a platform without them.

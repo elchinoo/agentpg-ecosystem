@@ -11,7 +11,7 @@ services:
       - edb_token
     environment:
       POSTGRES_PASSWORD_FILE: /run/secrets/pg_superuser
-      APP_DATABASES: 'identity:0: llmgw:0: pagerlens:1:pg_trgm,tcn,vector citypulse:1: paybroker:0:fuzzystrmatch,vector shopfront:0:fuzzystrmatch,pg_trgm,unaccent,vector trustdesk:1:pg_trgm,tcn,unaccent,vector
+      APP_DATABASES: 'identity:0: llmgw:0: pagerlens:1:pg_trgm,tcn,vector citypulse:1: paybroker:1:fuzzystrmatch,vector shopfront:0:fuzzystrmatch,pg_trgm,unaccent,vector trustdesk:1:pg_trgm,tcn,unaccent,vector
         cpsim:1:'
     secrets:
     - source: pg_superuser
@@ -35,6 +35,8 @@ services:
       context: ../../identity
     environment:
       APGKIT_SEALED_FILE: /run/secrets/apgkit_sealed
+      IDENTITY_DEV_HTTP: '1'
+      IDENTITY_ISSUER: http://identity.localhost:8101
       IDENTITY_PUBLIC_URL: http://identity.localhost:8101
       PORT: '8101'
     secrets:
@@ -99,6 +101,7 @@ services:
       PAGERLENS_OIDC_CLIENT_ID: pagerlens
       PAGERLENS_OIDC_ISSUER: http://identity.localhost:8101
       PAGERLENS_PUBLIC_URL: http://pagerlens.localhost:8104
+      PAGERLENS_RETRIEVAL_BACKEND: aidb
       PORT: '8104'
     secrets:
     - source: sealed_pagerlens
@@ -130,6 +133,7 @@ services:
       CITYPULSE_OIDC_CLIENT_ID: citypulse
       CITYPULSE_OIDC_ISSUER: http://identity.localhost:8101
       CITYPULSE_PUBLIC_URL: http://citypulse.localhost:8106
+      CITYPULSE_RETRIEVAL_BACKEND: aidb
       CITYPULSE_ROLE: api
       CITYPULSE_SERVICE_CLIENT_ID: citypulse-service
       PAGERLENS_URL: http://pagerlens.localhost:8104
@@ -168,6 +172,7 @@ services:
       PAYBROKER_OIDC_CLIENT_ID: paybroker
       PAYBROKER_OIDC_ISSUER: http://identity.localhost:8101
       PAYBROKER_PUBLIC_URL: http://paybroker.localhost:8105
+      PAYBROKER_RETRIEVAL_BACKEND: aidb
       PORT: '8105'
     secrets:
     - source: sealed_paybroker
@@ -244,6 +249,7 @@ services:
       TRUSTDESK_OIDC_CLIENT_ID: trustdesk
       TRUSTDESK_OIDC_ISSUER: http://identity.localhost:8101
       TRUSTDESK_PUBLIC_URL: http://trustdesk.localhost:8103
+      TRUSTDESK_RETRIEVAL_BACKEND: aidb
     secrets:
     - source: sealed_trustdesk
       target: apgkit_sealed

@@ -232,6 +232,12 @@ def cmd_dev(args) -> int:
                     print(f"{app.key}: FAILED: {exc}", file=sys.stderr)
                     bad += 1
             return 2 if bad else 0
+        if args.action == "aidb-setup":
+            state.require_passphrase()
+            for key in args.apps or devstack.AIDB_SETUP_APPS:
+                print(f"== {key} aidb-setup")
+                print(stack.aidb_setup(key, agent=args.agent, reseal=args.reseal))
+            return 0
         if args.action == "status":
             return stack.status()
         if args.action == "test":
@@ -675,15 +681,17 @@ def main(argv: list[str] | None = None) -> int:
             sp.add_argument("--project", action="store_true", help="project scope: print the .mcp.json content")
             sp.add_argument("--write", action="store_true", help="with --project: merge the entries into ./.mcp.json")
     dv = sub.add_parser("dev", help="the Docker development stack: the whole fleet on this machine, sealed like the real one (docker/README.md)")
-    dv.add_argument("action", choices=["render", "up", "unseal", "status", "test", "down", "password"],
+    dv.add_argument("action", choices=["render", "up", "unseal", "status", "test", "down", "password", "aidb-setup"],
                     help="render: write docker/compose.yml from the manifest (--check: only compare); up: build, start, seal, unseal, register, connect (safe to repeat); "
-                         "unseal: after a restart; status; test: smoke checks; down: stop (-v also deletes the databases and the state); password: the dev-admin login")
+                         "unseal: after a restart; aidb-setup [APP...]: the apps' AIDB operator step; status; test: smoke checks; down: stop (-v: also data and state); password: the dev-admin login")
     dv.add_argument("apps", nargs="*", metavar="APP", help="unseal: only these apps")
     dv.add_argument("--compose", help="the compose file (default docker/compose.yml next to the manifest)")
     dv.add_argument("--dev-state", default=str(devstack.DEV_STATE_DIR), help="where the stack keeps its generated secrets (default .ecosystem-dev)")
     dv.add_argument("--check", action="store_true", help="render: do not write, exit 1 if the file differs")
     dv.add_argument("--no-build", action="store_true", help="up: do not build images (use the ones that exist)")
     dv.add_argument("--include", help="up: comma-separated apps that are skipped by default because they cannot boot sealed yet (devstack.NOT_SEALABLE)")
+    dv.add_argument("--agent", action="store_true", help="aidb-setup: also register the gateway chat model and the agent (needs the gateway reachable from the database over http: see docs/10)")
+    dv.add_argument("--reseal", action="store_true", help="aidb-setup: accept AIDB objects that no longer match their seal")
     dv.add_argument("--recreate", help="up: comma-separated apps whose container is created afresh (a new image, a new blob)")
     dv.add_argument("-v", "--volumes", action="store_true", help="down: also delete the database volume and the stack's state file")
     args = p.parse_args(argv)

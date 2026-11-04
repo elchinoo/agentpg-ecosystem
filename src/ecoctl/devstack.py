@@ -16,6 +16,8 @@ Every address is `http://<app>.localhost:<port>`: the browser resolves `*.localh
 alias, so the issuer URL a token carries is the same from the browser, from ecoctl on the host and from the other containers. (Apps accept plain http only
 for localhost hosts.)
 """
+import contextlib
+import json
 import os
 import re
 import secrets
@@ -31,6 +33,7 @@ from apgkit import sealed as kit
 
 from . import seal
 from .connect import connect_step
+from .connect_client import ConnectError
 from .llm_client import GatewayError
 from .manifest import App, Manifest
 from .plan import Context, _register, _register_ecoctl, app_env
@@ -43,11 +46,19 @@ POSTGRES_HOST_PORT = 55460
 REPOS = {"identity": "identity", "llmgw": "llm-gateway", "trustdesk": "trustdesk", "pagerlens": "pagerlens", "paybroker": "paybroker",
          "citypulse": "CityPulse", "cpsim": "CityPulseSimulator", "shopfront": "shopfront"}
 # apps whose role gets `aidb_users` (and whose database gets the aidb extension): the ones that use AIDB. The others get neither (least privilege).
-AIDB_APPS = frozenset({"trustdesk", "pagerlens", "citypulse", "cpsim"})
+AIDB_APPS = frozenset({"trustdesk", "pagerlens", "paybroker", "citypulse", "cpsim"})
+# the apps with an AIDB mode and an operator `aidb-setup` command; the stack runs them with <PREFIX>_RETRIEVAL_BACKEND=aidb (each falls back to its own search, loudly, until set up)
+AIDB_SETUP_APPS = ("trustdesk", "pagerlens", "paybroker", "citypulse")
 # extensions the manifest lists for a managed instance that the local image does not have (EDB platform extensions, PostGIS): skipped, the apps degrade without them
 NOT_IN_IMAGE = frozenset({"query_advisor", "edb_stat_monitor", "edb_pg_tuner", "postgis", "postgis_raster", "postgis_sfcgal", "postgis_tiger_geocoder", "postgis_topology"})
-# apps whose repository cannot boot sealed yet (checked 2026-11-04): skipped unless asked for with `--include`. The reason is printed on every `up`.
-NOT_SEALABLE = {"citypulse": "CityPulse 1f5b6d6: `citypulse start` migrates before the app is unsealed and `serve` never migrates afterwards, so it cannot start from a blob alone"}
+# apps whose repository cannot boot sealed yet: skipped unless asked for with `--include`. The reason is printed on every `up`. (None at the moment: CityPulse
+# could not until its 3f5a443 / 6821ee9.)
+NOT_SEALABLE: dict[str, str] = {}
+# development-only settings, by app, on top of what the manifest says (never in a published image's .env.example). The stack is plain http on *.localhost, the
+# real fleet is https behind a proxy: identity refuses OAuth over http unless IDENTITY_DEV_HTTP=1 AND its issuer is an http loopback/*.localhost URL (its /readyz then
+# reports `insecure_transport_relaxed`).
+DEV_ENV = {"identity": {"IDENTITY_DEV_HTTP": "1"},
+           **{k: {f"{k.upper()}_RETRIEVAL_BACKEND": "aidb"} for k in ("trustdesk", "pagerlens", "paybroker", "citypulse")}}
 DB_NAME = re.compile(r"^[a-z][a-z0-9_]{1,30}$")
 SUPERUSER_ENV = "PG_SUPERUSER_PASSWORD"
 EDB_TOKEN_ENV = "EDB_SUBSCRIPTION_TOKEN"
@@ -103,9 +114,10 @@ def public_env(ctx: Context, app: App) -> tuple[dict[str, str], set[str]]:
     public = {k: v for k, v in env.items() if k not in secret_names and k != app.encryption_key_name}
     public["PORT"] = str(PORTS[app.key])
     if app.key == "identity":
-        public["IDENTITY_PUBLIC_URL"] = url_of("identity")
+        public["IDENTITY_PUBLIC_URL"] = public["IDENTITY_ISSUER"] = url_of("identity")
     elif app.web:
         public[f"{app.env_prefix}_PUBLIC_URL"] = url_of(app.key)
+    public.update(DEV_ENV.get(app.key, {}))
     public["APGKIT_SEALED_FILE"] = "/run/secrets/apgkit_sealed"
     return dict(sorted(public.items())), secret_names - {app.encryption_key_name}
 
@@ -159,6 +171,43 @@ def render(m: Manifest) -> str:
 
 
 # ---- the stack -----------------------------------------------------------------------------------------------------------------------------
+PROMPT = re.compile(r"(passphrase|password|again)[^\n]*[:?] *$", re.I)
+
+
+def run_on_tty(cmd: list[str], env: dict[str, str], secret: str, timeout: float = 300) -> tuple[int, str]:
+    """Run a command that insists on a terminal (the apps' operator commands read the vault passphrase from the tty) and type `secret` at each hidden prompt.
+    The terminal does not echo a hidden prompt, so the secret is not in the returned output; the output is what the app printed."""
+    import pty
+    import select
+
+    master, slave = pty.openpty()
+    proc = subprocess.Popen(cmd, stdin=slave, stdout=slave, stderr=slave, env=env, close_fds=True)          # noqa: S603
+    os.close(slave)
+    buf, sent, deadline = "", 0, time.monotonic() + timeout
+    try:
+        while time.monotonic() < deadline:
+            if not select.select([master], [], [], 1)[0]:
+                if proc.poll() is not None:
+                    break
+                continue
+            try:
+                chunk = os.read(master, 4096).decode(errors="replace")
+            except OSError:
+                break
+            if not chunk:
+                break
+            buf += chunk
+            if PROMPT.search(buf[sent:].rstrip("\r")):
+                os.write(master, (secret + "\n").encode())
+                sent = len(buf)
+        code = proc.wait(timeout=30)
+    finally:
+        os.close(master)
+        if proc.poll() is None:
+            proc.kill()
+    return code, buf.replace("\r", "").strip()
+
+
 class Stack:
     def __init__(self, ctx: Context, compose_file: Path, say: Callable[[str], None] | None = None,
                  run: Callable[..., subprocess.CompletedProcess] | None = None, sleep: Callable[[float], None] = time.sleep, include: set[str] | None = None):
@@ -278,8 +327,10 @@ class Stack:
             if app.key == m.llm.gateway:
                 self.say(f"  {self.provider_step()}")
         self.groups()
-        self.connections()
+        problems = self.connections()
         self.dev_user()
+        if problems:
+            raise DevError("the stack is up but not every connection could be made: " + "; ".join(problems))
         self.say(f"stack is up ({time.monotonic() - t0:.0f} s). Addresses: " + ", ".join(f"{a.key} {url_of(a.key)}" for a in deployed(m)))
 
     def llm_client(self, app: App) -> str:
@@ -301,14 +352,20 @@ class Stack:
                 done += sum(ident.ensure_grant(g.name, k, role) for k in keys)
             self.say(f"group {g.name}: {done} grant(s) added")
 
-    def connections(self) -> None:
-        m = self.m
+    def connections(self) -> list[str]:
+        """Connect the apps that ask for it (ShopFront to PayBroker). A refusal is reported and returned, not fatal: the rest of the stack is still finished."""
+        m, problems = self.m, []
         pairs = [(a, peer) for a in m.order() if a.deploy for peer in a.connect]
         if not pairs:
-            return
+            return problems
         self.say(f"ecoctl: {_register_ecoctl(self.ctx)}")
         for a, peer in pairs:
-            self.say(f"{a.key} -> {peer}: {connect_step(self.ctx, a.key, peer)}")
+            try:
+                self.say(f"{a.key} -> {peer}: {connect_step(self.ctx, a.key, peer)}")
+            except ConnectError as exc:
+                self.say(f"{a.key} -> {peer}: FAILED: {exc}")
+                problems.append(f"{a.key} -> {peer}: {exc}")
+        return problems
 
     def dev_user(self) -> None:
         """One person to sign in with: `dev-admin`, in the group that holds admin everywhere. Its password is generated, kept in the encrypted state file
@@ -321,6 +378,26 @@ class Stack:
                                                      "groups": [g.name for g in self.m.groups if "*" in g.grants]})            # noqa: SLF001
             self.say("user dev-admin created (password: `ecoctl dev password`)")
         st.save()
+
+    def aidb_setup(self, key: str, *, agent: bool = False, reseal: bool = False) -> str:
+        """The app's operator command `<app> aidb-setup`, run in a one-off container of the app's image on the stack's network. It gets, in its own environment only
+        (named with `-e NAME`, so the values are in no argument, file or log): the app's database URL, the privileged connection string (the stack's own superuser, used for
+        this command only) and, with `agent`, the gateway address and the app's gateway key. The passphrase (which opens the app's vault) goes in on stdin. Nothing is printed
+        but the app's own step lines, which never contain a connection string."""
+        app = self.m.everything()[key]
+        pre = app.env_prefix
+        st = self.ctx.state
+        env = {"DATABASE_URL": self.database_url(key),
+               f"{pre}_AIDB_ADMIN_DSN": f"postgresql://postgres:{st.secret('postgres', SUPERUSER_ENV)}@postgres:5432/{key}?sslmode=disable",
+               f"{pre}_RETRIEVAL_BACKEND": "aidb"}
+        if agent:
+            env.update(LLM_BASE_URL=f"{url_of(self.m.llm.gateway)}/v1", LLM_CHAT_MODEL=self.m.llm.chat_alias, LLM_API_KEY=st.app(key).get("llm_key", ""))
+        names = [x for n in env for x in ("-e", n)]
+        cmd = ["docker", "run", "--rm", "-i", "--network", "ecosystem-dev_default", *names, f"ecosystem-dev/{key}:dev", key, "aidb-setup", *(["--reseal"] if reseal else [])]
+        code, out = run_on_tty(["docker", "run", "--rm", "-it", *cmd[4:]], {**os.environ, **env}, seal.passphrase(self.ctx, creating=False))
+        if code != 0:
+            raise DevError(f"{key} aidb-setup failed (exit {code}): {' | '.join(out.splitlines()[-3:])[:400]}")
+        return out
 
     def status(self) -> int:
         bad = 0
@@ -363,6 +440,54 @@ def ensure_provider(gw, environ, chat_alias: str = "chat-default", embed_alias: 
     return f"provider {PROVIDER_NAME} added at {base}; the default chat and embedding aliases now use it"
 
 
+def sign_in(ctx: Context, app_key: str) -> tuple[httpx.Client | None, str]:
+    """The authorization-code flow of a browser, scripted: the app's /auth/login, identity's password login as dev-admin, the callback.
+    Returns (a client holding the app's session cookie, or None and why not)."""
+    pw = (ctx.state.data.get("dev") or {}).get("admin_password")
+    if not pw:
+        return None, "no dev-admin password in the state (run `ecoctl dev up`)"
+    app_url, idp = url_of(app_key), url_of("identity")
+    c = httpx.Client(timeout=30, follow_redirects=False)
+    r = c.get(app_url + "/auth/login")
+    if r.status_code not in (302, 303) or not r.headers.get("location", "").startswith(idp):
+        return None, f"/auth/login answered {r.status_code} {r.headers.get('location', '')[:60]}"
+    authorize = r.headers["location"]
+    r = c.post(idp + "/login", json={"username": "dev-admin", "password": pw, "next": "/"}, headers={"X-Identity-CSRF": "1"})   # the header identity's login page sends on every write
+    if r.status_code != 200:
+        return None, f"identity login answered {r.status_code}"
+    r = c.get(authorize)
+    back = r.headers.get("location", "")
+    if r.status_code not in (302, 303) or not back.startswith(app_url + "/auth/callback"):
+        return None, f"authorize answered {r.status_code} {back[:80]}"
+    r = c.get(back)
+    if r.status_code not in (302, 303) or "sso_error" in r.headers.get("location", ""):
+        return None, f"callback answered {r.status_code} {r.headers.get('location', '')[:100]}"
+    return c, "ok"
+
+
+def browser_login(ctx: Context, app_key: str) -> tuple[bool, str]:
+    c, why = sign_in(ctx, app_key)
+    if c is None:
+        return False, why
+    with contextlib.closing(c):
+        who = c.get(url_of(app_key) + "/api/session")
+    if who.status_code != 200:
+        return False, f"session call answered {who.status_code}"
+    body = who.json()
+    return True, "signed in; session: " + json.dumps({k: body[k] for k in ("user", "roles", "role", "name", "username") if k in body})[:140]
+
+
+def service_call(ctx: Context, caller: str, callee: str, scope: str, path: str) -> tuple[bool, str]:
+    """client_credentials from identity for the caller's service client, then one GET with that bearer token."""
+    cid = ctx.manifest.apps[caller].service_client_id
+    secret = ctx.state.app(caller).get("service_secret")
+    r = httpx.post(url_of("identity") + "/oauth/token", data={"grant_type": "client_credentials", "scope": scope, "audience": callee}, auth=(cid, secret or ""), timeout=30)
+    if r.status_code != 200:
+        return False, f"token endpoint answered {r.status_code}"
+    got = httpx.get(url_of(callee) + path, headers={"Authorization": f"Bearer {r.json()['access_token']}"}, timeout=30)
+    return got.status_code == 200, f"{callee}{path} answered {got.status_code}"
+
+
 # ---- the smoke test -------------------------------------------------------------------------------------------------------------------------
 def smoke(stack: Stack) -> list[tuple[str, bool, str]]:
     """Read-mostly checks of a running stack. Returns (name, ok, detail) lines."""
@@ -391,5 +516,37 @@ def smoke(stack: Stack) -> list[tuple[str, bool, str]]:
             ok, detail = gw.chat_test(key, m.llm.chat_alias) if key else (False, "no gateway key in the state file")
             return ok, f"{a.key} chat via {m.llm.chat_alias}: {detail}"
         check(f"{a.key} gateway chat call", chat)
+    live = {a.key for a in stack.active()}
+    for a in (x for x in stack.active() if x.web and x.key != "identity"):
+        check(f"dev-admin signs in to {a.key} through identity", lambda a=a: browser_login(ctx, a.key))
+    if "cpsim" in live and "trustdesk" in live:
+        check("a service token (cpsim-service) is accepted by trustdesk", lambda: service_call(ctx, "cpsim", "trustdesk", "trustdesk.requests.write", "/api/v1/request-types"))
+    for key in AIDB_SETUP_APPS:
+        if key in live:
+            def aidb_state(key=key):
+                body = http.get(url_of(key) + "/readyz").json()
+                a = body.get("aidb")
+                return isinstance(a, dict) or isinstance(a, str), f"readyz aidb={json.dumps(a)}"
+            check(f"{key} reports its AIDB state", aidb_state)
+    if "trustdesk" in live:
+        def td_search():
+            c, why = sign_in(ctx, "trustdesk")
+            if c is None:
+                return False, why
+            with contextlib.closing(c):
+                ready = http.get(url_of("trustdesk") + "/readyz").json().get("aidb", {})
+                r = c.get(url_of("trustdesk") + "/api/search", params={"q": "how many days of notice for a vacation"})
+            hits = r.json().get("results", []) if r.status_code == 200 else []
+            return bool(ready.get("retrieval")) and bool(hits), f"AIDB retrieval={ready.get('retrieval')}, {len(hits)} passages, top: {hits[0]['heading'] if hits else '-'}"
+        check("trustdesk answers a policy search from the AIDB knowledge base", td_search)
+    if "pagerlens" in live:
+        def pl_state():
+            c, why = sign_in(ctx, "pagerlens")
+            if c is None:
+                return False, why
+            with contextlib.closing(c):
+                body = c.get(url_of("pagerlens") + "/api/aidb/status").json()
+            return body.get("state") == "ready" and body.get("verified") is True, f"state={body.get('state')} verified={body.get('verified')} retrieval={body.get('retrieval')}"
+        check("pagerlens AIDB knowledge bases are ready and their seals verify", pl_state)
     return out
 

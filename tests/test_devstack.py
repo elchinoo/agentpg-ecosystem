@@ -118,3 +118,15 @@ def test_a_provider_is_added_only_when_a_key_is_exported():
     assert puts["/api/models/chat-default"]["targets"] == [{"provider_id": 7, "upstream_model": "gpt-4o-mini"}]
     assert puts["/api/models/embed-default"]["embedding_dim"] == 1536
     assert re.search("sk-test", json.dumps(out)) is None, "the key is never in the outcome line"
+
+
+def test_the_tty_helper_types_the_secret_at_a_hidden_prompt_and_never_echoes_it():
+    code, out = devstack.run_on_tty(["bash", "-c", "read -s -p 'Seal key passphrase: ' x; echo; [ \"$x\" = s3cret-value ] && echo matched"], {}, "s3cret-value")
+    assert code == 0 and "matched" in out and "s3cret-value" not in out
+
+
+def test_the_identity_dev_http_pair_is_set_for_identity_only():
+    env = yaml.safe_load(COMPOSE.read_text())["services"]
+    assert env["identity"]["environment"]["IDENTITY_DEV_HTTP"] == "1"
+    assert env["identity"]["environment"]["IDENTITY_ISSUER"] == devstack.url_of("identity")
+    assert not [k for k, v in env.items() if k != "identity" and "IDENTITY_DEV_HTTP" in v.get("environment", {})]
