@@ -32,11 +32,29 @@ no longer opens the identity signing key or the provider keys: the value needed 
 wrapped key in the database cannot be opened with what the platform holds.
 
 **Not addressed** (do not read more into this control than it gives):
-- **Write access to the database** is still full control of the app (rows of sessions and tokens, and, for identity, the keys it publishes); the vault does not stop that.
+- **Write access to the database** no longer plants a session, token, key or route while the vault is unlocked: the security tables carry row MACs under a subkey of the data key (see below). It is not covered by the MACs: replaying an older authentic row from a backup, deleting rows, and columns that are not authority (names, descriptions, timestamps).
 - **The data key lives in process memory** while the app runs unlocked: anyone who can execute code inside the running process, or read its memory, gets it. A running, unlocked identity provider still signs for whoever can call its admin API; the static `IDENTITY_API_KEY` and `LLMGW_API_KEY` in the sandbox environment remain wildcard operator credentials (a separate control).
 - **The admin password is a high-value secret**: it opens the vault and the admin console. Offline guessing against a copy of the database is slowed only by the key derivation (scrypt), so use the generated one or a long passphrase, keep it in a password manager, and keep `.ecosystem/` private. Losing it loses the vault (`reset-admin` recreates it and discards what it protected).
 - **Restarts need a human.** After any platform restart, recreate or crash, identity cannot sign and the gateway cannot use a stored provider key until `ecoctl unlock` (or `unlock.yml`) runs. Tokens already issued keep working until they expire, because the apps verify them offline against the published keys; new sign-ins and service tokens fail meanwhile.
 - A vault that was ever opened by a platform key keeps that wrap in its database until it is dropped and the data key rotated (docs/DEPLOY.md, moving an existing fleet).
+
+## Sealed boot: no secret in the environment, the config or the image
+With `agentpg.seal: true` in `ecosystem.yaml` an app is deployed with a single encrypted blob (`APGKIT_SEALED`: AES-256-GCM under a key derived with scrypt
+from an operator passphrase). It starts sealed and answers 503 except for `/_seal/*` and the health probes. `ecoctl unseal` sends the passphrase, encrypted
+to an ephemeral key that exists only in the app's memory; the app opens the blob (database URL, client secrets, API keys), runs its migrations, unlocks its
+vault with the same passphrase and starts serving. The passphrase comes from `ECOCTL_SEAL_PASSPHRASE` or a prompt and is never stored; a restart seals the
+app again. The data key and the unsealed secrets are held in masked, locked, dump-excluded memory (`apgkit.sealed.Protected`) and revealed only for the
+instant of use.
+
+**Threat addressed.** Reading the sandbox environment, injected files, the image or a database copy yields neither the database credentials nor any key.
+With the vault unlocked, writing to the database cannot create a valid session, token, signing key, provider, route, merchant key or rule (row MACs).
+
+**Not addressed.**
+- Root or a debugger on the live, unsealed process reads its memory; masking makes a casual dump useless, not a determined one.
+- An active man in the middle at the platform proxy can replace the public key the operator encrypts to. Check the fingerprint `ecoctl unseal` prints when it matters.
+- The platform knows the database credentials it provisioned; apps still use the instance admin credential (a runtime least-privilege role is not done yet).
+- Python can leave transient copies of a secret as a `str`; the long-lived copies are the masked ones.
+- After a platform rebuild each app needs `ecoctl unseal`; upgraded databases need one `adopt-rowmacs` per app.
 
 ## LLM gateway keys
 - `ecoctl` generates a static operator key for the gateway (`LLMGW_API_KEY`) and keeps it in the state file like every other generated
@@ -45,7 +63,8 @@ wrapped key in the database cannot be opened with what the platform holds.
 - Each app that uses an LLM gets **its own gateway client and key** (`lg_...`, kept in the state file, injected as `LLM_API_KEY`, masked in
   plans). A client key reaches only `/v1`, only the two default aliases, and is limited by requests per minute and a monthly token budget
   (defaults in the manifest `llm:` block, `hard` by default). **One compromised app can therefore spend at most its own budget** and can be cut
-  off alone (revoke or rotate its key); provider keys exist only in the gateway and never in an app.
+  off alone (revoke or rotate its key). The gateway holds the provider keys of every app that calls it; an app that is configured with its own
+  provider account (TrustDesk and PagerLens keep one in `llm_account`) holds that key in its own vault.
 - Rotation: `ecoctl apply --execute --rotate` rotates every app's gateway key (the old ones stop at once), then `ecoctl recreate <app>` gives the
   sandboxes the new ones. To rotate one app, rotate its key in the gateway console (or revoke it) and run `apply`: a client with no key in
   the state file has its active key rotated and the new one stored. After a suspected leak of the state file, also rotate the operator key
