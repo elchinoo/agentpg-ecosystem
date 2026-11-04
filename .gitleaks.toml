@@ -89,6 +89,7 @@ regexes = [
   '''ci-throwaway''',
   ''':(?:local-only|devonly|nothing|adminpw)@''',
   '''://(?:user:password|postgres:postgres)@''',
+  '''LLM_API_KEY=st\.app\(key\)''',                  # ecoctl dev: a Python expression (the gateway key from the state), in one commit's keyword-argument form
 ]
 
 [[allowlists]]

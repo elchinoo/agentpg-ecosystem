@@ -391,7 +391,7 @@ class Stack:
                f"{pre}_AIDB_ADMIN_DSN": f"postgresql://postgres:{st.secret('postgres', SUPERUSER_ENV)}@postgres:5432/{key}?sslmode=disable",
                f"{pre}_RETRIEVAL_BACKEND": "aidb"}
         if agent:
-            env.update(LLM_BASE_URL=f"{url_of(self.m.llm.gateway)}/v1", LLM_CHAT_MODEL=self.m.llm.chat_alias, LLM_API_KEY=st.app(key).get("llm_key", ""))
+            env.update({"LLM_BASE_URL": f"{url_of(self.m.llm.gateway)}/v1", "LLM_CHAT_MODEL": self.m.llm.chat_alias, "LLM_API_KEY": st.app(key).get("llm_key", "")})
         names = [x for n in env for x in ("-e", n)]
         cmd = ["docker", "run", "--rm", "-i", "--network", "ecosystem-dev_default", *names, f"ecosystem-dev/{key}:dev", key, "aidb-setup", *(["--reseal"] if reseal else [])]
         code, out = run_on_tty(["docker", "run", "--rm", "-it", *cmd[4:]], {**os.environ, **env}, seal.passphrase(self.ctx, creating=False))
