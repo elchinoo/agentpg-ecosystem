@@ -90,14 +90,22 @@ and checks PagerLens' seals.
 `cpsim-service` token from `client_credentials`. Identity is run with `IDENTITY_DEV_HTTP=1` and `IDENTITY_ISSUER=http://identity.localhost:8101`, which together let it serve OAuth over plain http
 (its `/readyz` says `insecure_transport_relaxed`). They are set by the stack only (`devstack.DEV_ENV`), never in a published image's example env.
 
+## Agents, and what is a stand-in
+
+`ecoctl dev aidb-setup --agent` registers the gateway's `chat-default` alias as the agents' chat model. **That alias is the gateway's built-in echo provider: a stand-in.** It answers with a
+fixed text that contains the agent prompt, never with a verdict, a SQL tool call or a real answer, so the agents are *invoked* (through AIDB, the model call really goes AIDB -> gateway) but
+nothing intelligent happens. With `ECOCTL_DEV_LLM_API_KEY` set the same alias points at a real provider and the agents work as designed (not tried here).
+
+Two dev-only settings make that path possible, both in the stack and not in the published image: the Postgres service runs `postgres -c shared_preload_libraries=aidb -c aidb.allow_insecure_egress=on`
+(AIDB refuses plain http for model calls otherwise), and because that option allows an **IP literal only, never a host name**, the gateway has a fixed address (`10.213.77.10`, network `10.213.77.0/24`,
+`devstack.GATEWAY_IP`) which `--agent` uses as the model URL. If that subnet clashes with a network of yours, change `NETWORK_SUBNET` and `GATEWAY_IP` and run `make dev-render`.
+`PAYBROKER_DEV_HTTP=1` (PayBroker only) lets it accept http `*.localhost` origins.
+
+After `aidb-setup`, an app that was already running looks again within a minute; CityPulse needs `docker restart ecosystem-dev-citypulse-1` and `make dev-unseal` (its vault is opened by the unseal step).
+
 ## Known gaps (2026-11-04)
 
-* **ShopFront sign-in fails** (HTTP 401 at the token exchange): the kit's `auth.from_env` reads the OIDC client secret at import, which in sealed boot is before unseal, so ShopFront acts as a
-  public client. CityPulse works around it (`core._federation`); ShopFront needs the same, or the kit's `from_env` should read it lazily.
-* **`connect` ShopFront to PayBroker fails**: PayBroker accepts a plain-http allowed origin only for `localhost` and `127.0.0.1` (`paybroker/origins.py`), not `*.localhost`. `ecoctl dev up` finishes everything else and exits 1 with that message.
-* **PayBroker `aidb-setup` cannot open its vault in sealed boot** ("the vault is locked and there is no platform secret to open it"): its CLI only knows the local admin password and the platform secret, not the
-  seal passphrase (CityPulse's asks for it). PayBroker's `/readyz` AIDB state is `error` (permission denied on the knowledge-base table) until it is set up.
-* **Agents are not set up**: AIDB refuses plain http for model calls unless the database server runs with `aidb.allow_insecure_egress=on`, and the gateway here is `http://llmgw.localhost:8102`. That option is not set
-  in this stack (it needs a decision), so `aidb-setup --agent`, TrustDesk's `td_prevalidator`, PagerLens' agent, and CityPulse (whose setup requires a chat model for its agent) are not exercised.
-  Retrieval (the local `bge-small-en-v1.5-f16` model, no key, no network) is.
+* **`connect` ShopFront to PayBroker stops at the webhook**: PayBroker refuses a webhook URL on a private or local address (`PAYBROKER_ALLOW_PRIVATE_URLS=true` would allow it; not set without a decision).
+  The merchant, the allowed origin and the keys are created; `ecoctl dev up` finishes everything else and exits 1 with the message.
+* No agent has done real work (see the stand-in above): no verdict, no tool call, so no denial has been seen in a governance view.
 * PostGIS and EDB's platform extensions are not in the image; CityPulse's geography and the query advisor degrade as they do on a platform without them.

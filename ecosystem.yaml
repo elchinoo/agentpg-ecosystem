@@ -59,6 +59,7 @@ apps:
 
   citypulse:
     name: CityPulse
+    llm: true                    # a gateway client: AIDB mode registers the gateway's chat model for its agent (citypulse aidb-setup)
     description: Smart-city IoT sample
     extensions: [query_advisor, edb_stat_monitor, edb_pg_tuner, postgis]
     generate: []

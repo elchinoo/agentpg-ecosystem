@@ -154,12 +154,12 @@ def test_unreadable_files_are_manifest_errors(tmp_path):
 # ---- the LLM gateway wiring -------------------------------------------------------------------------------------------
 def test_llm_defaults_and_the_apps_that_use_it():
     m = load(REPO_MANIFEST)
-    assert m.consumers() == ["cpsim", "pagerlens", "paybroker", "shopfront", "trustdesk"]
+    assert m.consumers() == ["citypulse", "cpsim", "pagerlens", "paybroker", "shopfront", "trustdesk"]
     assert (m.llm.gateway, m.llm.chat_alias, m.llm.embed_alias, m.llm.embed_dimensions) == ("llmgw", "chat-default", "embed-default", 1536)
-    assert m.apps["cpsim"].llm and not m.apps["citypulse"].llm and not m.apps["llmgw"].llm
+    assert m.apps["cpsim"].llm and m.apps["citypulse"].llm and not m.apps["llmgw"].llm
     d = doc()
     del d["llm"]
-    assert parse(d).llm == parse(d).llm.__class__() and parse(d).consumers() == ["cpsim", "pagerlens", "paybroker", "shopfront", "trustdesk"]      # every key is optional
+    assert parse(d).llm == parse(d).llm.__class__() and parse(d).consumers() == ["citypulse", "cpsim", "pagerlens", "paybroker", "shopfront", "trustdesk"]      # every key is optional
 
 
 def test_consumers_come_after_the_gateway_and_the_cascade_follows_them():
@@ -246,7 +246,7 @@ def test_an_app_llm_can_be_true_or_a_mapping_and_overrides_the_global_limits():
     assert m.limits("trustdesk") == Limits(5, None, "soft", ("chat-default", "embed-default", "extra"))      # null = no budget; default repeated once
     assert m.limits("pagerlens") == Limits(60, 99, "hard", ("chat-default", "embed-default"))                # only the named key overrides
     assert m.limits("paybroker") == Limits(60, 5_000_000, "hard", ("chat-default", "embed-default"))
-    assert m.apps["trustdesk"].llm and m.apps["paybroker"].llm and m.consumers() == ["cpsim", "pagerlens", "paybroker", "shopfront", "trustdesk"]
+    assert m.apps["trustdesk"].llm and m.apps["paybroker"].llm and m.consumers() == ["citypulse", "cpsim", "pagerlens", "paybroker", "shopfront", "trustdesk"]
     d = doc()
     d["apps"]["trustdesk"]["llm"] = True
     assert parse(d).limits("trustdesk") == parse(doc()).limits("trustdesk")

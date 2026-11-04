@@ -23,31 +23,27 @@ file does not exist; what lives only in `src/ecoctl/devstack.py` (ports, reposit
 
 ## Verified on 2026-11-04 (real images, real AIDB, Docker Desktop on macOS, Apple silicon)
 
-Identity 6a74ab1, CityPulse 6821ee9, TrustDesk 112a5cc, PagerLens 5a1a98b, PayBroker ec14e16, kit e7dd124 (0.5.1) in the images.
+Identity 6a74ab1, CityPulse 6821ee9, TrustDesk 112a5cc, PagerLens 5a1a98b, PayBroker 9eff9f7, ShopFront d850b8c (kit 0.5.2) and the kit's earlier pins as built.
 
-* All eight images build from the sibling repositories (cached rebuild: 20 s, nothing private needed).
-* `ecoctl dev up` from an empty volume (images built): 35 s. Postgres, identity, gateway, PagerLens, CityPulse, PayBroker, ShopFront, TrustDesk and the Simulator start **sealed** and are unsealed with the passphrase; identity's issuer is pinned; web and service clients, per-app gateway clients, groups, ecoctl's own service client (its tokens for `paybroker.admin` and `shopfront.admin`) and the `dev-admin` user are created.
-* `ecoctl dev test`: all eight apps unsealed and healthy; a chat call through the gateway for every app with its own key (echo provider, a stand-in: no model ran); `dev-admin` signs in through identity to llmgw, pagerlens, citypulse, paybroker, trustdesk and cpsim with the roles identity grants; a `client_credentials` token of `cpsim-service` is accepted by TrustDesk (`/api/v1/request-types`).
-* AIDB: `ecoctl dev aidb-setup trustdesk pagerlens` created the pipelines, tools and purposes. TrustDesk answers a policy search from the AIDB knowledge base (`/readyz` retrieval true, the app logs the backend, 78 of 78 chunks embedded by the Live pipeline with the local model, top passage correct); PagerLens reports `ready`, seals verified, runbook and incident retrieval on AIDB.
-* A container restart leaves the app sealed; `ecoctl dev unseal` opens it (identity, trustdesk and citypulse restarted together, then everything tested again).
-* The repeat run (`up` again): 5 s, no container created or restarted, registrations and gateway clients "kept", no secret rotated.
-* `docker inspect` of an app shows only `APGKIT_SEALED_FILE=/run/secrets/apgkit_sealed` and public values. Roles: not superuser, not createdb; `aidb_users` only for the apps that use AIDB.
+* All eight images build from the sibling repositories (cached rebuild: 15-20 s).
+* `ecoctl dev up` from an empty volume (images built): 35 s. All eight apps start **sealed**, are unsealed with the passphrase, register with identity, get gateway clients (CityPulse now has one: `llm: true`), groups and grants, ecoctl's service client with `paybroker.admin` and `shopfront.admin` tokens, and the `dev-admin` user.
+* `ecoctl dev test`: 29 checks, all passing after setup: every app unsealed and healthy; a chat call through the gateway per consuming app (echo provider: stand-in); `dev-admin` signs in through identity to **all seven** web apps including ShopFront (kit 0.5.2); a `cpsim-service` token is accepted by TrustDesk; TrustDesk answers a policy search from the AIDB knowledge base; PagerLens seals verify; `/readyz` AIDB state is `ready` for TrustDesk, PagerLens, PayBroker and CityPulse.
+* `ecoctl dev aidb-setup --agent` for trustdesk, pagerlens, paybroker and citypulse: pipelines, tools, purposes, seals, the chat model, the agents (`td_prevalidator`, `pagerlens_investigator`, `pb_triage_agent`, `pb_ask_agent`, `cp_ask_agent`) created. PayBroker's and CityPulse's setups open their vaults with the seal passphrase typed at a hidden prompt.
+* `connect` ShopFront to PayBroker: service tokens, merchant, allowed origin (http `*.localhost`, with `PAYBROKER_DEV_HTTP=1`) and keys now work (they returned 422 before).
+* One call per app through the agent path: PayBroker `/api/ask` and CityPulse `/api/ask` each ran the AIDB agent and returned its answer (the echo stand-in's text); TrustDesk pre-validation invoked `td_prevalidator`, the app rejected the non-verdict ("final answer is not valid JSON") and fell back to the gateway path, logging `AIDB MODE FALLBACK`, as designed.
+* The repeat run: 5 s, no container created, restarted or recreated, registrations, gateway clients, merchant, origin and keys "kept", no secret rotated.
+* Restarting every container leaves each app sealed; `ecoctl dev unseal` opens them all and `ecoctl dev test` passes again.
+* `docker inspect` of an app shows only `APGKIT_SEALED_FILE` and public values.
 
-## What did not work, and who owns it
+## What did not work, or was not done
 
-| What | Why | Owner |
-|---|---|---|
-| ShopFront sign-in (401 at token exchange) | the kit's `auth.from_env` reads the OIDC client secret at import, before unseal | ShopFront (or the kit) |
-| `connect` ShopFront to PayBroker (HTTP 422) | PayBroker's `origins.py` takes http only for `localhost`/`127.0.0.1`, not `*.localhost` | PayBroker |
-| PayBroker `aidb-setup` | its CLI cannot open a passphrase-wrapped vault (no prompt for the seal passphrase) | PayBroker |
-| Agents (TrustDesk, PagerLens, CityPulse; CityPulse's setup refuses without one) | model calls to the http gateway need the database option `aidb.allow_insecure_egress=on`; not set without a decision (the https alternative needs a TLS proxy) | decision |
+* **`connect` stops at the PayBroker webhook** (HTTP 422: private or local address). Needs `PAYBROKER_ALLOW_PRIVATE_URLS=true` on PayBroker or a different webhook policy: a decision.
+* **The stand-in model proves plumbing only.** No agent produced a verdict or called a SQL tool, so no tool call was allowed or denied: **no denial was seen in any governance view**, TrustDesk's agent verdict path (citations checked, fallback avoided), PagerLens' AIDB-agent investigation (no incident was created to investigate) and PayBroker's case triage by the agent were **not exercised**. The kit's scripted server (`tests/aidbfake.py`) could drive them; per-app scripts (TrustDesk's must cite a retrieved passage) were not written.
+* CityPulse needs a restart plus unseal after its setup before its AIDB state is `ready`.
 
 ## Not verified
 
-* Any AIDB **agent** and any ask or investigation through it; the scripted model server was not used (it also needs the egress option). Agent memory is not used.
-* CityPulse's AIDB mode (setup stops at the missing chat model); PayBroker's.
-* A real model provider (no key was used; the code path is unit-tested against a fake gateway only).
-* The first build of `aidb-postgres:17` through compose (the image existed), Linux and Docker Engine without Docker Desktop.
+* A real model provider (`ECOCTL_DEV_LLM_API_KEY` path is unit-tested against a fake gateway only), AIDB agent memory, AgentPG-hosted AIDB, the first compose-driven build of `aidb-postgres:17`, Linux and Docker Engine without Docker Desktop.
 
 ## Drift and maintenance
 

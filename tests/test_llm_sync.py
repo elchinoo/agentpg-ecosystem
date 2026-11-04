@@ -56,7 +56,7 @@ def test_apply_needs_apps_or_all_and_only_known_consumers(deployed, capsys):
     ctx, cli, idp = deployed
     client(gateway_of(idp), "paybroker").update(rpm_limit=1)
     assert sync(ctx, apply_=True) == 1 and "--apply needs" in capsys.readouterr().err
-    assert sync(ctx, "citypulse") == 1 and "not an app with `llm: true`" in capsys.readouterr().err
+    assert sync(ctx, "llmgw") == 1 and "not an app with `llm: true`" in capsys.readouterr().err
     assert sync(ctx, "paybroker", all_=True, apply_=True) == 1
     assert gateway_of(idp).patches == [] and client(gateway_of(idp), "paybroker")["rpm_limit"] == 1
 

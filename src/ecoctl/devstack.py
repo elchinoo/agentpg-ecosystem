@@ -59,7 +59,12 @@ NOT_SEALABLE: dict[str, str] = {}
 # reports `insecure_transport_relaxed`).
 DEV_ENV = {"identity": {"IDENTITY_DEV_HTTP": "1"},
            **{k: {f"{k.upper()}_RETRIEVAL_BACKEND": "aidb"} for k in ("trustdesk", "pagerlens", "paybroker", "citypulse")}}
+DEV_ENV["paybroker"].update({"PAYBROKER_TRIAGE_METHOD": "aidb_agent", "PAYBROKER_ANALYST_QA": "aidb"})       # the AIDB agent writes triage advice and answers /api/ask
+DEV_ENV["paybroker"]["PAYBROKER_DEV_HTTP"] = "1"        # PayBroker accepts http `*.localhost` browser origins (ShopFront here) only with this
 DB_NAME = re.compile(r"^[a-z][a-z0-9_]{1,30}$")
+# AIDB's http egress (dev option) is allowed to an IP literal only, never to a name, so the gateway gets a fixed address on a fixed network for `aidb-setup --agent`
+NETWORK_SUBNET = "10.213.77.0/24"
+GATEWAY_IP = "10.213.77.10"
 SUPERUSER_ENV = "PG_SUPERUSER_PASSWORD"
 EDB_TOKEN_ENV = "EDB_SUBSCRIPTION_TOKEN"
 # a real provider for the gateway, from the operator's environment (nothing is read from a file; none set: the gateway keeps its built-in echo provider)
@@ -147,6 +152,9 @@ def render(m: Manifest) -> str:
         "volumes": ["pgdata:/var/lib/postgresql/data", "./initdb/20-app-databases.sh:/docker-entrypoint-initdb.d/20-app-databases.sh:ro"],
         "ports": [f"127.0.0.1:{POSTGRES_HOST_PORT}:5432"],
         "healthcheck": {"test": ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres"], "interval": "3s", "timeout": "3s", "retries": 40},
+        # dev only, and not in the image: AIDB refuses plain http for model calls (the gateway here is http://llmgw.localhost) unless this server option is on. The preload flag must stay:
+        # a command made only of -c flags would drop the image's own CMD default.
+        "command": ["postgres", "-c", "shared_preload_libraries=aidb", "-c", "aidb.allow_insecure_egress=on"],
         "restart": "unless-stopped",
     }}
     for a in apps:
@@ -158,7 +166,7 @@ def render(m: Manifest) -> str:
             "environment": envs[a.key],
             "secrets": [{"source": f"sealed_{a.key}", "target": "apgkit_sealed"}],
             "ports": [f"127.0.0.1:{PORTS[a.key]}:{PORTS[a.key]}"],
-            "networks": {"default": {"aliases": [f"{a.key}.localhost"]}},
+            "networks": {"default": {"aliases": [f"{a.key}.localhost"], **({"ipv4_address": GATEWAY_IP} if a.key == m.llm.gateway else {})}},
             "depends_on": depends,
             "cap_drop": ["ALL"],
             "security_opt": ["no-new-privileges:true"],
@@ -166,7 +174,8 @@ def render(m: Manifest) -> str:
         }
     secrets_ = {"edb_token": {"environment": EDB_TOKEN_ENV}, "pg_superuser": {"environment": SUPERUSER_ENV},
                 **{f"sealed_{a.key}": {"environment": blob_var(a.key)} for a in apps}}
-    doc = {"name": "ecosystem-dev", "services": services, "secrets": secrets_, "volumes": {"pgdata": {}}}
+    doc = {"name": "ecosystem-dev", "services": services, "secrets": secrets_, "volumes": {"pgdata": {}},
+           "networks": {"default": {"ipam": {"config": [{"subnet": NETWORK_SUBNET}]}}}}
     return HEADER + yaml.safe_dump(doc, sort_keys=False, width=200)
 
 
@@ -391,7 +400,7 @@ class Stack:
                f"{pre}_AIDB_ADMIN_DSN": f"postgresql://postgres:{st.secret('postgres', SUPERUSER_ENV)}@postgres:5432/{key}?sslmode=disable",
                f"{pre}_RETRIEVAL_BACKEND": "aidb"}
         if agent:
-            env.update({"LLM_BASE_URL": f"{url_of(self.m.llm.gateway)}/v1", "LLM_CHAT_MODEL": self.m.llm.chat_alias, "LLM_API_KEY": st.app(key).get("llm_key", "")})
+            env.update({"LLM_BASE_URL": f"http://{GATEWAY_IP}:{PORTS[self.m.llm.gateway]}/v1", "LLM_CHAT_MODEL": self.m.llm.chat_alias, "LLM_API_KEY": st.app(key).get("llm_key", "")})
         names = [x for n in env for x in ("-e", n)]
         cmd = ["docker", "run", "--rm", "-i", "--network", "ecosystem-dev_default", *names, f"ecosystem-dev/{key}:dev", key, "aidb-setup", *(["--reseal"] if reseal else [])]
         code, out = run_on_tty(["docker", "run", "--rm", "-it", *cmd[4:]], {**os.environ, **env}, seal.passphrase(self.ctx, creating=False))

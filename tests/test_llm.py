@@ -13,7 +13,7 @@ from tests.conftest import read_state
 from tests.fakes import FakeGateway, fake_get
 from tests.test_plan import MANIFEST, again, apply, world  # noqa: F401  (the fixture)
 
-CONSUMERS = ("cpsim", "pagerlens", "paybroker", "shopfront", "trustdesk")
+CONSUMERS = ("citypulse", "cpsim", "pagerlens", "paybroker", "shopfront", "trustdesk")
 
 
 def gateway_of(idp) -> FakeGateway:
@@ -24,7 +24,7 @@ def test_apply_gives_every_llm_app_a_client_a_key_and_the_environment(world):  #
     ctx, cli, idp = world
     gw = gateway_of(idp)
     apply(ctx)
-    assert sorted(c["name"] for c in gw.clients.values()) == list(CONSUMERS)             # one per consumer; citypulse, llmgw... get none
+    assert sorted(c["name"] for c in gw.clients.values()) == list(CONSUMERS)             # one per consumer; llmgw gets none
     for name in CONSUMERS:
         c = next(c for c in gw.clients.values() if c["name"] == name)
         assert c["allowed_aliases"] == ["chat-default", "embed-default"] and c["rpm_limit"] == 60
@@ -35,7 +35,7 @@ def test_apply_gives_every_llm_app_a_client_a_key_and_the_environment(world):  #
         # exactly the names TrustDesk and PagerLens read (config.py, embedcfg.py)
         assert env["LLM_BASE_URL"] == "https://eco-llmgw.sandbox.example/v1" and env["LLM_API_KEY"] == key
         assert env["LLM_CHAT_MODEL"] == "chat-default" and env["EMBEDDING_MODEL"] == "embed-default" and env["EMBEDDING_DIM"] == "1536"
-    assert not any("LLM_BASE_URL" in cli.sandboxes[f"eco-{k}"]["env"] for k in ("citypulse", "llmgw", "identity"))
+    assert not any("LLM_BASE_URL" in cli.sandboxes[f"eco-{k}"]["env"] for k in ("llmgw", "identity"))
     # the gateway is created with the operator key and the default alias names it seeds
     gwenv = cli.sandboxes["eco-llmgw"]["env"]
     assert gwenv["LLMGW_API_KEY"] == ctx.state.secret("llmgw", "LLMGW_API_KEY") and gwenv["LLMGW_DEFAULT_CHAT_ALIAS"] == "chat-default"
@@ -321,7 +321,7 @@ def test_llm_test_runs_one_call_with_that_apps_key(deployed, capsys):
     assert gw.chat_calls == [{"client": "trustdesk", "model": "chat-default", "max_tokens": 1}]
     gw.upstream_status = 503
     assert cli_mod.cmd_llm(ns("trustdesk")) == 1 and "FAILED (HTTP 503" in capsys.readouterr().out
-    assert cli_mod.cmd_llm(ns("citypulse")) == 1 and "not an app with `llm: true`" in capsys.readouterr().err
+    assert cli_mod.cmd_llm(ns("llmgw")) == 1 and "not an app with `llm: true`" in capsys.readouterr().err
     assert cli_mod.cmd_llm(ns("ghost")) == 1
 
 

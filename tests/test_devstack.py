@@ -168,3 +168,11 @@ def test_the_smoke_test_fails_an_app_whose_aidb_state_is_not_ready(monkeypatch):
     ok, detail = lines["paybroker reports its AIDB state and it is ready"]
     assert not ok and "paybroker" in detail and "state=error" in detail
     assert lines["citypulse reports its AIDB state and it is ready"][0]
+
+
+def test_paybroker_dev_http_and_the_egress_option_are_dev_stack_only():
+    svc = yaml.safe_load(COMPOSE.read_text())["services"]
+    assert svc["paybroker"]["environment"]["PAYBROKER_DEV_HTTP"] == "1"
+    assert not [k for k, v in svc.items() if k != "paybroker" and "PAYBROKER_DEV_HTTP" in v.get("environment", {})]
+    assert svc["postgres"]["command"] == ["postgres", "-c", "shared_preload_libraries=aidb", "-c", "aidb.allow_insecure_egress=on"]
+    assert "egress" not in (ROOT / "docker" / "aidb-postgres" / "Dockerfile").read_text(), "the option is not in the published image"

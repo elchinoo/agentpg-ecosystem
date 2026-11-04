@@ -28,6 +28,12 @@ services:
       interval: 3s
       timeout: 3s
       retries: 40
+    command:
+    - postgres
+    - -c
+    - shared_preload_libraries=aidb
+    - -c
+    - aidb.allow_insecure_egress=on
     restart: unless-stopped
   identity:
     image: ecosystem-dev/identity:dev
@@ -78,6 +84,7 @@ services:
       default:
         aliases:
         - llmgw.localhost
+        ipv4_address: 10.213.77.10
     depends_on:
       postgres:
         condition: service_healthy
@@ -136,6 +143,10 @@ services:
       CITYPULSE_RETRIEVAL_BACKEND: aidb
       CITYPULSE_ROLE: api
       CITYPULSE_SERVICE_CLIENT_ID: citypulse-service
+      EMBEDDING_DIM: '1536'
+      EMBEDDING_MODEL: embed-default
+      LLM_BASE_URL: http://llmgw.localhost:8102/v1
+      LLM_CHAT_MODEL: chat-default
       PAGERLENS_URL: http://pagerlens.localhost:8104
       PORT: '8106'
     secrets:
@@ -151,6 +162,8 @@ services:
       postgres:
         condition: service_healthy
       identity:
+        condition: service_healthy
+      llmgw:
         condition: service_healthy
       pagerlens:
         condition: service_healthy
@@ -169,10 +182,13 @@ services:
       EMBEDDING_MODEL: embed-default
       LLM_BASE_URL: http://llmgw.localhost:8102/v1
       LLM_CHAT_MODEL: chat-default
+      PAYBROKER_ANALYST_QA: aidb
+      PAYBROKER_DEV_HTTP: '1'
       PAYBROKER_OIDC_CLIENT_ID: paybroker
       PAYBROKER_OIDC_ISSUER: http://identity.localhost:8101
       PAYBROKER_PUBLIC_URL: http://paybroker.localhost:8105
       PAYBROKER_RETRIEVAL_BACKEND: aidb
+      PAYBROKER_TRIAGE_METHOD: aidb_agent
       PORT: '8105'
     secrets:
     - source: sealed_paybroker
@@ -347,3 +363,8 @@ secrets:
     environment: SEALED_CPSIM
 volumes:
   pgdata: {}
+networks:
+  default:
+    ipam:
+      config:
+      - subnet: 10.213.77.0/24
