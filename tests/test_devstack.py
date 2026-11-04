@@ -176,3 +176,35 @@ def test_paybroker_dev_http_and_the_egress_option_are_dev_stack_only():
     assert not [k for k, v in svc.items() if k != "paybroker" and "PAYBROKER_DEV_HTTP" in v.get("environment", {})]
     assert svc["postgres"]["command"] == ["postgres", "-c", "shared_preload_libraries=aidb", "-c", "aidb.allow_insecure_egress=on"]
     assert "egress" not in (ROOT / "docker" / "aidb-postgres" / "Dockerfile").read_text(), "the option is not in the published image"
+
+
+def test_a_real_provider_key_goes_to_the_gateway_only_after_the_limits_and_is_in_no_output(tmp_path, capsys):
+    from ecoctl.llm_client import Gateway
+    secret = "sk-proj-SENTINEL-must-never-appear-0123456789"
+    calls = []
+
+    def handler(request):
+        calls.append((request.method, request.url.path, json.loads(request.content) if request.content else None))
+        p, mth = request.url.path, request.method
+        if p == "/api/clients" and mth == "GET":
+            return httpx.Response(200, json={"items": [{"id": 1, "name": "trustdesk"}, {"id": 2, "name": "pagerlens"}]})
+        if p == "/api/providers" and mth == "GET":
+            return httpx.Response(200, json={"items": []})
+        if p == "/api/providers":
+            return httpx.Response(201, json={"id": 9})
+        if p == "/api/models" and mth == "GET":
+            return httpx.Response(200, json={"items": [{"alias": "chat-default", "description": "d"}]})
+        return httpx.Response(200, json={})
+
+    gw = Gateway("http://gw.test", "k" * 32, httpx.Client(transport=httpx.MockTransport(handler)))
+    lines = devstack.use_real_provider(gw, {"OPENAI_API_TOKEN": secret}, "openai")
+    out = "\n".join(lines)
+    assert secret not in out and secret not in capsys.readouterr().out
+    first_post = next(i for i, c in enumerate(calls) if c[0] == "POST")
+    assert [c[2] for c in calls[:first_post] if c[0] == "PATCH"] == [{"rpm_limit": 10, "monthly_token_budget": 300000, "budget_mode": "hard"}] * 2, "limits before the key"
+    assert [c for c in calls if c[1] == "/api/providers" and c[0] == "POST"][0][2]["api_key"] == secret            # the one place the key goes: the gateway's admin API
+    assert [c[1] for c in calls if c[0] == "PUT"] == ["/api/models/chat-default"], "embeddings are not repointed"
+    assert secret not in COMPOSE.read_text()
+    st = State(tmp_path / "s")
+    st.save()
+    assert not (tmp_path / "s").exists() or secret not in (tmp_path / "s" / "state.json").read_text()

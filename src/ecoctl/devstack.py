@@ -60,6 +60,7 @@ NOT_SEALABLE: dict[str, str] = {}
 DEV_ENV = {"identity": {"IDENTITY_DEV_HTTP": "1"},
            **{k: {f"{k.upper()}_RETRIEVAL_BACKEND": "aidb"} for k in ("trustdesk", "pagerlens", "paybroker", "citypulse")}}
 DEV_ENV["paybroker"].update({"PAYBROKER_TRIAGE_METHOD": "aidb_agent", "PAYBROKER_ANALYST_QA": "aidb"})       # the AIDB agent writes triage advice and answers /api/ask
+DEV_ENV["pagerlens"]["AUTO_SEED"] = "true"                # the demo fleet, so there is something to investigate
 DEV_ENV["paybroker"]["PAYBROKER_DEV_HTTP"] = "1"        # PayBroker accepts http `*.localhost` browser origins (ShopFront here) only with this
 DB_NAME = re.compile(r"^[a-z][a-z0-9_]{1,30}$")
 # AIDB's http egress (dev option) is allowed to an IP literal only, never to a name, so the gateway gets a fixed address on a fixed network for `aidb-setup --agent`
@@ -476,6 +477,45 @@ def ensure_provider(gw, environ, chat_alias: str = "chat-default", embed_alias: 
             body["embedding_dim"] = cur["embedding_dim"]
         gw._call("PUT", f"/api/models/{alias}", json=body)                                    # noqa: SLF001
     return f"provider {PROVIDER_NAME} added at {base}; the default chat and embedding aliases now use it"
+
+
+# real providers for `ecoctl dev llm-provider`: the environment variable the key is read from (in that one process only), the base URL and a cheap chat model
+REAL_PROVIDERS = {"openai": ("OPENAI_API_TOKEN", "https://api.openai.com/v1", "gpt-4.1-mini"),
+                  "openrouter": ("OPENROUTER_API_TOKEN", "https://openrouter.ai/api/v1", "openai/gpt-4.1-mini")}
+
+
+def tighten_clients(gw, rpm: int, budget: int) -> list[str]:
+    """Hard, small limits on every gateway client of the stack, before a real provider can spend anything."""
+    done = []
+    for name, c in sorted(gw.clients().items()):
+        gw.update_client(c["id"], {"rpm_limit": rpm, "monthly_token_budget": budget, "budget_mode": "hard"})
+        done.append(name)
+    return done
+
+
+def use_real_provider(gw, environ, which: str, chat_model: str | None = None, *, rpm: int = 10, budget: int = 300_000,
+                      chat_alias: str = "chat-default") -> list[str]:
+    """Limits first, then register the provider's key in the gateway's vault (the key comes from `environ`, is sent once to the gateway's admin API and is in no
+    output, file or state) and point only the chat alias at it: embeddings stay on the echo provider here and AIDB embeds locally. Returns lines to print."""
+    var, base, default_model = REAL_PROVIDERS[which]
+    key = environ.get(var, "")
+    if not key:
+        raise DevError(f"{var} is not set in the environment of this command")
+    lines = [f"limits: {rpm} requests/min, {budget:,} tokens/month, hard, on {', '.join(tighten_clients(gw, rpm, budget))}"]
+    name = f"dev-{which}"
+    model = chat_model or default_model
+    existing = {p["name"]: p for p in gw._call("GET", "/api/providers")["items"]}               # noqa: SLF001
+    if name in existing:
+        pid = existing[name]["id"]
+        lines.append(f"provider {name} already registered (kept)")
+    else:
+        pid = gw._call("POST", "/api/providers", json={"name": name, "kind": "openai", "base_url": base, "api_key": key, "enabled": True})["id"]     # noqa: SLF001
+        lines.append(f"provider {name} registered at {base} (key stored encrypted by the gateway)")
+    cur = {m["alias"]: m for m in gw._call("GET", "/api/models")["items"]}.get(chat_alias, {})        # noqa: SLF001
+    gw._call("PUT", f"/api/models/{chat_alias}", json={"kind": "chat", "description": cur.get("description", ""), "enabled": True,          # noqa: SLF001
+                                                       "targets": [{"provider_id": pid, "upstream_model": model}]})
+    lines.append(f"alias {chat_alias} -> {name} / {model}")
+    return lines
 
 
 def sign_in(ctx: Context, app_key: str) -> tuple[httpx.Client | None, str]:

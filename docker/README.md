@@ -90,11 +90,22 @@ and checks PagerLens' seals.
 `cpsim-service` token from `client_credentials`. Identity is run with `IDENTITY_DEV_HTTP=1` and `IDENTITY_ISSUER=http://identity.localhost:8101`, which together let it serve OAuth over plain http
 (its `/readyz` says `insecure_transport_relaxed`). They are set by the stack only (`devstack.DEV_ENV`), never in a published image's example env.
 
-## Agents, and what is a stand-in
+## Agents: stand-in first, a real model on request
 
-`ecoctl dev aidb-setup --agent` registers the gateway's `chat-default` alias as the agents' chat model. **That alias is the gateway's built-in echo provider: a stand-in.** It answers with a
-fixed text that contains the agent prompt, never with a verdict, a SQL tool call or a real answer, so the agents are *invoked* (through AIDB, the model call really goes AIDB -> gateway) but
-nothing intelligent happens. With `ECOCTL_DEV_LLM_API_KEY` set the same alias points at a real provider and the agents work as designed (not tried here).
+`ecoctl dev aidb-setup --agent` registers the gateway's `chat-default` alias as the agents' chat model. Out of the box that alias is the gateway's built-in **echo provider, a stand-in**: it answers with fixed
+text, never a verdict, a tool call or an answer, so the agents are only *invoked* (the model call really goes AIDB -> gateway).
+
+**A real model** (spends API credit): put the provider's key in an environment variable of one command, never in a file of this repository:
+
+```bash
+( set -a; . /path/to/your/env-file; set +a; unset EDB_SUBSCRIPTION_TOKEN; .venv/bin/ecoctl dev llm-provider openai )      # or: openrouter
+```
+
+`llm-provider` reads `OPENAI_API_TOKEN` (or `OPENROUTER_API_TOKEN`) from that process's environment, **first** sets hard limits on every gateway client (default 10 requests/min and 300,000 tokens/month,
+`--rpm`, `--budget`), then registers the key with the gateway's admin API (the gateway stores it encrypted in its vault; it is in no output, state file, compose file or image) and points **only the chat alias**
+at a cheap model (`gpt-4.1-mini` on OpenAI, `openai/gpt-4.1-mini` on OpenRouter; `--chat-model` changes it): small, current, and good enough at the structured output and tool-call format AIDB agents need.
+Embeddings stay on the echo provider for the apps' own use, and AIDB's knowledge bases embed locally (`bge-small-en-v1.5-f16`). `ecoctl dev down -v` deletes the gateway database that holds the encrypted key.
+Already-registered agents need no re-setup: the alias is what changed. The limits are the money guard: a hard budget stops a runaway agent loop, and the rate limit makes extra calls fail fast (see the table in docs/10).
 
 Two dev-only settings make that path possible, both in the stack and not in the published image: the Postgres service runs `postgres -c shared_preload_libraries=aidb -c aidb.allow_insecure_egress=on`
 (AIDB refuses plain http for model calls otherwise), and because that option allows an **IP literal only, never a host name**, the gateway has a fixed address (`10.213.77.10`, network `10.213.77.0/24`,
@@ -108,5 +119,5 @@ After `aidb-setup`, `ecoctl dev aidb-setup` does what an operator would: it wait
 
 * **`connect` ShopFront to PayBroker stops at the webhook**: PayBroker refuses a webhook URL on a private or local address (`PAYBROKER_ALLOW_PRIVATE_URLS=true` would allow it; not set without a decision).
   The merchant, the allowed origin and the keys are created; `ecoctl dev up` finishes everything else and exits 1 with the message.
-* No agent has done real work (see the stand-in above): no verdict, no tool call, so no denial has been seen in a governance view.
+* A real model was run once per scenario (docs/10); with the stand-in alone no agent does real work.
 * PostGIS and EDB's platform extensions are not in the image; CityPulse's geography and the query advisor degrade as they do on a platform without them.

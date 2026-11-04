@@ -101,6 +101,7 @@ services:
       context: ../../pagerlens
     environment:
       APGKIT_SEALED_FILE: /run/secrets/apgkit_sealed
+      AUTO_SEED: 'true'
       EMBEDDING_DIM: '1536'
       EMBEDDING_MODEL: embed-default
       LLM_BASE_URL: http://llmgw.localhost:8102/v1

@@ -1,6 +1,7 @@
 """ecoctl: validate, plan, apply, recreate, unlock, status, env, insights, mcp."""
 import argparse
 import json
+import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -232,6 +233,16 @@ def cmd_dev(args) -> int:
                     print(f"{app.key}: FAILED: {exc}", file=sys.stderr)
                     bad += 1
             return 2 if bad else 0
+        if args.action == "llm-provider":
+            which = args.apps[0] if args.apps else ""
+            if which not in devstack.REAL_PROVIDERS:
+                names = ", ".join(v[0] for v in devstack.REAL_PROVIDERS.values())
+                print(f"usage: ecoctl dev llm-provider {'|'.join(devstack.REAL_PROVIDERS)} [--chat-model M]  (key from {names}, in this process's environment only)", file=sys.stderr)
+                return 1
+            state.require_passphrase()
+            for line in devstack.use_real_provider(ctx.gateway(), os.environ, which, args.chat_model, rpm=args.rpm, budget=args.budget):
+                print(line)
+            return 0
         if args.action == "aidb-setup":
             state.require_passphrase()
             for key in args.apps or devstack.AIDB_SETUP_APPS:
@@ -685,7 +696,7 @@ def main(argv: list[str] | None = None) -> int:
             sp.add_argument("--project", action="store_true", help="project scope: print the .mcp.json content")
             sp.add_argument("--write", action="store_true", help="with --project: merge the entries into ./.mcp.json")
     dv = sub.add_parser("dev", help="the Docker development stack: the whole fleet on this machine, sealed like the real one (docker/README.md)")
-    dv.add_argument("action", choices=["render", "up", "unseal", "status", "test", "down", "password", "aidb-setup"],
+    dv.add_argument("action", choices=["render", "up", "unseal", "status", "test", "down", "password", "aidb-setup", "llm-provider"],
                     help="render: write docker/compose.yml from the manifest (--check: only compare); up: build, start, seal, unseal, register, connect (safe to repeat); "
                          "unseal: after a restart; aidb-setup [APP...]: the apps' AIDB operator step; status; test: smoke checks; down: stop (-v: also data and state); password: the dev-admin login")
     dv.add_argument("apps", nargs="*", metavar="APP", help="unseal: only these apps")
@@ -694,6 +705,9 @@ def main(argv: list[str] | None = None) -> int:
     dv.add_argument("--check", action="store_true", help="render: do not write, exit 1 if the file differs")
     dv.add_argument("--no-build", action="store_true", help="up: do not build images (use the ones that exist)")
     dv.add_argument("--include", help="up: comma-separated apps that are skipped by default because they cannot boot sealed yet (devstack.NOT_SEALABLE)")
+    dv.add_argument("--chat-model", help="llm-provider: the upstream chat model (default: a small current one per provider)")
+    dv.add_argument("--rpm", type=int, default=10, help="llm-provider: requests per minute of every gateway client (default 10)")
+    dv.add_argument("--budget", type=int, default=300000, help="llm-provider: tokens per month of every gateway client, hard (default 300000)")
     dv.add_argument("--agent", action="store_true", help="aidb-setup: also register the gateway chat model and the agent (needs the gateway reachable from the database over http: see docs/10)")
     dv.add_argument("--reseal", action="store_true", help="aidb-setup: accept AIDB objects that no longer match their seal")
     dv.add_argument("--recreate", help="up: comma-separated apps whose container is created afresh (a new image, a new blob)")
