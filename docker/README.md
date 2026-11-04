@@ -101,7 +101,8 @@ Two dev-only settings make that path possible, both in the stack and not in the 
 `devstack.GATEWAY_IP`) which `--agent` uses as the model URL. If that subnet clashes with a network of yours, change `NETWORK_SUBNET` and `GATEWAY_IP` and run `make dev-render`.
 `PAYBROKER_DEV_HTTP=1` (PayBroker only) lets it accept http `*.localhost` origins.
 
-After `aidb-setup`, an app that was already running looks again within a minute; CityPulse needs `docker restart ecosystem-dev-citypulse-1` and `make dev-unseal` (its vault is opened by the unseal step).
+After `aidb-setup`, `ecoctl dev aidb-setup` does what an operator would: it waits for each app's `/readyz` AIDB state to become `ready` (the apps re-examine a fallback about every 60 s; TrustDesk took 15 s on a fresh stack) and, for an app whose state says `vault_locked`
+(CityPulse: its setup creates the vault the seals need, but the running process only opens its vault at unseal time and never looks again), restarts the container and unseals it. No manual step.
 
 ## Known gaps (2026-11-04)
 

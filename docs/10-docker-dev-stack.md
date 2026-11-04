@@ -31,6 +31,7 @@ Identity 6a74ab1, CityPulse 6821ee9, TrustDesk 112a5cc, PagerLens 5a1a98b, PayBr
 * `ecoctl dev aidb-setup --agent` for trustdesk, pagerlens, paybroker and citypulse: pipelines, tools, purposes, seals, the chat model, the agents (`td_prevalidator`, `pagerlens_investigator`, `pb_triage_agent`, `pb_ask_agent`, `cp_ask_agent`) created. PayBroker's and CityPulse's setups open their vaults with the seal passphrase typed at a hidden prompt.
 * `connect` ShopFront to PayBroker: service tokens, merchant, allowed origin (http `*.localhost`, with `PAYBROKER_DEV_HTTP=1`) and keys now work (they returned 422 before).
 * One call per app through the agent path: PayBroker `/api/ask` and CityPulse `/api/ask` each ran the AIDB agent and returned its answer (the echo stand-in's text); TrustDesk pre-validation invoked `td_prevalidator`, the app rejected the non-verdict ("final answer is not valid JSON") and fell back to the gateway path, logging `AIDB MODE FALLBACK`, as designed.
+* `ecoctl dev aidb-setup --agent` leaves every app `ready` by itself (fresh stack: 36 s for the four apps): it waits for the apps' own once-a-minute re-examination (TrustDesk: 15 s) and restarts and unseals CityPulse, whose vault is created by its setup but only opened at unseal time (cause: the running process does not look again, so this is a stack ordering step, not a cache delay).
 * The repeat run: 5 s, no container created, restarted or recreated, registrations, gateway clients, merchant, origin and keys "kept", no secret rotated.
 * Restarting every container leaves each app sealed; `ecoctl dev unseal` opens them all and `ecoctl dev test` passes again.
 * `docker inspect` of an app shows only `APGKIT_SEALED_FILE` and public values.
@@ -39,7 +40,6 @@ Identity 6a74ab1, CityPulse 6821ee9, TrustDesk 112a5cc, PagerLens 5a1a98b, PayBr
 
 * **`connect` stops at the PayBroker webhook** (HTTP 422: private or local address). Needs `PAYBROKER_ALLOW_PRIVATE_URLS=true` on PayBroker or a different webhook policy: a decision.
 * **The stand-in model proves plumbing only.** No agent produced a verdict or called a SQL tool, so no tool call was allowed or denied: **no denial was seen in any governance view**, TrustDesk's agent verdict path (citations checked, fallback avoided), PagerLens' AIDB-agent investigation (no incident was created to investigate) and PayBroker's case triage by the agent were **not exercised**. The kit's scripted server (`tests/aidbfake.py`) could drive them; per-app scripts (TrustDesk's must cite a retrieved passage) were not written.
-* CityPulse needs a restart plus unseal after its setup before its AIDB state is `ready`.
 
 ## Not verified
 

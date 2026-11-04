@@ -408,6 +408,35 @@ class Stack:
             raise DevError(f"{key} aidb-setup failed (exit {code}): {' | '.join(out.splitlines()[-3:])[:400]}")
         return out
 
+    def reopen_if_locked(self, key: str) -> str:
+        """An app whose AIDB state says `vault_locked` right after its setup (CityPulse: the setup creates the vault the seals need, the running process only opens its vault at unseal time and
+        does not look again) is restarted and unsealed, which is what an operator would do. Returns a one-line outcome, or '' when nothing was needed."""
+        try:
+            body = (self.ctx.http or httpx).get(url_of(key) + "/readyz", timeout=15).json()
+        except (httpx.HTTPError, ValueError):
+            return ""
+        aidb = body.get("aidb")
+        if not (isinstance(aidb, dict) and aidb.get("state") == "vault_locked"):
+            return ""
+        self.compose("restart", key)
+        self.sleep(3)
+        return f"{key}: AIDB vault was locked after setup: restarted, {self.unseal(self.m.everything()[key])}"
+
+    def wait_aidb_ready(self, key: str, timeout: float = 150) -> str:
+        """The apps look at their AIDB state again about once a minute (a fallback is re-examined every 60 s), so right after `aidb-setup` a running app still reports the old
+        state. Wait for `ready` (up to `timeout`) and say how long it took, or what it still says."""
+        t0, detail = time.monotonic(), ""
+        while True:
+            try:
+                ok, detail = aidb_check(key, (self.ctx.http or httpx).get(url_of(key) + "/readyz", timeout=15).json())
+            except (httpx.HTTPError, ValueError) as exc:
+                ok, detail = False, type(exc).__name__
+            if ok:
+                return f"{key}: AIDB state ready after {time.monotonic() - t0:.0f} s"
+            if time.monotonic() - t0 > timeout:
+                return f"{key}: still not ready after {int(timeout)} s: {detail}"
+            self.sleep(5)
+
     def status(self) -> int:
         bad = 0
         for a in self.active():

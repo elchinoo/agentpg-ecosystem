@@ -237,6 +237,10 @@ def cmd_dev(args) -> int:
             for key in args.apps or devstack.AIDB_SETUP_APPS:
                 print(f"== {key} aidb-setup")
                 print(stack.aidb_setup(key, agent=args.agent, reseal=args.reseal))
+                note = stack.reopen_if_locked(key)
+                if note:
+                    print(note)
+                print(stack.wait_aidb_ready(key))
             return 0
         if args.action == "status":
             return stack.status()
