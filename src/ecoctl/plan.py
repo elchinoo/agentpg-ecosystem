@@ -38,9 +38,9 @@ class Context:
     connect_http: httpx.Client | None = None                # the identity token endpoint, PayBroker's and the shop's admin APIs; injected in tests
     connect_sleep: Callable[[float], None] | None = None    # injected in tests (waiting for a locked vault or a service that is starting)
     connect_clock: Callable[[], float] | None = None
-    prompt_password: bool = False                           # ask for the admin password of the `vault: password` apps instead of using ECOCTL_ADMIN_PASSWORD or the state file (never kept)
+    prompt_password: bool = False                           # ask for the admin password of the `vault: password` apps instead of using ECOCTL_ADMIN_PASSWORD (never kept)
     ask_password: Callable[[str], str] | None = None        # injected in tests (default: getpass)
-    announce: Callable[[str], None] = lambda text: print(text, file=sys.stderr, flush=True)       # the one place a generated admin password is shown
+    announce: Callable[[str], None] = lambda text: print(text, file=sys.stderr, flush=True)       # kept for callers; ecoctl no longer generates or shows an admin password
     vault_sleep: Callable[[float], None] | None = None      # injected in tests (waiting for an app to answer)
     vault_clock: Callable[[], float] | None = None
     _identity: Identity | None = None
@@ -407,7 +407,7 @@ def _vault_step(app: App) -> Step:
                 [f"GET <{app.key}>/api/session  (public: is the vault created, is it unlocked)",
                  "not created yet: POST /api/admin-password (the data key is wrapped under the admin password alone; there is no platform wrap)",
                  "created but locked (a restart): POST /api/vault/unlock",
-                 f"the password is {ENV_PASSWORD}, the prompt (--admin-password-prompt) or .ecosystem/state.json; a new one is generated and shown once when none exists. "
+                 f"the password is {ENV_PASSWORD} or the prompt (--admin-password-prompt); ecoctl never stores or makes one up (`ecoctl seal-passphrase` prints a strong one). "
                  f"It is never put in the sandbox environment ({app.encryption_key_name} is not set)"],
                 lambda c: ensure_unlocked(c, app))
 

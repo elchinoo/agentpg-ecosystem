@@ -5,12 +5,14 @@ import pytest
 import yaml
 
 from ecoctl.manifest import Limits, ManifestError, load, parse
+from tests.unsealed import UNSEALED
 
 REPO_MANIFEST = Path(__file__).resolve().parents[1] / "ecosystem.yaml"
 
 
 def doc():
-    return copy.deepcopy(yaml.safe_load(REPO_MANIFEST.read_text()))
+    """The shipped manifest as a dict, with `seal: false` (the fakes the other tests build on have no /_seal routes)."""
+    return copy.deepcopy(yaml.safe_load(UNSEALED.read_text()))
 
 
 def test_the_shipped_manifest_is_valid_and_callees_come_first():

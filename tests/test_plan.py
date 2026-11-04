@@ -1,5 +1,3 @@
-import json
-from pathlib import Path
 
 import pytest
 
@@ -7,9 +5,11 @@ from ecoctl.agentpg import AgentPG, AgentPGError, Command
 from ecoctl.manifest import load
 from ecoctl.plan import Context, app_env, build, service_spec, web_spec
 from ecoctl.state import State
+from tests.conftest import read_state
 from tests.fakes import FakeAgentPG, FakeGateway, FakeIdentity
+from tests.unsealed import UNSEALED
 
-MANIFEST = Path(__file__).resolve().parents[1] / "ecosystem.yaml"
+MANIFEST = UNSEALED
 
 
 @pytest.fixture
@@ -265,7 +265,7 @@ def test_the_database_key_is_kept_when_the_instance_is_created(world):
         entry = ctx.state.app(key)
         if entry.get("instance_id"):
             assert entry["db_key"].startswith("a1p_sk_")
-    assert json.loads(Path(ctx.state.path).read_text())["apps"]["paybroker"]["db_key"]
+    assert read_state(ctx.state.path)["apps"]["paybroker"]["db_key"]
     assert oct(ctx.state.path.stat().st_mode & 0o777) == "0o600"
 
 

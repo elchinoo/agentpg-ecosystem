@@ -5,7 +5,6 @@ Needs a Postgres (TEST_DATABASE_URL) and the identity package importable (`pip i
 import argparse
 import json
 import os
-from pathlib import Path
 
 import httpx
 import pytest
@@ -22,10 +21,12 @@ from ecoctl.manifest import load  # noqa: E402
 from ecoctl.plan import Context, build  # noqa: E402
 from ecoctl.state import State  # noqa: E402
 from ecoctl.vault import VaultError, ensure_unlocked  # noqa: E402
+from tests.conftest import ADMIN_PASSWORD  # noqa: E402
 from tests.fakes import FakeAgentPG, FakeGateway  # noqa: E402
 from tests.fakes_connect import FakeConnect  # noqa: E402
+from tests.unsealed import UNSEALED  # noqa: E402
 
-MANIFEST = Path(__file__).resolve().parents[1] / "ecosystem.yaml"
+MANIFEST = UNSEALED
 
 
 def _claims(auth: str) -> dict:
@@ -85,7 +86,7 @@ def test_apply_against_the_real_provider(tmp_path, monkeypatch):
             step.run(ctx)
         session = http.get("/api/session").json()["vault"]
         assert session["initialized"] and session["unlocked"] and not session["auto_unlock"]      # created with the password alone: no platform wrap
-        pw = state.vault_admin_password()
+        pw = ADMIN_PASSWORD
         assert pw and pw not in json.dumps(cli.sandboxes["eco-identity"]["env"])
         # a platform restart: the key in memory is gone, identity cannot sign, `unlock` opens it with the same password and a second apply works
         from identity import keys as identity_keys

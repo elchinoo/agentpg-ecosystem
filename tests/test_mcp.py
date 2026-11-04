@@ -11,6 +11,7 @@ from ecoctl import mcp as mcp_mod
 from ecoctl.agentpg import AgentPG
 from ecoctl.mcp import DB_USER, McpError
 from ecoctl.state import State
+from tests.conftest import read_state
 from tests.test_plan import MANIFEST, apply, world  # noqa: F401  (the fixture)
 
 
@@ -43,7 +44,7 @@ def test_users_are_created_once_and_kept_only_in_the_state(world, capsys):  # no
     u = ctx.state.app("shopfront")["mcp_user"]
     assert u["host"] == "db.example.test" and u["dbname"] == "appdb" and u["query"] == "sslmode=require" and u["password"].startswith("pw-")
     state_file = ctx.state.dir / "state.json"
-    assert stat.S_IMODE(state_file.stat().st_mode) == 0o600 and u["password"] in state_file.read_text()
+    assert stat.S_IMODE(state_file.stat().st_mode) == 0o600 and u["password"] not in state_file.read_text() and u["password"] in json.dumps(read_state(state_file))
     # again: reused, no new CLI call at all
     cli.calls.clear()
     assert mcp_mod.users(ctx, apps) == 0 and cli.calls == [] and "reusing" in capsys.readouterr().out

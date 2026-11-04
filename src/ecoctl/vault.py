@@ -9,19 +9,20 @@ ecoctl already holds (the same one it registers clients with):
     POST /api/admin-password  {"new": ...}   first time only: creates the data key wrapped under the password alone, and unlocks
     POST /api/vault/unlock    {"password": ...}   after every restart
 
-Where the password comes from, in this order: the ECOCTL_ADMIN_PASSWORD environment variable, a prompt (`--admin-password-prompt`; never kept), the
-state file (`.ecosystem/state.json`, git-ignored, mode 0600). When none exists and the vault does not exist yet, one is generated (token_urlsafe(24)),
-kept in the state file and shown once. A vault that already exists never gets a made-up password. The password is never put in a sandbox environment,
-a log line, an error message or `ecoctl env`.
+Where the password comes from, in this order: the ECOCTL_ADMIN_PASSWORD environment variable, a prompt (`--admin-password-prompt`), and, for a sealed
+fleet (`agentpg.seal: true`, the default), the seal passphrase itself (the apps open their vaults with it when they are unsealed). It is never stored:
+not in the state file, not in a sandbox environment, a log line, an error message or `ecoctl env`. ecoctl never makes one up; `ecoctl seal-passphrase`
+prints a strong random one to put in a password manager.
 """
 import getpass
 import os
-import secrets
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
 import httpx
+
+from .state import StateError
 
 ENV_PASSWORD = "ECOCTL_ADMIN_PASSWORD"
 
@@ -128,8 +129,8 @@ class VaultAdmin:
             raise VaultError(f"POST /api/vault/unlock: HTTP {r.status_code} {self._detail(r)}".strip())
 
 
-def operator_password(ctx, key: str, st: VaultState, *, allow_generate: bool) -> tuple[str, str]:
-    """(password, where it came from). `ctx` is plan.Context: state, prompt_password, ask_password, announce."""
+def operator_password(ctx, key: str, st: VaultState) -> tuple[str, str]:
+    """(password, where it came from). `ctx` is plan.Context: state, manifest, prompt_password, ask_password. Never read from, or written to, the state file."""
     env = os.environ.get(ENV_PASSWORD)
     if env:
         return env, ENV_PASSWORD
@@ -141,20 +142,15 @@ def operator_password(ctx, key: str, st: VaultState, *, allow_generate: bool) ->
         if not st.initialized and ask(f"Again, to create the {key} vault with it: ") != pw:
             raise VaultError("the two entries differ; nothing was created")
         return pw, "prompt"
-    kept = ctx.state.vault_admin_password()
-    if kept:
-        return kept, "the state file"
+    if ctx.manifest.seal:
+        try:
+            return ctx.state.passphrase(creating=not st.initialized, ask=ctx.ask_password), "the seal passphrase"
+        except StateError as exc:
+            raise VaultError(str(exc)) from None
     if st.initialized:
-        raise VaultError(f"the {key} vault is protected by an admin password this machine does not have: set {ENV_PASSWORD}, or add --admin-password-prompt "
-                         "(a made-up password could never open it)")
-    if not allow_generate:
-        raise VaultError(f"the {key} vault does not exist yet: run `ecoctl apply --execute`")
-    pw = secrets.token_urlsafe(24)
-    ctx.state.keep_vault_admin_password(pw)
-    ctx.state.save()                                   # before it is used: a crash between creating the vault and saving must not lose it
-    ctx.announce(f"\n  Admin password for the vaults of the apps with `vault: password` (generated; kept in {ctx.state.path}, mode 0600; shown only now):\n"
-                 f"    {pw}\n  Store it in your password manager: after a platform restart `ecoctl unlock` needs it, and it is not stored on the platform.\n")
-    return pw, "generated"
+        raise VaultError(f"the {key} vault is protected by an admin password this machine does not keep: set {ENV_PASSWORD}, or add --admin-password-prompt")
+    raise VaultError(f"the {key} vault does not exist yet and ecoctl never stores or makes up its admin password: set {ENV_PASSWORD} or add --admin-password-prompt "
+                     "(`ecoctl seal-passphrase` prints a strong random one for your password manager)")
 
 
 def ensure_unlocked(ctx, app, *, allow_init: bool = True) -> str:
@@ -166,11 +162,11 @@ def ensure_unlocked(ctx, app, *, allow_init: bool = True) -> str:
     if not st.initialized:
         if not allow_init:
             raise VaultError(f"the {app.key} vault does not exist yet: run `ecoctl apply --execute`")
-        pw, src = operator_password(ctx, app.key, st, allow_generate=True)
+        pw, src = operator_password(ctx, app.key, st)
         admin.initialize(pw)
         outcome = f"vault created with the admin password ({src}) and unlocked"
     else:
-        pw, src = operator_password(ctx, app.key, st, allow_generate=False)
+        pw, src = operator_password(ctx, app.key, st)
         admin.unlock(pw, app.key, src)
         outcome = f"vault unlocked with the admin password ({src})"
     if not admin.state().unlocked:

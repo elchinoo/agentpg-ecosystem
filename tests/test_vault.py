@@ -3,8 +3,6 @@ admin password, `ecoctl unlock` after a platform restart, the vault state in `ec
 Everything runs against the fakes in tests/fakes.py (their vault follows the kit's rules for admin-password-only mode)."""
 import copy
 import json
-import os
-import stat
 
 import httpx
 import pytest
@@ -15,6 +13,7 @@ from ecoctl.manifest import ManifestError, load, parse
 from ecoctl.plan import Context, build
 from ecoctl.state import State
 from ecoctl.vault import VaultAdmin, VaultError, VaultState, describe, ensure_unlocked, operator_password
+from tests.conftest import PASSPHRASE
 from tests.fakes import fake_get
 from tests.test_llm import gateway_of
 from tests.test_plan import MANIFEST, again, apply, world  # noqa: F401  (the fixture)
@@ -125,27 +124,37 @@ def test_the_vault_is_created_before_identity_is_waited_for_and_before_any_clien
     assert idp.vault.unlocked and gateway_of(idp).vault.unlocked
 
 
-def test_a_generated_password_is_kept_only_in_the_state_file_and_shown_once(world):  # noqa: F811
+def test_without_a_password_from_the_operator_nothing_is_created_and_none_is_made_up(world, monkeypatch):  # noqa: F811
+    ctx, cli, idp = world
+    monkeypatch.delenv("ECOCTL_ADMIN_PASSWORD")
+    with pytest.raises(VaultError, match="never stores or makes up"):
+        apply(ctx)
+    assert not idp.vault.initialized
+    ctx.state.save()
+    assert "admin_password" not in json.dumps(State(ctx.state.dir).data)
+
+
+def test_the_password_is_never_in_the_state_a_sandbox_or_an_outcome(world, monkeypatch):  # noqa: F811
+    from tests.conftest import ADMIN_PASSWORD
     ctx, cli, idp = world
     said = Said()
     ctx.announce = said
     out = apply(ctx)
-    pw = State(ctx.state.dir).vault_admin_password()
-    assert pw and len(pw) >= 32 and idp.vault.password == pw and gateway_of(idp).vault.password == pw
-    assert len(said.lines) == 1 and pw in said.lines[0]                                 # shown once, for both apps, when it was made
+    assert idp.vault.password == ADMIN_PASSWORD == gateway_of(idp).vault.password
+    assert said.lines == [] and "vault" not in State(ctx.state.dir).data
     assert (ctx.state.dir / "state.json").stat().st_mode & 0o777 == 0o600
-    assert not any(pw in json.dumps(e) for e in sandbox_env(cli).values())              # never in a sandbox environment
-    assert not any(pw in line for _, line in out)                                       # nor in any step outcome
-    said2 = Said()
-    c2 = again(ctx, cli, idp, announce=said2)
+    assert ADMIN_PASSWORD not in (ctx.state.dir / "state.json").read_text() and ADMIN_PASSWORD not in json.dumps(ctx.state.data)
+    assert not any(ADMIN_PASSWORD in json.dumps(e) for e in sandbox_env(cli).values())     # never in a sandbox environment
+    assert not any(ADMIN_PASSWORD in line for _, line in out)                              # nor in any step outcome
+    c2 = again(ctx, cli, idp)
     apply(c2)
-    assert said2.lines == [] and idp.vault.initializations == 1 and gateway_of(idp).vault.initializations == 1       # a second run neither shows nor creates anything
+    assert idp.vault.initializations == 1 and gateway_of(idp).vault.initializations == 1   # a second run creates nothing
 
 
 def test_plan_and_env_never_contain_the_password(world, capsys):  # noqa: F811
     ctx, cli, idp = world
     apply(ctx)
-    pw = ctx.state.vault_admin_password()
+    from tests.conftest import ADMIN_PASSWORD as pw
     capsys.readouterr()
     cli_mod.main(["--state", str(ctx.state.dir), "-f", str(MANIFEST), "plan"])
     for app in ("identity", "llmgw", "trustdesk"):
@@ -162,22 +171,24 @@ def test_the_password_from_the_environment_is_used_and_not_kept(world, monkeypat
     ctx.announce = said
     apply(ctx)
     assert idp.vault.password == "operator-held-passphrase-one" == gateway_of(idp).vault.password
-    assert said.lines == [] and State(ctx.state.dir).vault_admin_password() is None
+    assert said.lines == [] and "vault" not in State(ctx.state.dir).data
     assert "operator-held-passphrase-one" not in (ctx.state.dir / "state.json").read_text()
 
 
-def test_a_prompted_password_is_confirmed_when_a_vault_is_created_and_never_kept(world):  # noqa: F811
+def test_a_prompted_password_is_confirmed_when_a_vault_is_created_and_never_kept(world, monkeypatch):  # noqa: F811
     ctx, cli, idp = world
+    monkeypatch.delenv("ECOCTL_ADMIN_PASSWORD")
     answers = iter(["typed-passphrase-123", "typed-passphrase-123"] * 2)
     ctx.prompt_password, ctx.ask_password = True, lambda _q: next(answers)
     apply(ctx)
-    assert idp.vault.password == "typed-passphrase-123" and State(ctx.state.dir).vault_admin_password() is None
+    assert idp.vault.password == "typed-passphrase-123" and "vault" not in State(ctx.state.dir).data
     c2 = again(ctx, cli, idp, prompt_password=True, ask_password=lambda _q: pytest.fail("an unlocked vault needs no password"))
     apply(c2)
 
 
-def test_a_mistyped_confirmation_creates_nothing(world):  # noqa: F811
+def test_a_mistyped_confirmation_creates_nothing(world, monkeypatch):  # noqa: F811
     ctx, cli, idp = world
+    monkeypatch.delenv("ECOCTL_ADMIN_PASSWORD")
     answers = iter(["typed-passphrase-123", "typed-passphrase-124"])
     ctx.prompt_password, ctx.ask_password = True, lambda _q: next(answers)
     with pytest.raises(VaultError, match="differ"):
@@ -194,16 +205,15 @@ def test_a_weak_password_is_refused_by_the_app_and_the_error_does_not_echo_it(wo
     assert not idp.vault.initialized
 
 
-def test_an_existing_vault_never_gets_a_made_up_password(world):  # noqa: F811
+def test_an_existing_vault_never_gets_a_made_up_password(world, monkeypatch):  # noqa: F811
     ctx, cli, idp = world
     apply(ctx)
-    ctx.state.data.pop("vault")                                                         # the state file was lost
-    ctx.state.save()
+    monkeypatch.delenv("ECOCTL_ADMIN_PASSWORD")                                         # this machine does not have it
     idp.vault.restart()
     c2 = again(ctx, cli, idp)
     with pytest.raises(VaultError, match="ECOCTL_ADMIN_PASSWORD.*--admin-password-prompt"):
         apply(c2)
-    assert State(ctx.state.dir).vault_admin_password() is None and idp.vault.initializations == 1
+    assert "vault" not in State(ctx.state.dir).data and idp.vault.initializations == 1
 
 
 def test_a_wrong_password_says_which_one_was_used_and_where_it_came_from_without_showing_it(world, monkeypatch):  # noqa: F811
@@ -236,7 +246,8 @@ def test_after_a_platform_restart_both_stay_locked_until_unlock_opens_them_ident
     out = capsys.readouterr().out
     assert out.index("identity:") < out.index("llmgw:") and idp.vault.unlocked and gateway_of(idp).vault.unlocked
     assert idp.vault.unlocks == 1 and idp.vault.initializations == 1                    # opened, not created again
-    assert ctx.state.vault_admin_password() not in out
+    from tests.conftest import ADMIN_PASSWORD
+    assert ADMIN_PASSWORD not in out
 
 
 def test_unlock_of_one_app_and_of_an_already_open_one(world, monkeypatch, capsys):  # noqa: F811
@@ -374,7 +385,7 @@ def test_a_manifest_with_platform_vaults_behaves_as_before(tmp_path):
     apply(ctx)
     assert cli.sandboxes["eco-identity"]["env"]["IDENTITY_ENCRYPTION_KEY"] == state.secret("identity", "IDENTITY_ENCRYPTION_KEY")
     assert cli.sandboxes["eco-llmgw"]["env"]["LLMGW_ENCRYPTION_KEY"] == state.secret("llmgw", "LLMGW_ENCRYPTION_KEY")
-    assert "/api/admin-password" not in [p for _, p in idp.requests] and State(state.dir).vault_admin_password() is None
+    assert "/api/admin-password" not in [p for _, p in idp.requests] and "vault" not in State(state.dir).data
 
 
 def test_ecoctl_with_only_platform_apps_has_nothing_to_unlock(tmp_path, monkeypatch, capsys):
@@ -428,29 +439,21 @@ def test_the_operator_key_goes_only_in_the_authorization_header_and_the_status_c
     assert seen[1][1] == "Bearer OPERATOR" and json.loads(seen[1][2]) == {"password": "pw-pw-pw-pw-pw"}
 
 
-def test_operator_password_order_is_environment_then_prompt_then_state(monkeypatch, tmp_path):
+def test_operator_password_order_is_environment_then_prompt_then_the_seal_passphrase(monkeypatch, tmp_path):
     st = State(tmp_path / "s")
-    st.keep_vault_admin_password("from-state")
     ctx = Context(load(MANIFEST), st, None, prompt_password=True, ask_password=lambda q: "from-prompt")
     fresh, made = VaultState(False, False), VaultState(True, False)
-    assert operator_password(ctx, "identity", made, allow_generate=False) == ("from-prompt", "prompt")
-    ctx.prompt_password = False
-    assert operator_password(ctx, "identity", made, allow_generate=False) == ("from-state", "the state file")
     monkeypatch.setenv("ECOCTL_ADMIN_PASSWORD", "from-env")
-    assert operator_password(ctx, "identity", made, allow_generate=False) == ("from-env", "ECOCTL_ADMIN_PASSWORD")
+    assert operator_password(ctx, "identity", made) == ("from-env", "ECOCTL_ADMIN_PASSWORD")
     monkeypatch.delenv("ECOCTL_ADMIN_PASSWORD")
-    st.data["vault"] = {}
-    with pytest.raises(VaultError, match="does not exist yet"):
-        operator_password(ctx, "identity", fresh, allow_generate=False)
-    with pytest.raises(VaultError, match="does not have"):
-        operator_password(ctx, "identity", made, allow_generate=True)
-
-
-def test_the_state_file_stays_private_when_it_holds_the_password(tmp_path):
-    st = State(tmp_path / "s")
-    st.keep_vault_admin_password("x" * 32)
-    st.save()
-    assert stat.S_IMODE(os.stat(st.path).st_mode) == 0o600 and stat.S_IMODE(os.stat(st.dir).st_mode) == 0o700
+    assert operator_password(ctx, "identity", made) == ("from-prompt", "prompt")
+    ctx.prompt_password = False
+    with pytest.raises(VaultError, match="does not keep"):
+        operator_password(ctx, "identity", made)
+    with pytest.raises(VaultError, match="never stores or makes up"):
+        operator_password(ctx, "identity", fresh)
+    sealed = Context(parse({**doc(), "agentpg": {**doc()["agentpg"], "seal": True}}), st, None)
+    assert operator_password(sealed, "identity", made) == (PASSPHRASE, "the seal passphrase")
 
 
 @pytest.mark.parametrize("command", ["apply", "recreate", "unlock"])

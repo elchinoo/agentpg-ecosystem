@@ -150,7 +150,7 @@ class Manifest:
     apps: dict[str, App]
     groups: tuple[Group, ...] = field(default_factory=tuple)
     auto_pause: bool = True
-    seal: bool = False                        # sealed boot: every secret travels in one blob only the operator's passphrase opens (see seal.py)
+    seal: bool = True                         # sealed boot: every secret travels in one blob only the operator's passphrase opens (see seal.py)
     plan: str | None = None
     llm: LLM = field(default_factory=LLM)
 
@@ -486,7 +486,7 @@ def parse(doc: dict) -> Manifest:
     fleet_pause = ag.get("auto_pause", True)
     if not isinstance(fleet_pause, bool):
         raise ManifestError("agentpg.auto_pause must be true or false")
-    seal = ag.get("seal", False)
+    seal = ag.get("seal", True)
     if not isinstance(seal, bool):
         raise ManifestError("agentpg.seal must be true or false")
     fleet_plan = ag.get("plan")

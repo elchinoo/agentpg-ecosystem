@@ -1,11 +1,9 @@
 # ruff: noqa: E402
 """Sealed boot, operator side: the sandbox gets only a blob; the passphrase opens it through the kit's real unseal endpoints."""
-import json
 from pathlib import Path
 
 import pytest
-
-kit = pytest.importorskip("apgkit.sealed", reason="sealed boot needs agentpg-kit >= 0.4.1 (pip install 'agentpg-ecosystem[seal]')")
+from apgkit import sealed as kit
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -15,6 +13,7 @@ from ecoctl.manifest import load
 from ecoctl.plan import Context, app_env
 from ecoctl.state import State
 from tests.fakes import FakeAgentPG
+from tests.unsealed import UNSEALED
 
 MANIFEST = Path(__file__).resolve().parents[1] / "ecosystem.yaml"
 PASS = "correct-horse-battery-staple-9"
@@ -115,23 +114,36 @@ def test_app_without_sealing_says_so(ctx):
 
 
 def test_manifest_flag_must_be_boolean(tmp_path):
-    text = MANIFEST.read_text().replace("  size: small", "  size: small\n  seal: yes please", 1)
-    p = tmp_path / "e.yaml"
-    p.write_text(text)
     from ecoctl.manifest import ManifestError
+    text = UNSEALED.read_text()
+    p = tmp_path / "e.yaml"
+    p.write_text(text.replace("seal: false", "seal: yes please"))
     with pytest.raises(ManifestError, match="seal"):
         load(p)
-    p.write_text(text.replace("seal: yes please", "seal: true"))
+    p.write_text(text.replace("seal: false", "seal: true"))
     assert load(p).seal is True
-    assert json.dumps(load(MANIFEST).seal) == "false"
+
+
+def test_seal_is_on_by_default_in_the_loader_and_in_the_shipped_manifest(tmp_path):
+    assert load(MANIFEST).seal is True                                     # ecosystem.yaml says so explicitly
+    p = tmp_path / "e.yaml"
+    p.write_text("\n".join(line for line in UNSEALED.read_text().splitlines() if not line.strip().startswith("seal:")))
+    assert not [line for line in p.read_text().splitlines() if line.strip().startswith("seal:")]
+    assert load(p).seal is True                                            # and the loader's default is true when the key is absent
+
+
+def test_opting_out_prints_a_loud_warning_in_the_plan_output_and_sealing_does_not(capsys):
+    from ecoctl import cli
+    assert cli.main(["--state", "/nonexistent-dir-for-plan-test", "-f", str(UNSEALED), "plan"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("WARNING: agentpg.seal is false") and "in the clear" in out
+    assert cli.main(["--state", "/nonexistent-dir-for-plan-test", "-f", str(MANIFEST), "plan"]) == 0
+    assert "WARNING: agentpg.seal is false" not in capsys.readouterr().out
 
 
 def test_sealed_plan_unseals_each_app_and_has_no_vault_password_steps(tmp_path):
     from ecoctl.plan import build
-    text = MANIFEST.read_text().replace("  size: small", "  size: small\n  seal: true", 1)
-    p = tmp_path / "e.yaml"
-    p.write_text(text)
-    m = load(p)
+    m = load(MANIFEST)
     c = Context(m, State(tmp_path / "eco"), AgentPG(run=FakeAgentPG()))
     titles = [st.title for st in build(c)]
     assert any("unseal it with the operator's passphrase" in t for t in titles)

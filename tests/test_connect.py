@@ -15,6 +15,7 @@ from ecoctl.connect_client import ConnectError, ServiceTokens, check_url, finger
 from ecoctl.manifest import ManifestError, load, parse
 from ecoctl.plan import build, ecoctl_spec
 from ecoctl.state import State
+from tests.conftest import read_state
 from tests.fakes import fake_get
 from tests.fakes_connect import fp
 from tests.test_plan import MANIFEST, again, apply, world  # noqa: F401  (the fixture)
@@ -141,7 +142,7 @@ def test_apply_connects_the_shop_by_itself(world, capsys):  # noqa: F811
 def test_a_rerun_on_a_connected_fleet_writes_nothing(world, monkeypatch, capsys):  # noqa: F811
     ctx, cli, idp = world
     apply(ctx)
-    before_state = json.loads(ctx.state.path.read_text())
+    before_state = read_state(ctx.state.path)
     before = (dict(idp.connect.shop.values), json.dumps(idp.connect.pb.merchants, sort_keys=True))
     idp.connect.pb.writes.clear()
     idp.connect.shop.writes.clear()
@@ -151,7 +152,7 @@ def test_a_rerun_on_a_connected_fleet_writes_nothing(world, monkeypatch, capsys)
     out = capsys.readouterr().out
     assert idp.connect.all_writes() == [] and idp.connect.pb.rotations == 1                         # not one write call, no rotation
     assert (dict(idp.connect.shop.values), json.dumps(idp.connect.pb.merchants, sort_keys=True)) == before
-    assert json.loads(ctx.state.path.read_text()) == before_state and len(cli.calls) == calls
+    assert read_state(ctx.state.path) == before_state and len(cli.calls) == calls
     assert "nothing to change" in out and "created" not in out and "update" not in out
     for line in ("merchant 'ShopFront': kept", f"origins: kept ({SHOP})", "key ecoctl:shopfront:secret: kept", "webhook: kept", "ShopFront settings: kept", "test: ok"):
         assert line in out, line

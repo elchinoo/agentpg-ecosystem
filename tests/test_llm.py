@@ -1,7 +1,6 @@
 """`ecoctl apply` wires every app that uses an LLM to the gateway: a client per app, its key kept once, the environment injected, and
 the same on every later run. Everything runs against the fakes in tests/fakes.py (no network, no agentpg)."""
 import argparse
-import json
 
 import httpx
 import pytest
@@ -10,6 +9,7 @@ from ecoctl import cli as cli_mod
 from ecoctl.llm_client import Gateway, GatewayError
 from ecoctl.plan import app_env, build
 from ecoctl.state import State
+from tests.conftest import read_state
 from tests.fakes import FakeGateway, fake_get
 from tests.test_plan import MANIFEST, again, apply, world  # noqa: F401  (the fixture)
 
@@ -50,7 +50,7 @@ def test_each_app_gets_a_different_key_and_the_state_file_stays_private(world): 
     apply(ctx)
     keys = [ctx.state.app(k)["llm_key"] for k in CONSUMERS]
     assert len(set(keys)) == len(CONSUMERS)
-    assert json.loads(ctx.state.path.read_text())["apps"]["trustdesk"]["llm_key"] == keys[CONSUMERS.index("trustdesk")] and oct(ctx.state.path.stat().st_mode & 0o777) == "0o600"
+    assert read_state(ctx.state.path)["apps"]["trustdesk"]["llm_key"] == keys[CONSUMERS.index("trustdesk")] and oct(ctx.state.path.stat().st_mode & 0o777) == "0o600"
 
 
 def test_the_manifest_budget_rpm_and_aliases_reach_the_client(tmp_path):

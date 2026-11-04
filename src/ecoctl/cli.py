@@ -18,15 +18,28 @@ from .llm_client import GatewayError
 from .llm_sync import diff_app, table
 from .manifest import ManifestError, load
 from .plan import Context, app_env, build, installed_extensions
-from .state import DEFAULT_DIR, State
+from .state import DEFAULT_DIR, State, StateError
 from .vault import ENV_PASSWORD, VaultError, describe, ensure_unlocked, probe
 
+UNSEALED_WARNING = ("WARNING: agentpg.seal is false. Every secret of every app is put in its sandbox environment in the clear, readable by whoever can read the platform, "
+                    "and the vault admin password must come from ECOCTL_ADMIN_PASSWORD or a prompt. Remove `seal: false` from the manifest to seal the fleet (the default).\n")
 
-def _print_plan(steps) -> None:
+
+def _print_plan(steps, manifest=None) -> None:
+    if manifest is not None and not manifest.seal:
+        print(UNSEALED_WARNING)
     for i, s in enumerate(steps, 1):
         print(f"{i:>2}. {s.title}")
         for d in s.detail:
             print(f"      {d}")
+
+
+def _needs_passphrase_now(args) -> bool:
+    """Commands that create things and save what they learn ask for the passphrase up front (the encrypted state cannot be saved without it)."""
+    cmd = getattr(args, "cmd", None)
+    if cmd == "apply":
+        return bool(args.execute)
+    return cmd in {"recreate", "db", "connect", "mcp"}
 
 
 def _ctx(args) -> Context:
@@ -35,6 +48,8 @@ def _ctx(args) -> Context:
                   prompt_password=getattr(args, "admin_password_prompt", False))
     if only:
         ctx.manifest.closure(only)                      # unknown names fail now
+    if _needs_passphrase_now(args):
+        ctx.state.require_passphrase()                  # before anything is created: a missing or mistyped passphrase must not come after the work
     return ctx
 
 
@@ -46,7 +61,7 @@ def cmd_validate(args) -> int:
 
 def cmd_plan(args) -> int:
     ctx = _ctx(args)
-    _print_plan(build(ctx))
+    _print_plan(build(ctx), ctx.manifest)
     print("\nNothing was changed. `ecoctl apply --execute` runs this plan; it is safe to run again.")
     return 0
 
@@ -54,13 +69,13 @@ def cmd_plan(args) -> int:
 def cmd_apply(args) -> int:
     ctx = _ctx(args)
     steps = build(ctx)
-    _print_plan(steps)
+    _print_plan(steps, ctx.manifest)
     if not args.execute:
         print("\nDry run: nothing was changed. Add --execute to create these on AgentPG and register them with the identity provider.")
         return 0
     if not args.yes:
         print("\nThis creates databases and sandboxes on your AgentPG account (they may use credits) and writes secrets to "
-              f"{ctx.state.path} (git-ignored).")
+              f"{ctx.state.path}, encrypted with your passphrase (git-ignored).")
         if input("Continue? [y/N] ").strip().lower() != "y":
             print("Cancelled.")
             return 1
@@ -125,7 +140,7 @@ def cmd_recreate(args) -> int:
 def cmd_unlock(args, ctx: Context | None = None) -> int:
     """`ecoctl unlock [app ...]`: open the vault of the apps with `vault: password` (identity, the LLM gateway) with the operator's admin password.
     Needed after a platform restart (identity cannot sign tokens, and the gateway cannot use a stored provider key, until then). Never creates a
-    vault and never makes up a password: `apply` creates them. The password comes from ECOCTL_ADMIN_PASSWORD, --admin-password-prompt or the state file."""
+    vault and never makes up a password: `apply` creates them. The password comes from ECOCTL_ADMIN_PASSWORD, --admin-password-prompt or (sealed fleet) the seal passphrase; never kept."""
     ctx = ctx or _ctx(args)
     m = ctx.manifest
     known = m.everything()
@@ -185,7 +200,7 @@ def cmd_unseal(args, ctx: Context | None = None) -> int:
 
 
 def cmd_seal_passphrase(args) -> int:
-    """A random passphrase (about 124 bits). Shown once, kept nowhere: put it in your password manager."""
+    """A random passphrase (about 124 bits) for the state file and the sealed apps. Shown once, kept nowhere: put it in your password manager."""
     print(seal_mod._kit().generate_passphrase())
     return 0
 
@@ -538,7 +553,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--yes", action="store_true", help="do not ask for confirmation")
     ap.add_argument("--only", help="comma-separated apps to deploy (plus what they call); the identity provider is always included")
     ap.add_argument("--rotate", action="store_true", help="issue new client secrets for apps that already exist")
-    prompt_help = f"ask for the admin password of the `vault: password` apps (identity, the LLM gateway) instead of {ENV_PASSWORD} or the state file; it is not kept"
+    prompt_help = f"ask for the admin password of the `vault: password` apps (identity, the LLM gateway) instead of {ENV_PASSWORD}; it is not kept (a sealed fleet uses the seal passphrase)"
     ap.add_argument("--admin-password-prompt", action="store_true", help=prompt_help)
     rc = sub.add_parser("recreate", help="delete sandboxes and create them afresh (new image or environment); cascades to apps that depend on them")
     rc.add_argument("apps", help="comma-separated app keys, or identity (which recreates everything)")
@@ -599,6 +614,9 @@ def main(argv: list[str] | None = None) -> int:
         return commands[args.cmd](args)
     except ManifestError as exc:
         print(f"manifest error: {exc}", file=sys.stderr)
+        return 1
+    except StateError as exc:
+        print(f"state error: {exc}", file=sys.stderr)
         return 1
 
 

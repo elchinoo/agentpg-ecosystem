@@ -6,19 +6,19 @@ with that blob as `APGKIT_SEALED` plus the non-secret settings. The app starts s
 a sandbox) sends the passphrase, encrypted to a key that exists only in that process, and the app opens the blob, connects, unlocks its
 vault with the same passphrase and starts serving. After a platform restart the app is sealed again until `ecoctl unseal`.
 
-The passphrase comes from ECOCTL_SEAL_PASSPHRASE or a prompt. It is never written to the state file, a sandbox, a log or an error message.
+The passphrase comes from ECOCTL_SEAL_PASSPHRASE or a prompt, once per run. It is never written to a sandbox, a log or an error message; the same passphrase
+encrypts the state file (state.py), which is why it is the only secret the operator has to hold.
 """
-import getpass
-import os
 import time
 from urllib.parse import quote, urlsplit
 
 import httpx
+from apgkit import sealed as kit
 
 from .agentpg import AgentPG, AgentPGError
 from .mcp import POSTGRES_URL, parse_connection
+from .state import ENV_PASSPHRASE, StateError  # noqa: F401  (ENV_PASSPHRASE: re-exported for the plan text)
 
-ENV_PASSPHRASE = "ECOCTL_SEAL_PASSPHRASE"
 BLOB_ENV = "APGKIT_SEALED"
 
 
@@ -27,35 +27,21 @@ class SealError(RuntimeError):
 
 
 def _kit():
-    """agentpg-kit's sealing module (an optional dependency: `pip install agentpg-ecosystem[seal]`), needed only for a sealed fleet."""
-    try:
-        from apgkit import sealed
-    except ImportError:
-        raise SealError("sealed boot needs agentpg-kit >= 0.4.1: pip install 'agentpg-ecosystem[seal]'") from None
-    return sealed
+    """agentpg-kit's sealing module (a normal dependency)."""
+    return kit
 
 
 def passphrase(ctx, *, creating: bool) -> str:
-    """The operator's passphrase: the environment, the copy already asked for in this run, else a prompt (twice when a blob is being made)."""
-    if os.environ.get(ENV_PASSPHRASE):
-        pw = os.environ[ENV_PASSPHRASE]
-    elif getattr(ctx, "_seal_pw", None):
-        return ctx._seal_pw
-    else:
-        ask = ctx.ask_password or getpass.getpass
-        pw = ask("Seal passphrase (not stored anywhere; at least 20 characters, `ecoctl seal-passphrase` makes one): ")
-        if creating and ask("Again: ") != pw:
-            raise SealError("the two entries differ")
+    """The operator's passphrase, one per run and shared with the encrypted state file: the environment, the copy already asked for, else a prompt
+    (twice when a blob or state file is being made). It is never written anywhere."""
     try:
-        _kit().check_passphrase(pw)
-    except _kit().SealError as exc:
+        return ctx.state.passphrase(creating=creating, ask=ctx.ask_password)
+    except StateError as exc:
         raise SealError(str(exc)) from None
-    ctx._seal_pw = pw
-    return pw
 
 
 def database_url(ctx, app) -> str | None:
-    """The database URL for the app: host, port and database from `agentpg describe`, with the instance key ecoctl holds (kept in the state file, shown by
+    """The database URL for the app: host, port and database from `agentpg describe`, with the instance key ecoctl holds (kept in the encrypted state file, shown by
     AgentPG only once). None when either is unavailable (the app then falls back to the platform's PG* settings; the outcome says so)."""
     entry = ctx.state.app(app.key)
     key, iid = entry.get("db_key"), entry.get("instance_id")

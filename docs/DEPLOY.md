@@ -163,8 +163,7 @@ The provider was created with a static admin key (generated, kept in `.ecosystem
 1. Find the URL: `.venv/bin/ecoctl status` (the `eco-identity` row) or `agentpg sandbox status <identity-sandbox-id>`.
 2. Print the key (do not paste it anywhere public): `.venv/bin/ecoctl env identity --reveal | grep IDENTITY_API_KEY`.
 3. Open `https://<identity>/admin`. Expand **Use the server's API key instead**, paste the key, sign in.
-4. The provider already has an **admin password**: `ecoctl` created its vault with one on the first `apply` (a strong one, shown once and kept in `.ecosystem/state.json`
-   unless you supplied your own through `ECOCTL_ADMIN_PASSWORD` or `--admin-password-prompt`). It opens the signing key's vault, and you can sign in to the console with it. The
+4. The provider already has an **admin password**: `ecoctl` created its vault with one on the first `apply` (the one you supplied through `ECOCTL_ADMIN_PASSWORD` or `--admin-password-prompt`, or, for a sealed fleet, your seal passphrase; ecoctl does not store it). It opens the signing key's vault, and you can sign in to the console with it. The
    platform does not store it (section 11a). Keep the API key for automation (`ecoctl` uses it); change the password under **Settings → Admin password** only together with
    the copy `ecoctl` uses (a changed password needs `ECOCTL_ADMIN_PASSWORD` or `--admin-password-prompt` from then on).
 5. **Users → New user**: create yourself (username, e-mail, a password). **Groups → `ecosystem-admins` → add yourself.** That group was
@@ -360,7 +359,7 @@ line, `created`, `kept` or `updated`, and the whole thing is idempotent: a re-ru
 `ecoctl recreate paybroker` recreates the shop too (it `uses` PayBroker) and then reconnects it to the new address. `apply --rotate` rotates the identity client
 secrets, **not** the merchant's keys: that is `ecoctl connect --rotate`.
 
-**What is in the state file** (`.ecosystem/state.json`, mode 0600, git-ignored): `apps.ecoctl.service_secret`, and under `apps.shopfront.connect.paybroker` the
+**What is in the state file** (`.ecosystem/state.json`, mode 0600, git-ignored, encrypted with your passphrase): `apps.ecoctl.service_secret`, and under `apps.shopfront.connect.paybroker` the
 merchant id, the two keys (`id` and `value`), the webhook URL and the webhook secret. They are sent only in an `Authorization` header or a JSON body over
 https (plain http only for localhost), never in a URL, a command line, a log line or an error message. Lose the file and the next `ecoctl connect` creates
 new keys (deleting the old ones named `ecoctl:...`) and rotates the webhook secret; nothing is lost but a moment of rejected payments.
@@ -423,8 +422,7 @@ sandbox environment**. The first `apply` creates each vault with the operator's 
 environment disclosure no longer opens the signing key or the provider keys; database write access, the data key in process memory, the value of the password and the need for a human at
 every restart remain) is in [GUIDE section 9a](GUIDE.md#9a-the-vault-policy-identity-and-the-gateway-are-opened-by-the-operator) and [SECURITY.md](../SECURITY.md).
 
-- **The password.** Supply it with `ECOCTL_ADMIN_PASSWORD` (from your password manager) or `--admin-password-prompt`, or let the first `apply` generate one: it is shown once and kept in `.ecosystem/state.json`
-  (mode 0600, git-ignored). Copy it to your password manager. `apply` never makes up a password for a vault that exists; if the state file is lost and you do not have the password, the vault cannot be opened
+- **The password.** Supply it with `ECOCTL_ADMIN_PASSWORD` (from your password manager) or `--admin-password-prompt`, (`ecoctl seal-passphrase` prints a strong random one). With sealing, the default, it is your seal passphrase. ecoctl never stores or makes one up. If you do not have the password, the vault cannot be opened
   (`identity reset-admin` / `llmgw reset-admin` recreate it and discard what it protected: new signing keys, provider keys to enter again).
 - **After a platform restart** (resume of a paused sandbox, a platform maintenance, a crash, a recreate outside `ecoctl`): identity and the gateway are locked. Run `ecoctl unlock`. Until then identity
   cannot sign (`/readyz` says `locked`; new sign-ins and service tokens fail) and the gateway cannot use a stored provider key; tokens already issued keep working until they expire (the apps verify them offline).
@@ -454,7 +452,7 @@ every restart remain) is in [GUIDE section 9a](GUIDE.md#9a-the-vault-policy-iden
 | `sso_error=...` mentioning the issuer or audience | Identity was reached under a different URL than it first answered on | The first request fixes the issuer. Set `IDENTITY_PUBLIC_URL` in the identity `env` and recreate it |
 | Identity `/readyz` says `locked` | The vault is opened by the admin password and the platform restarted or the sandbox was recreated (or, for a `vault: platform` identity, its `IDENTITY_ENCRYPTION_KEY` is missing) | `ecoctl unlock` (section 11a) |
 | `ecoctl unlock` / `apply`: "did not open the vault" | Wrong admin password, or a vault created in platform mode (no password wrap) | Supply the right `ECOCTL_ADMIN_PASSWORD`; for a platform-mode vault see section 11a, moving an existing fleet |
-| `ecoctl apply`: "protected by an admin password this machine does not have" | The vault exists and the state file lost the password | `ECOCTL_ADMIN_PASSWORD=... ecoctl apply --execute` or `--admin-password-prompt` |
+| `ecoctl apply`: "protected by an admin password this machine does not keep" | The vault exists and no password was supplied | `ECOCTL_ADMIN_PASSWORD=... ecoctl apply --execute` or `--admin-password-prompt` |
 | A service call gets `401`/`invalid_scope`/`access_denied` | The calling app's service client is not allowed that scope or audience | `ecoctl validate`; compare `calls`/`exposes` in the manifest with Apps in the identity console; re-run `apply` |
 | Simulator: "the environment variable ... is empty" | The token variable is empty and the simulator has no service credentials | Check `CPSIM_SERVICE_CLIENT_ID/_SECRET` in `ecoctl env cpsim`, or set the variable |
 | PagerLens shows no `citypulse-*` | CityPulse cannot reach PagerLens or lacks the service token | `agentpg sandbox logs <citypulse-id>` (look for `reporter:`); `PAGERLENS_URL` and `CITYPULSE_SERVICE_CLIENT_*` set? |
