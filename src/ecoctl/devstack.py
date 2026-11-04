@@ -488,6 +488,36 @@ def service_call(ctx: Context, caller: str, callee: str, scope: str, path: str) 
     return got.status_code == 200, f"{callee}{path} answered {got.status_code}"
 
 
+def aidb_switch(key: str) -> str:
+    """The retrieval switch the stack sets for an app (`aidb` for the apps in DEV_ENV with <APP>_RETRIEVAL_BACKEND=aidb), else empty."""
+    return DEV_ENV.get(key, {}).get(f"{key.upper()}_RETRIEVAL_BACKEND", "")
+
+
+def aidb_state_of(body: dict) -> str:
+    """The AIDB state word of an app's /readyz body: `state` (PayBroker, PagerLens, CityPulse), or for TrustDesk (booleans and a one-word `problem`)
+    `ready` when retrieval is in use and nothing is wrong. `missing` when /readyz has no AIDB part at all."""
+    a = body.get("aidb")
+    if isinstance(a, str):
+        return a
+    if not isinstance(a, dict):
+        return "missing"
+    if a.get("state"):
+        return str(a["state"])
+    if "retrieval" in a:
+        return a.get("problem") or ("ready" if a["retrieval"] else "not-ready")
+    return "enabled" if a.get("enabled") else "off"
+
+
+def aidb_check(key: str, body: dict) -> tuple[bool, str]:
+    """An app whose retrieval switch is `aidb` passes only when its AIDB state is `ready`: a state merely being reported (error, tampered, not-set-up,
+    unavailable, vault_locked) is a failure, and the detail says which app and which state. An app without the switch only has to report."""
+    state, a = aidb_state_of(body), body.get("aidb")
+    if aidb_switch(key) != "aidb":
+        return state != "missing", f"{key} readyz aidb={json.dumps(a)}"
+    reason = f" ({a['reason']})" if isinstance(a, dict) and a.get("reason") else ""
+    return state == "ready", f"{key} AIDB state={state}, expected ready{reason}"
+
+
 # ---- the smoke test -------------------------------------------------------------------------------------------------------------------------
 def smoke(stack: Stack) -> list[tuple[str, bool, str]]:
     """Read-mostly checks of a running stack. Returns (name, ok, detail) lines."""
@@ -524,10 +554,8 @@ def smoke(stack: Stack) -> list[tuple[str, bool, str]]:
     for key in AIDB_SETUP_APPS:
         if key in live:
             def aidb_state(key=key):
-                body = http.get(url_of(key) + "/readyz").json()
-                a = body.get("aidb")
-                return isinstance(a, dict) or isinstance(a, str), f"readyz aidb={json.dumps(a)}"
-            check(f"{key} reports its AIDB state", aidb_state)
+                return aidb_check(key, http.get(url_of(key) + "/readyz").json())
+            check(f"{key} reports its AIDB state" + (" and it is ready" if aidb_switch(key) == "aidb" else ""), aidb_state)
     if "trustdesk" in live:
         def td_search():
             c, why = sign_in(ctx, "trustdesk")

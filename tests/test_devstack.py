@@ -130,3 +130,41 @@ def test_the_identity_dev_http_pair_is_set_for_identity_only():
     assert env["identity"]["environment"]["IDENTITY_DEV_HTTP"] == "1"
     assert env["identity"]["environment"]["IDENTITY_ISSUER"] == devstack.url_of("identity")
     assert not [k for k, v in env.items() if k != "identity" and "IDENTITY_DEV_HTTP" in v.get("environment", {})]
+
+
+def test_an_aidb_check_passes_only_when_the_state_is_ready_for_apps_with_the_switch():
+    assert devstack.aidb_switch("paybroker") == "aidb" and devstack.aidb_switch("shopfront") == ""
+    ok, why = devstack.aidb_check("paybroker", {"status": "ready", "aidb": {"enabled": True, "state": "ready"}})
+    assert ok and "ready" in why
+    for state in ("error", "tampered", "unavailable", "vault_locked", "not-set-up", "off"):
+        ok, why = devstack.aidb_check("paybroker", {"aidb": {"enabled": True, "state": state, "reason": "permission denied"}})
+        assert not ok and "paybroker" in why and f"state={state}" in why, (state, why)
+    assert "permission denied" in why
+    assert not devstack.aidb_check("citypulse", {"aidb": {"enabled": False}})[0]            # switch on, but readyz says nothing is active
+    assert not devstack.aidb_check("pagerlens", {"status": "ready"})[0]                       # no AIDB part at all
+    assert devstack.aidb_check("pagerlens", {"aidb": {"requested_backend": "aidb", "state": "ready"}})[0]
+
+
+def test_trustdesk_is_ready_when_retrieval_is_in_use_and_no_problem_is_reported():
+    assert devstack.aidb_check("trustdesk", {"aidb": {"requested": "aidb", "retrieval": True, "agent": True}})[0]
+    ok, why = devstack.aidb_check("trustdesk", {"aidb": {"requested": "aidb", "retrieval": False, "agent": False, "problem": "not_set_up"}})
+    assert not ok and "trustdesk" in why and "not_set_up" in why
+    assert not devstack.aidb_check("trustdesk", {"aidb": {"requested": "aidb", "retrieval": True, "problem": "tampered"}})[0]
+
+
+def test_the_smoke_test_fails_an_app_whose_aidb_state_is_not_ready(monkeypatch):
+    from types import SimpleNamespace as NS
+    bodies = {"paybroker": {"aidb": {"enabled": True, "state": "error", "reason": "permission denied"}},
+              "citypulse": {"aidb": {"enabled": True, "state": "ready"}}}
+
+    class Http:
+        def get(self, url, **k):
+            key = url.split("//")[1].split(".")[0]
+            return NS(status_code=200, json=lambda: bodies.get(key, {}))
+    monkeypatch.setattr(devstack.seal, "state_of", lambda url, http: "unsealed")
+    apps = [NS(key=k, web=False, llm=False) for k in ("paybroker", "citypulse")]
+    stack = NS(ctx=NS(http=Http(), gateway=lambda: None, state=None), m=NS(llm=None), active=lambda: apps)
+    lines = {name: (ok, detail) for name, ok, detail in devstack.smoke(stack)}
+    ok, detail = lines["paybroker reports its AIDB state and it is ready"]
+    assert not ok and "paybroker" in detail and "state=error" in detail
+    assert lines["citypulse reports its AIDB state and it is ready"][0]
