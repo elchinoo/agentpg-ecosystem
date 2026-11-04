@@ -895,8 +895,11 @@ def _apgkit_available():
     exe = shutil.which("ansible-playbook")
     if not exe:
         return False
-    py = open(exe).readline().strip().removeprefix("#!")
-    return subprocess.run([py, "-c", "import apgkit.sealed"], capture_output=True).returncode == 0
+    try:
+        py = open(exe, encoding="utf-8", errors="ignore").readline().strip().removeprefix("#!").split()[0]
+        return subprocess.run([py, "-c", "import apgkit.sealed"], capture_output=True, timeout=60).returncode == 0
+    except (OSError, IndexError, subprocess.TimeoutExpired):
+        return False
 
 
 needs_ansible_kit = pytest.mark.skipif(not _apgkit_available(), reason="ansible-playbook with agentpg-kit installed in its environment is needed")

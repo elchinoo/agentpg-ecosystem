@@ -247,7 +247,7 @@ def private_config(text: str) -> Iterator[tuple[str, tuple[int, ...]]]:
         finally:
             os.close(r)
         return
-    base = "/dev/shm" if os.path.isdir("/dev/shm") and os.access("/dev/shm", os.W_OK) else None
+    base = "/dev/shm" if os.path.isdir("/dev/shm") and os.access("/dev/shm", os.W_OK) else None      # nosec B108  (RAM-backed on purpose; the directory is mkdtemp-fresh, 0700)
     tmp = tempfile.mkdtemp(prefix="ecoctl-mcp-", dir=base)                # mode 0700
     old = {}
 
