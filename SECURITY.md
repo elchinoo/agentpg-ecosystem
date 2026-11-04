@@ -115,3 +115,14 @@ database logins as module arguments (hosts target only); `ansible-playbook -vvv`
   differing fields, adds missing aliases, and removes extras only with `--prune-aliases`. It never touches keys; the gateway's own audit log
   records the change.
 - `ecoctl status` and `ecoctl llm test` make one tiny chat call with an app's key from the state file; keys are never printed or logged.
+
+## The Docker development stack (`docker/`) is a development environment
+
+`make dev-up` runs the whole ecosystem on one machine. What it does protect: it uses **sealed boot** like the fleet (no database URL or secret in `docker/compose.yml`, in a file on the host,
+or in a container's environment; each app holds one passphrase-encrypted blob delivered as a compose secret from the environment of the `ecoctl` process), the generated secrets are in
+`.ecosystem-dev/state.json` encrypted with the same passphrase, every role is a non-superuser that owns only its database, and every published port is bound to 127.0.0.1.
+
+What it does **not** protect, and is not meant to: it is plain http (a local-only convenience; the kit accepts http only for `localhost` hosts), all databases share one Postgres server and one
+volume that is not encrypted, the superuser password and the blobs pass through the environment of a short-lived `docker compose` process (readable by the same user and root), Docker keeps
+the container files (including the blob, which is ciphertext) in its VM, anyone with Docker access on the machine can read memory and files of the unsealed containers, the AIDB image
+contains EDB's licensed software (do not push or share it), and nothing here is hardened for a shared host. Never use the stack's passphrase for anything real, and do not expose its ports.

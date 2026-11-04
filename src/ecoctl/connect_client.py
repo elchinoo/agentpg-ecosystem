@@ -38,7 +38,7 @@ def check_url(url: str, what: str) -> str:
     host = parts.hostname or ""
     if parts.scheme == "https" and host:
         return url.rstrip("/")
-    if parts.scheme == "http" and host in LOCAL_HOSTS:
+    if parts.scheme == "http" and (host in LOCAL_HOSTS or host.endswith(".localhost")):          # `*.localhost` resolves to loopback (RFC 6761); the kit accepts it too
         return url.rstrip("/")
     raise ConnectError(f"the {what} URL must be https (plain http is accepted for localhost only), got {parts.scheme or 'none'}://{host}")
 

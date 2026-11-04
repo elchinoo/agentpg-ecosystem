@@ -7,6 +7,7 @@ from pathlib import Path
 
 import httpx
 
+from . import devstack
 from . import insights as insights_mod
 from . import mcp as mcp_mod
 from . import seal as seal_mod
@@ -197,6 +198,61 @@ def cmd_unseal(args, ctx: Context | None = None) -> int:
             print(f"{app.key}: FAILED: {exc}", file=sys.stderr)
             failed += 1
     return 2 if failed else 0
+
+
+def cmd_dev(args) -> int:
+    """`ecoctl dev ...`: the Docker development stack (docker/README.md). Needs docker compose; the state (generated secrets) is .ecosystem-dev/state.json, encrypted."""
+    m = load(args.file)
+    compose = Path(args.compose) if args.compose else Path(args.file).resolve().parent / "docker" / "compose.yml"
+    try:
+        if args.action == "render":
+            text = devstack.render(m)
+            if args.check:
+                same = compose.exists() and compose.read_text() == text
+                print("compose.yml matches the manifest" if same else f"{compose} differs from the manifest: run `ecoctl dev render`")
+                return 0 if same else 1
+            compose.write_text(text)
+            print(f"wrote {compose}")
+            return 0
+        state = State(Path(args.dev_state))
+        ctx = Context(m, state, None)                                                  # type: ignore[arg-type]  (no AgentPG in the Docker stack)
+        stack = devstack.Stack(ctx, compose, include={a.strip() for a in args.include.split(",") if a.strip()} if args.include else None)
+        if args.action == "up":
+            stack.up(build=not args.no_build, recreate={a.strip() for a in args.recreate.split(",") if a.strip()} if args.recreate else None)
+            return 0
+        if args.action == "unseal":
+            state.require_passphrase()
+            bad = 0
+            for app in stack.active():
+                if args.apps and app.key not in args.apps:
+                    continue
+                try:
+                    print(f"{app.key}: {stack.unseal(app)}")
+                except (seal_mod.SealError, devstack.DevError, httpx.HTTPError) as exc:
+                    print(f"{app.key}: FAILED: {exc}", file=sys.stderr)
+                    bad += 1
+            return 2 if bad else 0
+        if args.action == "status":
+            return stack.status()
+        if args.action == "test":
+            results = devstack.smoke(stack)
+            for name, ok, detail in results:
+                print(f"{'ok  ' if ok else 'FAIL'} {name}{': ' + detail if detail else ''}")
+            return 0 if all(ok for _, ok, _ in results) else 1
+        if args.action == "down":
+            stack.down(args.volumes)
+            return 0
+        if args.action == "password":
+            pw = (state.data.get("dev") or {}).get("admin_password")
+            if not pw:
+                print("no dev-admin password yet: run `ecoctl dev up`", file=sys.stderr)
+                return 1
+            print(pw)
+            return 0
+    except (devstack.DevError, seal_mod.SealError, IdentityError, GatewayError, ConnectError, httpx.HTTPError) as exc:
+        print(f"dev: {exc}", file=sys.stderr)
+        return 1
+    return 1
 
 
 def cmd_seal_passphrase(args) -> int:
@@ -618,11 +674,23 @@ def main(argv: list[str] | None = None) -> int:
         if name == "claude":
             sp.add_argument("--project", action="store_true", help="project scope: print the .mcp.json content")
             sp.add_argument("--write", action="store_true", help="with --project: merge the entries into ./.mcp.json")
+    dv = sub.add_parser("dev", help="the Docker development stack: the whole fleet on this machine, sealed like the real one (docker/README.md)")
+    dv.add_argument("action", choices=["render", "up", "unseal", "status", "test", "down", "password"],
+                    help="render: write docker/compose.yml from the manifest (--check: only compare); up: build, start, seal, unseal, register, connect (safe to repeat); "
+                         "unseal: after a restart; status; test: smoke checks; down: stop (-v also deletes the databases and the state); password: the dev-admin login")
+    dv.add_argument("apps", nargs="*", metavar="APP", help="unseal: only these apps")
+    dv.add_argument("--compose", help="the compose file (default docker/compose.yml next to the manifest)")
+    dv.add_argument("--dev-state", default=str(devstack.DEV_STATE_DIR), help="where the stack keeps its generated secrets (default .ecosystem-dev)")
+    dv.add_argument("--check", action="store_true", help="render: do not write, exit 1 if the file differs")
+    dv.add_argument("--no-build", action="store_true", help="up: do not build images (use the ones that exist)")
+    dv.add_argument("--include", help="up: comma-separated apps that are skipped by default because they cannot boot sealed yet (devstack.NOT_SEALABLE)")
+    dv.add_argument("--recreate", help="up: comma-separated apps whose container is created afresh (a new image, a new blob)")
+    dv.add_argument("-v", "--volumes", action="store_true", help="down: also delete the database volume and the stack's state file")
     args = p.parse_args(argv)
     try:
         commands = {"validate": cmd_validate, "plan": cmd_plan, "apply": cmd_apply, "status": cmd_status, "env": cmd_env, "db": cmd_db, "recreate": cmd_recreate, "unlock": cmd_unlock,
                     "unseal": cmd_unseal, "seal-passphrase": cmd_seal_passphrase,
-                    "llm": cmd_llm, "connect": cmd_connect, "insights": cmd_insights, "mcp": cmd_mcp}
+                    "llm": cmd_llm, "dev": cmd_dev, "connect": cmd_connect, "insights": cmd_insights, "mcp": cmd_mcp}
         return commands[args.cmd](args)
     except ManifestError as exc:
         print(f"manifest error: {exc}", file=sys.stderr)

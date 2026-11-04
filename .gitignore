@@ -17,3 +17,4 @@ docs/video-components/out/
 *.pem
 *.dbkey
 api_key
+.ecosystem-dev/
