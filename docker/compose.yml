@@ -226,6 +226,8 @@ services:
       LLM_BASE_URL: http://llmgw.localhost:8102/v1
       LLM_CHAT_MODEL: chat-default
       PORT: '8108'
+      SHOPFRONT_DEV_HTTP: '1'
+      SHOPFRONT_DEV_PAYBROKER_HOSTS: paybroker,paybroker.localhost
       SHOPFRONT_OIDC_CLIENT_ID: shopfront
       SHOPFRONT_OIDC_ISSUER: http://identity.localhost:8101
       SHOPFRONT_PAYBROKER_URL: http://paybroker.localhost:8105

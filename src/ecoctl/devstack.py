@@ -71,6 +71,8 @@ DEV_ENV = {"identity": {"IDENTITY_DEV_HTTP": "1"},
            "citypulse": {"CITYPULSE_ROLE": "all", "CITYPULSE_CITY": "paris", "SIM_SENSORS": "400"},
            # PayBroker: http `*.localhost` browser origins (ShopFront here) only with DEV_HTTP, and webhooks to exactly these hosts (its SSRF guard stays on for every other private address;
            # PAYBROKER_ALLOW_PRIVATE_URLS is not set). The host is the one ShopFront's webhook URL uses.
+           # ShopFront: calls PayBroker at exactly these host names though they are private addresses (its guard stays on for every other one; SHOPFRONT_ALLOW_PRIVATE_URLS is not set)
+           "shopfront": {"SHOPFRONT_DEV_HTTP": "1", "SHOPFRONT_DEV_PAYBROKER_HOSTS": "paybroker,paybroker.localhost"},
            "paybroker": {"PAYBROKER_DEV_HTTP": "1", "PAYBROKER_DEV_WEBHOOK_HOSTS": "shopfront,shopfront.localhost"}}
 DB_NAME = re.compile(r"^[a-z][a-z0-9_]{1,30}$")
 # AIDB's http egress (dev option) is allowed to an IP literal only, never to a name, so the gateway gets a fixed address on a fixed network for `aidb-setup --agent`

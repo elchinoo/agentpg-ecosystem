@@ -238,3 +238,11 @@ def test_aidb_status_reads_each_opted_in_apps_readyz(tmp_path):
     rows = {a: (s, d) for a, s, d in aidb.status(NS(manifest=m, state=st), Http())}
     assert rows["trustdesk"][0] == "ready" and rows["pagerlens"][0] == "tampered" and "pl_fence" in rows["pagerlens"][1]
     assert rows["paybroker"][0] == "unreachable" and rows["citypulse"][0] == "no url"
+
+
+def test_shopfront_dev_settings_are_on_shopfront_only_and_no_private_url_flag_is_set_anywhere():
+    svc = yaml.safe_load(COMPOSE.read_text())["services"]
+    assert svc["shopfront"]["environment"]["SHOPFRONT_DEV_HTTP"] == "1"
+    assert svc["shopfront"]["environment"]["SHOPFRONT_DEV_PAYBROKER_HOSTS"] == "paybroker,paybroker.localhost"
+    assert not [k for k, v in svc.items() if k != "shopfront" and any(n.startswith("SHOPFRONT_DEV_") for n in v.get("environment", {}))]
+    assert not [(k, n) for k, v in svc.items() for n in v.get("environment", {}) if n.endswith("ALLOW_PRIVATE_URLS")], "no SSRF guard is switched off"

@@ -117,8 +117,8 @@ After `aidb-setup`, `ecoctl dev aidb-setup` does what an operator would: it wait
 
 ## Dev-only switches on PayBroker, and CityPulse's data
 
-`PAYBROKER_DEV_HTTP=1` and `PAYBROKER_DEV_WEBHOOK_HOSTS=shopfront,shopfront.localhost` are set on the PayBroker container only (a test checks that no other service has any `PAYBROKER_DEV_*` and that `PAYBROKER_ALLOW_PRIVATE_URLS` is not set anywhere):
-http `*.localhost` origins, and webhooks to exactly those host names; every other private address is still refused. They are for this stack, never for a published image.
+`PAYBROKER_DEV_HTTP=1` and `PAYBROKER_DEV_WEBHOOK_HOSTS=shopfront,shopfront.localhost` are set on the PayBroker container only, and `SHOPFRONT_DEV_HTTP=1` and `SHOPFRONT_DEV_PAYBROKER_HOSTS=paybroker,paybroker.localhost` on the ShopFront container only
+(tests check that no other service has them and that no `*_ALLOW_PRIVATE_URLS` is set anywhere): http `*.localhost` origins, and calls or webhooks to exactly those host names; every other private address is still refused. They are for this stack, never for a published image. With them `connect` ShopFront to PayBroker passes (origin, keys, webhook and ShopFront's own connection test).
 
 CityPulse runs its own built-in simulator here (`CITYPULSE_ROLE=all`, `CITYPULSE_CITY=paris`, 400 sensors): CityPulse Simulator's targets may not be on a private address, so it cannot feed it. `ecoctl dev burst [--seconds N]` presses CityPulse's burst button so that bursts and incidents exist for
 `/api/ask` ("which districts lost the most sensors during the last burst?").
@@ -127,7 +127,6 @@ CityPulse runs its own built-in simulator here (`CITYPULSE_ROLE=all`, `CITYPULSE
 
 ## Known gaps (2026-11-04)
 
-* **ShopFront's connection test to PayBroker fails** (secret and publishable key): ShopFront refuses a PayBroker on a private address and its only switch is `SHOPFRONT_ALLOW_PRIVATE_URLS=true` (not set). The webhook part of `connect` now works.
 * CityPulse Simulator cannot feed CityPulse (private target; `CPSIM_ALLOW_PRIVATE_URLS` not set), so CityPulse simulates its own city.
-* Real models write wrong SQL for CityPulse's questions (docs/10, second round); PagerLens answers a failed AIDB run with HTTP 500.
+* A real model still follows instructions injected into evidence (PagerLens) and calls the built-in `sleep` tool on its own (PayBroker triage); the purposes refuse it (docs/10).
 * PostGIS and EDB's platform extensions are not in the image; CityPulse's geography and the query advisor degrade as they do on a platform without them.
