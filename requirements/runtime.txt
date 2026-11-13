@@ -17,9 +17,9 @@ anyio==4.15.1 \
     # via
     #   httpx
     #   starlette
-authlib==1.9.4 \
-    --hash=sha256:1b092ea87ba11cf3bd06d38ec993d82bc6255995fcd85ee436cbbba1d050b2fc \
-    --hash=sha256:f55a25f561f1f157ceca64da9df776f469f23715ac89ee338aa2f83dc9774e13
+authlib==1.9.5 \
+    --hash=sha256:3f031d5e9b6486089e91e8f7f1b68f36275f3151c66460d650fc90d420545fd7 \
+    --hash=sha256:e32a63e3d869196b61816b2602231862179a2ffc29358c009d1f022c8b86a8b2
     # via agentpg-kit
 certifi==2026.10.23 \
     --hash=sha256:a9895e6e2758b371e0545e321a3a8fd1fcfd9829ada8824a936dfb16aaaf36cd \
